@@ -27,14 +27,14 @@ use widgets::WidgetSource;
 
 pub const DEFAULT_MAX_BODY_SIZE: usize = 5 * 1024 * 1024;
 
-pub fn build_app(state: AppState, max_body_size: Option<usize>) -> Router {
+pub fn build_app(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
         .expose_headers(Any);
 
-    let max_body = max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE);
+    let max_body = state.max_response_body;
 
     let app: Router<AppState> = Router::new();
     let app = proxy_routes(app);
@@ -51,6 +51,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub tui_state: SharedTuiState,
     pub sessions: MemorySessionStore,
+    pub max_response_body: usize,
 }
 
 #[tokio::main]
@@ -183,6 +184,7 @@ async fn run_gateway(cfg: GatewayConfig) {
         csp_mode: cfg.csp_mode,
     };
 
+    let max_body = cfg.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE);
     let state = AppState {
         mcp_upstream: mcp.clone(),
         widget_source,
@@ -190,12 +192,13 @@ async fn run_gateway(cfg: GatewayConfig) {
         http_client: reqwest::Client::new(),
         tui_state: tui_state.clone(),
         sessions: MemorySessionStore::new(),
+        max_response_body: max_body,
     };
 
     let health_state = state.clone();
     let tui_sessions = state.sessions.clone();
 
-    let app = build_app(state, cfg.max_body_size);
+    let app = build_app(state);
 
     log_startup(
         &tui_state,
