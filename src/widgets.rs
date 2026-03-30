@@ -3,6 +3,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::AppState;
 use crate::display::log_request;
@@ -25,7 +26,13 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
     match &state.widget_source {
         Some(WidgetSource::Proxy(base_url)) => {
             let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-            match state.http_client.get(&url).send().await {
+            match state
+                .http_client
+                .get(&url)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+            {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     let mut headers = HeaderMap::new();
@@ -100,7 +107,13 @@ pub async fn fetch_widget_html(state: &AppState, widget_name: &str) -> Option<St
                 base_url.trim_end_matches('/'),
                 widget_name
             );
-            let resp = state.http_client.get(&url).send().await.ok()?;
+            let resp = state
+                .http_client
+                .get(&url)
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+                .ok()?;
             if !resp.status().is_success() {
                 return None;
             }
@@ -199,7 +212,12 @@ pub async fn discover_widget_names(state: &AppState) -> Vec<String> {
             let mut found = vec![];
             for name in &candidates {
                 let url = format!("{base}/src/{name}/index.html");
-                if let Ok(resp) = state.http_client.head(&url).send().await
+                if let Ok(resp) = state
+                    .http_client
+                    .head(&url)
+                    .timeout(Duration::from_secs(10))
+                    .send()
+                    .await
                     && resp.status().is_success()
                 {
                     found.push(name.to_string());

@@ -148,6 +148,8 @@ struct FileConfig {
     max_request_body_size: Option<usize>,
     max_response_body_size: Option<usize>,
     max_concurrent_upstream: Option<usize>,
+    connect_timeout: Option<u64>,
+    request_timeout: Option<u64>,
 
     // -- Legacy flat fields (backward compat) --
     relay_domain: Option<String>,
@@ -235,6 +237,8 @@ pub struct GatewayConfig {
     pub max_request_body_size: Option<usize>,
     pub max_response_body_size: Option<usize>,
     pub max_concurrent_upstream: Option<usize>,
+    pub connect_timeout: Option<u64>,
+    pub request_timeout: Option<u64>,
 }
 
 impl GatewayConfig {
@@ -552,6 +556,8 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         max_request_body_size: file.max_request_body_size,
         max_response_body_size: file.max_response_body_size,
         max_concurrent_upstream: file.max_concurrent_upstream,
+        connect_timeout: file.connect_timeout,
+        request_timeout: file.request_timeout,
     })
 }
 
