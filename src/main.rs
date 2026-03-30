@@ -79,6 +79,9 @@ async fn run_gateway(cfg: GatewayConfig) {
 
     let mcp = cfg.mcp.expect("mcp is required in mcpr.toml or --mcp");
 
+    // Validate MCP URL format
+    validate_mcp_url(&mcp);
+
     let widget_source = cfg.widgets.as_ref().map(|w| {
         if w.starts_with("http://") || w.starts_with("https://") {
             WidgetSource::Proxy(w.clone())
@@ -222,6 +225,9 @@ async fn run_gateway(cfg: GatewayConfig) {
         )),
     };
 
+    // Initial connectivity probe — warn early if the MCP URL seems wrong
+    probe_mcp_upstream(&mcp, &state.http_client, &tui_state).await;
+
     let health_state = state.clone();
     let tui_sessions = state.sessions.clone();
 
@@ -255,6 +261,199 @@ async fn run_gateway(cfg: GatewayConfig) {
     tui_handle.await.unwrap();
 }
 
+/// Validate MCP URL format at startup. Exits with an error for clearly invalid URLs,
+/// warns for suspicious patterns that might indicate a misconfiguration.
+fn validate_mcp_url(url: &str) {
+    // Must be parseable as a URL
+    let parsed = match url::Url::parse(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!(
+                "\n  {}: invalid MCP URL \"{}\": {}",
+                colored::Colorize::red("error"),
+                url,
+                e,
+            );
+            eprintln!(
+                "  {} Expected format: http://host:port or https://host/path\n",
+                colored::Colorize::dimmed("hint"),
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Must have http or https scheme
+    match parsed.scheme() {
+        "http" | "https" => {}
+        scheme => {
+            eprintln!(
+                "\n  {}: unsupported scheme \"{}\" in MCP URL \"{}\"",
+                colored::Colorize::red("error"),
+                scheme,
+                url,
+            );
+            eprintln!(
+                "  {} MCP URLs must use http:// or https://\n",
+                colored::Colorize::dimmed("hint"),
+            );
+            std::process::exit(1);
+        }
+    }
+
+    // Must have a host
+    if parsed.host_str().is_none() {
+        eprintln!(
+            "\n  {}: MCP URL \"{}\" has no host",
+            colored::Colorize::red("error"),
+            url,
+        );
+        eprintln!(
+            "  {} Expected format: http://host:port or https://host/path\n",
+            colored::Colorize::dimmed("hint"),
+        );
+        std::process::exit(1);
+    }
+}
+
+/// Probe the MCP upstream at startup by sending an `initialize` JSON-RPC request.
+/// This validates both connectivity and that the endpoint speaks MCP protocol.
+async fn probe_mcp_upstream(url: &str, client: &reqwest::Client, tui_state: &SharedTuiState) {
+    let (status, warning) = check_mcp_endpoint(url, client).await;
+    let mut s = tui_state.lock().unwrap();
+    s.mcp_status = status;
+    s.mcp_warning = warning;
+}
+
+/// Send an MCP `initialize` request and classify the result.
+/// Returns (status, optional warning message).
+async fn check_mcp_endpoint(
+    url: &str,
+    client: &reqwest::Client,
+) -> (tui::ConnectionStatus, Option<String>) {
+    let init_body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "mcpr-probe",
+                "version": "0.1.0"
+            }
+        }
+    });
+
+    let resp = match client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&init_body)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let hint = if e.is_connect() {
+                "Cannot connect. Is the MCP server running?"
+            } else if e.is_timeout() {
+                "Connection timed out. Check host and port."
+            } else {
+                "Cannot reach server. Check the URL."
+            };
+            return (tui::ConnectionStatus::Disconnected, Some(hint.to_string()));
+        }
+    };
+
+    let status_code = resp.status().as_u16();
+
+    // Read the body (capped to avoid OOM on non-MCP endpoints)
+    let body_bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(_) => {
+            return (
+                tui::ConnectionStatus::Connected,
+                Some("Server reachable but response unreadable".to_string()),
+            );
+        }
+    };
+
+    // Try to parse as JSON-RPC response (possibly SSE-wrapped)
+    let body_text = String::from_utf8_lossy(&body_bytes);
+
+    // Handle SSE-wrapped response: extract JSON from "data: {...}\n\n"
+    let json_str = if body_text.trim_start().starts_with("data:") {
+        body_text
+            .lines()
+            .find_map(|line| line.strip_prefix("data:").map(|d| d.trim().to_string()))
+            .unwrap_or_default()
+    } else {
+        body_text.to_string()
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(_) => {
+            // Server responded but not with JSON — probably not an MCP server
+            let hint = if status_code == 404 {
+                "Server returned 404. Check the MCP endpoint path."
+            } else if (300..400).contains(&status_code) {
+                "Server returned a redirect. Check the URL."
+            } else if body_text.trim_start().starts_with('<') {
+                "Server returned HTML, not JSON-RPC. Not an MCP endpoint."
+            } else {
+                "Did not return JSON-RPC. Not an MCP endpoint?"
+            };
+            return (tui::ConnectionStatus::NotMcp, Some(hint.to_string()));
+        }
+    };
+
+    // Check if it's a JSON-RPC 2.0 response
+    if parsed.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return (
+            tui::ConnectionStatus::NotMcp,
+            Some("Response is JSON but not JSON-RPC 2.0.".to_string()),
+        );
+    }
+
+    // Check for error response
+    if let Some(err) = parsed.get("error") {
+        let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
+        let msg = err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown error");
+        // Method not found means it's JSON-RPC but doesn't support MCP
+        if code == -32601 {
+            return (
+                tui::ConnectionStatus::NotMcp,
+                Some("JSON-RPC server but 'initialize' method not found.".to_string()),
+            );
+        }
+        return (
+            tui::ConnectionStatus::Connected,
+            Some(format!("MCP init error: {msg}")),
+        );
+    }
+
+    // Check for valid initialize result with serverInfo
+    if let Some(result) = parsed.get("result") {
+        if result.get("serverInfo").is_some() || result.get("capabilities").is_some() {
+            // Valid MCP server
+            return (tui::ConnectionStatus::Connected, None);
+        }
+        // Has a result but no serverInfo — might be MCP-ish but unexpected
+        return (
+            tui::ConnectionStatus::Connected,
+            Some("Server responded but missing serverInfo in initialize result.".to_string()),
+        );
+    }
+
+    // Fallback — got JSON-RPC but couldn't classify
+    (tui::ConnectionStatus::Connected, None)
+}
+
 /// Periodically check MCP upstream and widget source connectivity.
 async fn health_check_loop(app_state: AppState) {
     let http = reqwest::Client::builder()
@@ -263,11 +462,8 @@ async fn health_check_loop(app_state: AppState) {
         .unwrap();
 
     loop {
-        // Check MCP upstream
-        let mcp_status = match http.get(&app_state.mcp_upstream).send().await {
-            Ok(_) => tui::ConnectionStatus::Connected,
-            Err(_) => tui::ConnectionStatus::Disconnected,
-        };
+        // Check MCP upstream with protocol-level validation
+        let (mcp_status, mcp_warning) = check_mcp_endpoint(&app_state.mcp_upstream, &http).await;
 
         // Discover widgets (reuses shared logic from widgets.rs)
         let names = widgets::discover_widget_names(&app_state).await;
@@ -287,6 +483,7 @@ async fn health_check_loop(app_state: AppState) {
         {
             let mut s = app_state.tui_state.lock().unwrap();
             s.mcp_status = mcp_status;
+            s.mcp_warning = mcp_warning;
             s.widgets_status = widgets_status;
             s.widget_count = widget_count;
             s.widget_names = names;

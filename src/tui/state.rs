@@ -17,6 +17,8 @@ pub enum ConnectionStatus {
     Connecting,
     Connected,
     Evicted,
+    /// Server is reachable but does not speak MCP protocol.
+    NotMcp,
 }
 
 impl ConnectionStatus {
@@ -27,6 +29,7 @@ impl ConnectionStatus {
             Self::Connecting => "Connecting…",
             Self::Connected => "Connected",
             Self::Evicted => "Evicted",
+            Self::NotMcp => "Not MCP",
         }
     }
 }
@@ -131,6 +134,7 @@ pub struct TuiState {
     pub widgets_status: ConnectionStatus,
     pub widget_count: Option<usize>,
     pub widget_names: Vec<String>,
+    pub mcp_warning: Option<String>,
     pub started_at: Instant,
     pub request_count: u64,
 
@@ -157,6 +161,7 @@ impl TuiState {
             widgets_status: ConnectionStatus::Unknown,
             widget_count: None,
             widget_names: Vec::new(),
+            mcp_warning: None,
             started_at: Instant::now(),
             request_count: 0,
             active_tab: Tab::Requests,
