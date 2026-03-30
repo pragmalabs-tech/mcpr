@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use tower_http::cors::{Any, CorsLayer};
 
 use config::{GatewayConfig, Mode};
@@ -23,6 +24,24 @@ use rewrite::RewriteConfig;
 use session::MemorySessionStore;
 use tui::SharedTuiState;
 use widgets::WidgetSource;
+
+pub const DEFAULT_MAX_BODY_SIZE: usize = 5 * 1024 * 1024;
+
+pub fn build_app(state: AppState, max_body_size: Option<usize>) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any)
+        .expose_headers(Any);
+
+    let max_body = max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE);
+
+    let app: Router<AppState> = Router::new();
+    let app = proxy_routes(app);
+    app.with_state(state)
+        .layer(DefaultBodyLimit::max(max_body))
+        .layer(cors)
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -173,18 +192,10 @@ async fn run_gateway(cfg: GatewayConfig) {
         sessions: MemorySessionStore::new(),
     };
 
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any)
-        .expose_headers(Any);
-
     let health_state = state.clone();
     let tui_sessions = state.sessions.clone();
 
-    let app: Router<AppState> = Router::new();
-    let app = proxy_routes(app);
-    let app = app.with_state(state).layer(cors);
+    let app = build_app(state, cfg.max_body_size);
 
     log_startup(
         &tui_state,

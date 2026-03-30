@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Bytes;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -147,10 +148,14 @@ pub async fn start_relay(cfg: RelayConfig) {
         auth,
     });
 
+    const DEFAULT_MAX_BODY_SIZE: usize = 5 * 1024 * 1024;
+    let max_body = cfg.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE);
+
     let app = Router::new()
         .route("/_tunnel/register", any(handle_register))
         .fallback(any(handle_tunnel_request))
-        .with_state(state);
+        .with_state(state)
+        .layer(DefaultBodyLimit::max(max_body));
 
     let port = cfg.port;
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
