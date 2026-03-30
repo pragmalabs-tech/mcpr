@@ -862,7 +862,11 @@ mod tests {
     // ── DefaultBodyLimit integration ──
 
     /// Create a test AppState pointing at the given upstream URL.
-    fn test_app_state_with_limit(upstream_url: &str, max_body: usize) -> crate::AppState {
+    fn test_app_state_with_limit(
+        upstream_url: &str,
+        max_request: usize,
+        max_response: usize,
+    ) -> crate::AppState {
         use std::sync::Arc;
         use tokio::sync::RwLock;
         crate::AppState {
@@ -878,7 +882,8 @@ mod tests {
             http_client: reqwest::Client::new(),
             tui_state: crate::tui::new_shared_state(),
             sessions: crate::session::MemorySessionStore::new(),
-            max_response_body: max_body,
+            max_request_body: max_request,
+            max_response_body: max_response,
         }
     }
 
@@ -893,7 +898,7 @@ mod tests {
         tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
 
         let upstream_url = format!("http://{upstream_addr}/mcp");
-        let state = test_app_state_with_limit(&upstream_url, 1024); // 1KB limit
+        let state = test_app_state_with_limit(&upstream_url, 1024, 10 * 1024 * 1024);
         let app = crate::build_app(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -942,7 +947,7 @@ mod tests {
 
         // Proxy with 1KB response body cap
         let upstream_url = format!("http://{upstream_addr}/mcp");
-        let state = test_app_state_with_limit(&upstream_url, 1024);
+        let state = test_app_state_with_limit(&upstream_url, 5 * 1024 * 1024, 1024);
         let app = crate::build_app(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

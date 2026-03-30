@@ -145,7 +145,8 @@ struct FileConfig {
     // -- Tunnel client --
     tunnel: FileTunnelConfig,
 
-    max_body_size: Option<usize>,
+    max_request_body_size: Option<usize>,
+    max_response_body_size: Option<usize>,
 
     // -- Legacy flat fields (backward compat) --
     relay_domain: Option<String>,
@@ -230,7 +231,8 @@ pub struct GatewayConfig {
     pub tunnel_subdomain: Option<String>,
     pub no_tunnel: bool,
     pub config_path: Option<std::path::PathBuf>,
-    pub max_body_size: Option<usize>,
+    pub max_request_body_size: Option<usize>,
+    pub max_response_body_size: Option<usize>,
 }
 
 impl GatewayConfig {
@@ -421,7 +423,7 @@ fn load_relay(cli: Cli, file: FileConfig) -> Mode {
         auth_provider: cli.auth_provider.or(file.relay.auth_provider),
         auth_provider_secret: cli.auth_provider_secret.or(file.relay.auth_provider_secret),
         tokens,
-        max_body_size: file.max_body_size,
+        max_request_body_size: file.max_request_body_size,
     })
 }
 
@@ -545,7 +547,8 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         tunnel_subdomain,
         no_tunnel: cli.no_tunnel || file.no_tunnel,
         config_path,
-        max_body_size: file.max_body_size,
+        max_request_body_size: file.max_request_body_size,
+        max_response_body_size: file.max_response_body_size,
     })
 }
 
@@ -753,23 +756,35 @@ mod tests {
     }
 
     #[test]
-    fn max_body_size_parses_from_toml() {
+    fn max_request_body_size_parses_from_toml() {
         let toml_str = r#"
             mcp = "http://localhost:9000"
             port = 8080
-            max_body_size = 10485760
+            max_request_body_size = 10485760
         "#;
         let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.max_body_size, Some(10_485_760));
+        assert_eq!(config.max_request_body_size, Some(10_485_760));
     }
 
     #[test]
-    fn max_body_size_defaults_to_none() {
+    fn max_response_body_size_parses_from_toml() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+            port = 8080
+            max_response_body_size = 20971520
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.max_response_body_size, Some(20_971_520));
+    }
+
+    #[test]
+    fn body_size_defaults_to_none() {
         let toml_str = r#"
             mcp = "http://localhost:9000"
             port = 8080
         "#;
         let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.max_body_size, None);
+        assert_eq!(config.max_request_body_size, None);
+        assert_eq!(config.max_response_body_size, None);
     }
 }

@@ -148,8 +148,10 @@ pub async fn start_relay(cfg: RelayConfig) {
         auth,
     });
 
-    const DEFAULT_MAX_BODY_SIZE: usize = 5 * 1024 * 1024;
-    let max_body = cfg.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE);
+    const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 5 * 1024 * 1024;
+    let max_body = cfg
+        .max_request_body_size
+        .unwrap_or(DEFAULT_MAX_REQUEST_BODY_SIZE);
 
     let app = Router::new()
         .route("/_tunnel/register", any(handle_register))
