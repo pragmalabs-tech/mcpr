@@ -85,6 +85,8 @@ struct RelayState {
     base_domain: String,
     /// Auth mode for token validation
     auth: AuthMode,
+    /// Max tunnel response body size (decoded bytes)
+    max_response_body: usize,
 }
 
 /// How the relay validates tunnel registration tokens.
@@ -142,10 +144,16 @@ pub async fn start_relay(cfg: RelayConfig) {
         AuthMode::Open
     };
 
+    const DEFAULT_MAX_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
+    let max_response_body = cfg
+        .max_response_body_size
+        .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE);
+
     let state = Arc::new(RelayState {
         tunnels: DashMap::new(),
         base_domain: cfg.relay_domain,
         auth,
+        max_response_body,
     });
 
     const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 5 * 1024 * 1024;
@@ -542,6 +550,20 @@ async fn handle_tunnel_request(
                 ) {
                     builder = builder.header(name, val);
                 }
+            }
+
+            // Cap response body size: base64 length × 3/4 ≈ decoded size
+            let max_b64_len = state.max_response_body * 4 / 3 + 4;
+            if resp.body.as_ref().is_some_and(|b| b.len() > max_b64_len) {
+                relay_log(
+                    &subdomain,
+                    method.as_ref(),
+                    &path,
+                    502,
+                    resp.body.as_ref().map(|b| b.len()).unwrap_or(0),
+                    start.elapsed(),
+                );
+                return (StatusCode::BAD_GATEWAY, "tunnel response body too large").into_response();
             }
 
             let body_bytes = resp
