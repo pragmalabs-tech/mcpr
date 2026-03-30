@@ -11,7 +11,7 @@ mod tunnel;
 mod widgets;
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -27,6 +27,7 @@ use widgets::WidgetSource;
 
 pub const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 5 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
+pub const DEFAULT_MAX_CONCURRENT_UPSTREAM: usize = 100;
 
 pub fn build_app(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -54,6 +55,7 @@ pub struct AppState {
     pub sessions: MemorySessionStore,
     pub max_request_body: usize,
     pub max_response_body: usize,
+    pub upstream_semaphore: Arc<Semaphore>,
 }
 
 #[tokio::main]
@@ -199,6 +201,10 @@ async fn run_gateway(cfg: GatewayConfig) {
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
+        upstream_semaphore: Arc::new(Semaphore::new(
+            cfg.max_concurrent_upstream
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_UPSTREAM),
+        )),
     };
 
     let health_state = state.clone();

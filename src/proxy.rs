@@ -555,6 +555,12 @@ async fn forward_request(
     headers: &HeaderMap,
     body: &Bytes,
 ) -> Result<reqwest::Response, reqwest::Error> {
+    let _permit = state
+        .upstream_semaphore
+        .acquire()
+        .await
+        .expect("upstream semaphore closed");
+
     let mut req = state.http_client.request(method, url);
 
     for key in [header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT] {
@@ -884,6 +890,7 @@ mod tests {
             sessions: crate::session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
+            upstream_semaphore: Arc::new(tokio::sync::Semaphore::new(100)),
         }
     }
 
