@@ -25,7 +25,8 @@ use session::MemorySessionStore;
 use tui::SharedTuiState;
 use widgets::WidgetSource;
 
-pub const DEFAULT_MAX_BODY_SIZE: usize = 5 * 1024 * 1024;
+pub const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 5 * 1024 * 1024;
+pub const DEFAULT_MAX_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 pub fn build_app(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -34,12 +35,12 @@ pub fn build_app(state: AppState) -> Router {
         .allow_headers(Any)
         .expose_headers(Any);
 
-    let max_body = state.max_response_body;
+    let max_request = state.max_request_body;
 
     let app: Router<AppState> = Router::new();
     let app = proxy_routes(app);
     app.with_state(state)
-        .layer(DefaultBodyLimit::max(max_body))
+        .layer(DefaultBodyLimit::max(max_request))
         .layer(cors)
 }
 
@@ -51,6 +52,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub tui_state: SharedTuiState,
     pub sessions: MemorySessionStore,
+    pub max_request_body: usize,
     pub max_response_body: usize,
 }
 
@@ -184,7 +186,6 @@ async fn run_gateway(cfg: GatewayConfig) {
         csp_mode: cfg.csp_mode,
     };
 
-    let max_body = cfg.max_body_size.unwrap_or(DEFAULT_MAX_BODY_SIZE);
     let state = AppState {
         mcp_upstream: mcp.clone(),
         widget_source,
@@ -192,7 +193,12 @@ async fn run_gateway(cfg: GatewayConfig) {
         http_client: reqwest::Client::new(),
         tui_state: tui_state.clone(),
         sessions: MemorySessionStore::new(),
-        max_response_body: max_body,
+        max_request_body: cfg
+            .max_request_body_size
+            .unwrap_or(DEFAULT_MAX_REQUEST_BODY_SIZE),
+        max_response_body: cfg
+            .max_response_body_size
+            .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
     };
 
     let health_state = state.clone();
