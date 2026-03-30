@@ -426,6 +426,95 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
     let tunnel_token = file.tunnel_token();
     let tunnel_subdomain = file.tunnel_subdomain();
 
+    // Detect CLI overrides that differ from the config file
+    if let Some(path) = &config_path {
+        let mut diffs: Vec<(&str, &str, Option<&str>)> = Vec::new(); // (key, cli_val, file_val)
+
+        if let Some(ref cli_mcp) = cli.mcp
+            && file.mcp.as_deref() != Some(cli_mcp)
+        {
+            diffs.push(("mcp", cli_mcp, file.mcp.as_deref()));
+        }
+        if let Some(ref cli_widgets) = cli.widgets
+            && file.widgets.as_deref() != Some(cli_widgets)
+        {
+            diffs.push(("widgets", cli_widgets, file.widgets.as_deref()));
+        }
+        if let Some(cli_port) = cli.port {
+            let cli_port_str = cli_port.to_string();
+            let file_port_str = file.port.map(|p| p.to_string());
+            if file.port != Some(cli_port) {
+                // Can't borrow temporary — handle port separately below
+                drop(cli_port_str);
+                drop(file_port_str);
+            }
+        }
+
+        // Collect port diff separately since it needs owned strings
+        let port_diff = cli.port.and_then(|cp| {
+            if file.port != Some(cp) {
+                Some((cp, file.port))
+            } else {
+                None
+            }
+        });
+
+        if !diffs.is_empty() || port_diff.is_some() {
+            eprintln!(
+                "\n  {} CLI args differ from {}:",
+                colored::Colorize::yellow("!"),
+                path.display()
+            );
+            for (key, cli_val, file_val) in &diffs {
+                match file_val {
+                    Some(fv) => eprintln!(
+                        "    {} {} → {}",
+                        colored::Colorize::bold(colored::Colorize::white(*key)),
+                        colored::Colorize::dimmed(*fv),
+                        colored::Colorize::green(*cli_val)
+                    ),
+                    None => eprintln!(
+                        "    {} (unset) → {}",
+                        colored::Colorize::bold(colored::Colorize::white(*key)),
+                        colored::Colorize::green(*cli_val)
+                    ),
+                }
+            }
+            if let Some((cp, fp)) = &port_diff {
+                let cp_str = cp.to_string();
+                match fp {
+                    Some(fv) => {
+                        let fv_str = fv.to_string();
+                        eprintln!(
+                            "    {} {} → {}",
+                            colored::Colorize::bold(colored::Colorize::white("port")),
+                            colored::Colorize::dimmed(fv_str.as_str()),
+                            colored::Colorize::green(cp_str.as_str())
+                        );
+                    }
+                    None => eprintln!(
+                        "    {} (unset) → {}",
+                        colored::Colorize::bold(colored::Colorize::white("port")),
+                        colored::Colorize::green(cp_str.as_str())
+                    ),
+                }
+            }
+
+            eprint!(
+                "  {} Save to {}? [y/N] ",
+                colored::Colorize::cyan("?"),
+                path.display()
+            );
+            let mut input = String::new();
+            if std::io::stdin().read_line(&mut input).is_ok()
+                && input.trim().eq_ignore_ascii_case("y")
+            {
+                save_cli_overrides(path, &diffs, &port_diff);
+            }
+            eprintln!();
+        }
+    }
+
     let csp_domains = if cli.csp_domains.is_empty() {
         file.csp.domains
     } else {
@@ -453,6 +542,90 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         no_tunnel: cli.no_tunnel || file.no_tunnel,
         config_path,
     })
+}
+
+/// Update the TOML config file with CLI overrides.
+fn save_cli_overrides(
+    path: &std::path::Path,
+    diffs: &[(&str, &str, Option<&str>)],
+    port_diff: &Option<(u16, Option<u16>)>,
+) {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!(
+                "  {}: failed to read {}: {}",
+                colored::Colorize::yellow("warn"),
+                path.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    let mut new_contents = contents.clone();
+
+    for (key, cli_val, file_val) in diffs {
+        if file_val.is_some() {
+            // Replace existing key = "old_value" with key = "new_value"
+            // Match key = "..." or key = '...' patterns at the start of a line
+            if let Some(line) = new_contents
+                .lines()
+                .find(|l| {
+                    let trimmed = l.trim();
+                    trimmed.starts_with(&format!("{key} ="))
+                        || trimmed.starts_with(&format!("{key}="))
+                })
+                .map(|l| l.to_string())
+            {
+                new_contents = new_contents.replacen(&line, &format!("{key} = \"{cli_val}\""), 1);
+            }
+        } else {
+            // Key doesn't exist — append before first section or at end
+            let insert_line = format!("{key} = \"{cli_val}\"");
+            if let Some(pos) = new_contents.find("\n[") {
+                new_contents.insert_str(pos, &format!("\n{insert_line}"));
+            } else {
+                new_contents = format!("{}\n{insert_line}\n", new_contents.trim_end());
+            }
+        }
+    }
+
+    if let Some((cli_port, file_port)) = port_diff {
+        if file_port.is_some() {
+            if let Some(line) = new_contents
+                .lines()
+                .find(|l| {
+                    let trimmed = l.trim();
+                    trimmed.starts_with("port =") || trimmed.starts_with("port=")
+                })
+                .map(|l| l.to_string())
+            {
+                new_contents = new_contents.replacen(&line, &format!("port = {cli_port}"), 1);
+            }
+        } else {
+            let insert_line = format!("port = {cli_port}");
+            if let Some(pos) = new_contents.find("\n[") {
+                new_contents.insert_str(pos, &format!("\n{insert_line}"));
+            } else {
+                new_contents = format!("{}\n{insert_line}\n", new_contents.trim_end());
+            }
+        }
+    }
+
+    match std::fs::write(path, &new_contents) {
+        Ok(_) => eprintln!(
+            "  {} saved to {}",
+            colored::Colorize::dimmed("config"),
+            path.display()
+        ),
+        Err(e) => eprintln!(
+            "  {}: failed to write {}: {}",
+            colored::Colorize::yellow("warn"),
+            path.display(),
+            e
+        ),
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
