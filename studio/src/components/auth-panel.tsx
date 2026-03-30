@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { useStore } from "@/lib/store";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 function formatTimeRemaining(expiresAt: number | null): string {
   if (!expiresAt) return "";
@@ -251,13 +254,17 @@ export function AuthPanel() {
                     </p>
                   </div>
                   {oauth.error?.includes("client_id") && (
-                    <input
-                      type="text"
-                      placeholder="Enter client_id"
-                      value={oauth.clientId}
-                      onChange={(e) => setOAuthClientId(e.target.value)}
-                      className="w-full bg-secondary text-secondary-foreground rounded-md px-2.5 py-2 text-xs border-0 font-mono"
-                    />
+                    <div className="space-y-1">
+                      <Label className="text-[10px] text-muted-foreground">
+                        Client ID
+                      </Label>
+                      <Input
+                        type="text"
+                        value={oauth.clientId}
+                        onChange={(e) => setOAuthClientId(e.target.value)}
+                        className="h-8 text-xs font-mono"
+                      />
+                    </div>
                   )}
                   <Button
                     size="sm"
@@ -279,27 +286,40 @@ export function AuthPanel() {
                 </div>
               ) : (
                 <div className="space-y-2">
-                  <input
-                    type="text"
-                    placeholder="OAuth Client ID (optional)"
-                    value={oauth.clientId}
-                    onChange={(e) => setOAuthClientId(e.target.value)}
-                    className="w-full bg-secondary text-secondary-foreground rounded-md px-2.5 py-2 text-xs border-0 font-mono placeholder:text-muted-foreground/50"
-                  />
-                  <input
-                    type="password"
-                    placeholder="OAuth Client Secret (optional)"
-                    value={oauth.clientSecret}
-                    onChange={(e) => setOAuthClientSecret(e.target.value)}
-                    className="w-full bg-secondary text-secondary-foreground rounded-md px-2.5 py-2 text-xs border-0 font-mono placeholder:text-muted-foreground/50"
-                  />
-                  <input
-                    type="text"
-                    placeholder={`Redirect URI (${window.location.origin}/studio/oauth/callback)`}
-                    value={oauth.redirectUri}
-                    onChange={(e) => setOAuthRedirectUri(e.target.value)}
-                    className="w-full bg-secondary text-secondary-foreground rounded-md px-2.5 py-2 text-xs border-0 font-mono placeholder:text-muted-foreground/50"
-                  />
+                  <div className="space-y-1">
+                    <Label className="text-[10px] text-muted-foreground">
+                      Client ID (optional)
+                    </Label>
+                    <Input
+                      type="text"
+                      value={oauth.clientId}
+                      onChange={(e) => setOAuthClientId(e.target.value)}
+                      className="h-8 text-xs font-mono"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px] text-muted-foreground">
+                      Client Secret (optional)
+                    </Label>
+                    <Input
+                      type="password"
+                      value={oauth.clientSecret}
+                      onChange={(e) => setOAuthClientSecret(e.target.value)}
+                      className="h-8 text-xs font-mono"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label className="text-[10px] text-muted-foreground">
+                      Redirect URI
+                    </Label>
+                    <Input
+                      type="text"
+                      placeholder={`${window.location.origin}/studio/oauth/callback`}
+                      value={oauth.redirectUri}
+                      onChange={(e) => setOAuthRedirectUri(e.target.value)}
+                      className="h-8 text-xs font-mono"
+                    />
+                  </div>
                   {oauth.scopes.length > 0 && (
                     <div className="flex flex-wrap gap-1">
                       {oauth.scopes.map((scope) => {
@@ -344,15 +364,18 @@ export function AuthPanel() {
 
           {/* ── Bearer Token Tab ── */}
           {authMethod === "bearer" && (
-            <div>
+            <div className="space-y-1">
+              <Label className="text-[10px] text-muted-foreground">
+                Bearer Token
+              </Label>
               <div className="flex gap-1">
-                <input
+                <Input
                   type="password"
                   placeholder="Paste token..."
                   value={tokenDraft}
                   onChange={(e) => setToken(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && saveToken()}
-                  className="flex-1 min-w-0 bg-secondary text-secondary-foreground rounded-md px-2.5 py-2 text-xs border-0 font-mono"
+                  className="flex-1 min-w-0 h-8 text-xs font-mono"
                 />
                 {token.length > 0 ? (
                   <Button
@@ -394,7 +417,10 @@ export function AuthPanel() {
           {/* ── Custom Headers Tab ── */}
           {authMethod === "custom" && (
             <div className="space-y-2">
-              <textarea
+              <Label className="text-[10px] text-muted-foreground">
+                Custom Headers (JSON)
+              </Label>
+              <Textarea
                 placeholder={`{
   "Authorization": "Bearer your-token",
   "X-Admin-Token": "super-secret",
@@ -404,10 +430,10 @@ export function AuthPanel() {
                 onChange={(e) => setOAuthCustomHeaders(e.target.value)}
                 rows={10}
                 spellCheck={false}
-                className={`w-full bg-secondary text-secondary-foreground rounded-md px-2.5 py-2 text-xs border font-mono placeholder:text-muted-foreground/40 resize-y ${
+                className={`text-xs font-mono resize-y ${
                   oauth.customHeaders.trim() && !customHeadersValid
                     ? "border-destructive"
-                    : "border-transparent"
+                    : ""
                 }`}
               />
               {oauth.customHeaders.trim() && !customHeadersValid && (
