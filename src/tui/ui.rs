@@ -64,6 +64,7 @@ fn status_style(status: ConnectionStatus) -> (Color, &'static str) {
         ConnectionStatus::Connecting => (Color::Yellow, "◐"),
         ConnectionStatus::Disconnected => (Color::Red, "○"),
         ConnectionStatus::Evicted => (Color::Magenta, "⇄"),
+        ConnectionStatus::NotMcp => (Color::Yellow, "⚠"),
         ConnectionStatus::Unknown => (Color::DarkGray, "?"),
     }
 }
@@ -118,10 +119,6 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("  Proxy   ", Style::default().fg(Color::DarkGray)),
-        Span::raw(truncate(&s.proxy_url)),
-    ]));
-    lines.push(Line::from(vec![
         Span::styled("  Tunnel  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             truncate(&s.tunnel_url),
@@ -129,6 +126,10 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Proxy   ", Style::default().fg(Color::DarkGray)),
+        Span::raw(truncate(&s.proxy_url)),
     ]));
     lines.push(Line::from(vec![
         Span::styled("  MCP     ", Style::default().fg(Color::DarkGray)),
@@ -142,6 +143,18 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
 
     lines.push(status_line("Tunnel", s.tunnel_status));
     lines.push(status_line("MCP", s.mcp_status));
+    if let Some(ref warning) = s.mcp_warning {
+        let indent = "            ";
+        let max_warn_width = area.width.saturating_sub(2 + indent.len() as u16) as usize;
+        if max_warn_width > 0 {
+            for chunk in wrap_text(warning, max_warn_width) {
+                lines.push(Line::from(vec![
+                    Span::styled(indent, Style::default()),
+                    Span::styled(chunk, Style::default().fg(Color::Yellow)),
+                ]));
+            }
+        }
+    }
     lines.push(status_line("Widgets", s.widgets_status));
 
     lines.extend([
@@ -699,4 +712,26 @@ fn duration_color(ms: u64) -> Color {
     } else {
         Color::Red
     }
+}
+
+/// Word-wrap text to fit within `max_width` characters, breaking at word boundaries.
+fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            current_line = word.to_string();
+        } else if current_line.len() + 1 + word.len() <= max_width {
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            result.push(current_line);
+            current_line = word.to_string();
+        }
+    }
+    if !current_line.is_empty() {
+        result.push(current_line);
+    }
+    result
 }
