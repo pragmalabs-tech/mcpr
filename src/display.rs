@@ -1,4 +1,4 @@
-use crate::tui::state::{LogEntry, SharedTuiState};
+use crate::tui::SharedTuiState;
 
 /// Populate the TUI state with startup info.
 pub fn log_startup(
@@ -13,9 +13,4 @@ pub fn log_startup(
     s.tunnel_url = public_url.to_string();
     s.mcp_upstream = mcp_upstream.to_string();
     s.widgets = widgets.unwrap_or("(none)").to_string();
-}
-
-/// Push a request log entry to the TUI state.
-pub fn log_request(state: &SharedTuiState, entry: LogEntry) {
-    state.lock().unwrap().push_log(entry);
 }

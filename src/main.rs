@@ -1,6 +1,7 @@
 mod config;
 mod display;
 mod jsonrpc;
+pub mod logger;
 mod onboarding;
 mod proxy;
 mod relay;
@@ -20,6 +21,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use config::{GatewayConfig, Mode};
 use display::log_startup;
+use logger::{DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, TuiSink};
 use proxy::proxy_routes;
 use rewrite::RewriteConfig;
 use session::MemorySessionStore;
@@ -55,6 +57,7 @@ pub struct AppState {
     pub rewrite_config: Arc<RwLock<RewriteConfig>>,
     pub http_client: reqwest::Client,
     pub tui_state: SharedTuiState,
+    pub logger: LogRouter,
     pub sessions: MemorySessionStore,
     pub max_request_body: usize,
     pub max_response_body: usize,
@@ -200,6 +203,38 @@ async fn run_gateway(cfg: GatewayConfig) {
     let request_timeout =
         Duration::from_secs(cfg.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS));
 
+    // Build log sinks
+    let mut sinks: Vec<Box<dyn LogSink>> = vec![Box::new(TuiSink::new(tui_state.clone()))];
+
+    if cfg.log_file {
+        let rotation = match cfg.log_rotation.as_deref() {
+            Some(s) if s.starts_with("size:") => {
+                let size_str = s.trim_start_matches("size:");
+                let bytes = parse_size(size_str).unwrap_or(50 * 1024 * 1024);
+                Rotation::Size(bytes)
+            }
+            _ => Rotation::Daily,
+        };
+        let dir = cfg.log_dir.unwrap_or_else(|| "./logs".to_string());
+        match FileSink::new(FileSinkConfig {
+            dir: std::path::PathBuf::from(&dir),
+            rotation,
+            max_files: DEFAULT_MAX_FILES,
+        }) {
+            Ok(sink) => {
+                sinks.push(Box::new(sink));
+            }
+            Err(e) => {
+                eprintln!(
+                    "{}: failed to init file logger: {e}",
+                    colored::Colorize::red("error"),
+                );
+            }
+        }
+    }
+
+    let log_handle = LogRouter::start(sinks);
+
     let state = AppState {
         mcp_upstream: mcp.clone(),
         widget_source,
@@ -211,6 +246,7 @@ async fn run_gateway(cfg: GatewayConfig) {
             .build()
             .expect("Failed to build HTTP client"),
         tui_state: tui_state.clone(),
+        logger: log_handle.router.clone(),
         sessions: MemorySessionStore::new(),
         max_request_body: cfg
             .max_request_body_size
@@ -259,6 +295,24 @@ async fn run_gateway(cfg: GatewayConfig) {
     });
 
     tui_handle.await.unwrap();
+
+    // Gracefully flush log sinks
+    log_handle.shutdown().await;
+}
+
+/// Parse a human-readable size string like "50MB", "100KB", "1GB" into bytes.
+fn parse_size(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix("GB") {
+        (n, 1024 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("MB") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("KB") {
+        (n, 1024)
+    } else {
+        (s, 1)
+    };
+    num_str.trim().parse::<u64>().ok().map(|n| n * multiplier)
 }
 
 /// Validate MCP URL format at startup. Exits with an error for clearly invalid URLs,

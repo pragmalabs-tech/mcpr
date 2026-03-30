@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::AppState;
-use crate::display::log_request;
-use crate::tui::state::LogEntry;
+use crate::logger::LogEntry;
 
 // ── Types ───────────────────────────────────────────────
 
@@ -43,8 +42,7 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
                     let status_code =
                         StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
                     let bytes = resp.bytes().await.unwrap_or_default();
-                    log_request(
-                        &state.tui_state,
+                    state.logger.emit(
                         LogEntry::new("GET", path, status, "widget")
                             .upstream(&url)
                             .size(bytes.len()),
@@ -52,10 +50,9 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
                     (status_code, headers, bytes).into_response()
                 }
                 Err(e) => {
-                    log_request(
-                        &state.tui_state,
-                        LogEntry::new("GET", path, 502, "widget error").upstream(&url),
-                    );
+                    state
+                        .logger
+                        .emit(LogEntry::new("GET", path, 502, "widget error").upstream(&url));
                     (StatusCode::BAD_GATEWAY, format!("Widget proxy error: {e}")).into_response()
                 }
             }
@@ -64,8 +61,7 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
             let file_path = PathBuf::from(dir).join(path.trim_start_matches('/'));
             match tokio::fs::read(&file_path).await {
                 Ok(bytes) => {
-                    log_request(
-                        &state.tui_state,
+                    state.logger.emit(
                         LogEntry::new("GET", path, 200, "widget")
                             .upstream(file_path.to_str().unwrap_or(path))
                             .size(bytes.len()),
@@ -77,19 +73,17 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
                     (StatusCode::OK, headers, bytes).into_response()
                 }
                 Err(_) => {
-                    log_request(
-                        &state.tui_state,
-                        LogEntry::new("GET", path, 404, "not found"),
-                    );
+                    state
+                        .logger
+                        .emit(LogEntry::new("GET", path, 404, "not found"));
                     StatusCode::NOT_FOUND.into_response()
                 }
             }
         }
         None => {
-            log_request(
-                &state.tui_state,
-                LogEntry::new("GET", path, 404, "no widget source"),
-            );
+            state
+                .logger
+                .emit(LogEntry::new("GET", path, 404, "no widget source"));
             StatusCode::NOT_FOUND.into_response()
         }
     }
@@ -141,15 +135,16 @@ pub async fn serve_widget_html(state: &AppState, name: &str, raw: bool) -> Respo
     }
 
     let Some(html) = fetch_widget_html(state, name).await else {
-        log_request(
-            &state.tui_state,
-            LogEntry::new("GET", &format!("/widgets/{name}.html"), 404, "not found"),
-        );
+        state.logger.emit(LogEntry::new(
+            "GET",
+            &format!("/widgets/{name}.html"),
+            404,
+            "not found",
+        ));
         return (StatusCode::NOT_FOUND, format!("Widget '{name}' not found")).into_response();
     };
 
-    log_request(
-        &state.tui_state,
+    state.logger.emit(
         LogEntry::new("GET", &format!("/widgets/{name}.html"), 200, "widget raw").size(html.len()),
     );
     let mut headers = HeaderMap::new();
@@ -174,10 +169,12 @@ pub async fn list_widgets(state: &AppState) -> Response {
             })
         }).collect::<Vec<_>>(),
     });
-    log_request(
-        &state.tui_state,
-        LogEntry::new("GET", "/widgets", 200, &format!("{} widgets", names.len())),
-    );
+    state.logger.emit(LogEntry::new(
+        "GET",
+        "/widgets",
+        200,
+        &format!("{} widgets", names.len()),
+    ));
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
     (
