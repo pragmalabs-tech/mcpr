@@ -8,6 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
+use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::AppState;
@@ -19,6 +20,30 @@ use crate::tui::state::LogEntry;
 use crate::widgets::{
     fetch_widget_html, list_widgets, serve_studio, serve_widget_asset, serve_widget_html,
 };
+
+/// Read a response body with a size cap. Returns 502 if the upstream response exceeds `max_bytes`.
+async fn read_body_capped(resp: reqwest::Response, max_bytes: usize) -> Result<Bytes, Response> {
+    // Early reject if Content-Length is known and too large
+    if let Some(len) = resp.content_length()
+        && len as usize > max_bytes
+    {
+        return Err((StatusCode::BAD_GATEWAY, "upstream response too large").into_response());
+    }
+
+    let mut body =
+        Vec::with_capacity(resp.content_length().unwrap_or(0).min(max_bytes as u64) as usize);
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            (StatusCode::BAD_GATEWAY, format!("upstream read error: {e}")).into_response()
+        })?;
+        if body.len() + chunk.len() > max_bytes {
+            return Err((StatusCode::BAD_GATEWAY, "upstream response too large").into_response());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(Bytes::from(body))
+}
 
 /// Check if the response body is SSE-formatted and extract the JSON data.
 /// SSE format: `data: {...}\n\n` — possibly multiple events.
@@ -328,8 +353,11 @@ async fn handle_mcp_post(
     // Use response session ID (for initialize) or request session ID (for everything else)
     let log_session_id = resp_session_id.or(req_session_id);
 
-    // Collect full body for rewriting (POST SSE is finite)
-    let resp_bytes = resp.bytes().await.unwrap_or_default();
+    // Collect full body for rewriting (POST SSE is finite), capped to prevent OOM
+    let resp_bytes = match read_body_capped(resp, state.max_response_body).await {
+        Ok(b) => b,
+        Err(err_resp) => return err_resp,
+    };
     let upstream_ms = upstream_start.elapsed().as_millis() as u64;
     let config = state.rewrite_config.read().await;
 
@@ -406,7 +434,9 @@ async fn handle_resources_read(
         .await
         .ok()?;
 
-    let upstream_bytes = upstream_resp.bytes().await.ok()?;
+    let upstream_bytes = read_body_capped(upstream_resp, state.max_response_body)
+        .await
+        .ok()?;
     let upstream_ms = upstream_start.elapsed().as_millis() as u64;
     let json_bytes =
         extract_json_from_sse(&upstream_bytes).unwrap_or_else(|| upstream_bytes.to_vec());
@@ -458,7 +488,10 @@ async fn forward_and_passthrough(
         Ok(resp) => {
             let status = resp.status().as_u16();
             let resp_headers = resp.headers().clone();
-            let bytes = resp.bytes().await.unwrap_or_default();
+            let bytes = match read_body_capped(resp, state.max_response_body).await {
+                Ok(b) => b,
+                Err(err_resp) => return err_resp,
+            };
             let upstream_ms = upstream_start.elapsed().as_millis() as u64;
 
             // Rewrite upstream base URL → proxy URL in JSON responses
@@ -829,7 +862,7 @@ mod tests {
     // ── DefaultBodyLimit integration ──
 
     /// Create a test AppState pointing at the given upstream URL.
-    fn test_app_state(upstream_url: &str) -> crate::AppState {
+    fn test_app_state_with_limit(upstream_url: &str, max_body: usize) -> crate::AppState {
         use std::sync::Arc;
         use tokio::sync::RwLock;
         crate::AppState {
@@ -845,6 +878,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             tui_state: crate::tui::new_shared_state(),
             sessions: crate::session::MemorySessionStore::new(),
+            max_response_body: max_body,
         }
     }
 
@@ -859,8 +893,8 @@ mod tests {
         tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
 
         let upstream_url = format!("http://{upstream_addr}/mcp");
-        let state = test_app_state(&upstream_url);
-        let app = crate::build_app(state, Some(1024)); // 1KB limit
+        let state = test_app_state_with_limit(&upstream_url, 1024); // 1KB limit
+        let app = crate::build_app(state);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -884,5 +918,52 @@ mod tests {
         let large_body = vec![b'x'; 2048];
         let resp = client.post(&url).body(large_body).send().await.unwrap();
         assert_eq!(resp.status(), 413);
+    }
+
+    #[tokio::test]
+    async fn response_body_cap_rejects_oversized_upstream() {
+        use axum::routing::post;
+
+        // Upstream that returns a large response body (2KB)
+        let upstream = Router::new().route(
+            "/mcp",
+            post(|| async {
+                let big = vec![b'A'; 2048];
+                (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    big,
+                )
+            }),
+        );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
+
+        // Proxy with 1KB response body cap
+        let upstream_url = format!("http://{upstream_addr}/mcp");
+        let state = test_app_state_with_limit(&upstream_url, 1024);
+        let app = crate::build_app(state);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/mcp");
+
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let resp = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(body.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            502,
+            "oversized upstream response should be rejected"
+        );
     }
 }
