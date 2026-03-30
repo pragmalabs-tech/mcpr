@@ -256,7 +256,17 @@ async fn handle_request(
         };
     }
 
-    // 4. Everything else (DELETE, well-known, oauth, GET, POST) → MCP upstream + path
+    // 4. MCP DELETE — session close
+    if method == Method::DELETE
+        && let Some(sid) = headers.get("mcp-session-id").and_then(|v| v.to_str().ok())
+    {
+        state
+            .logger
+            .emit(LogEntry::new("DELETE", path, 0, "session:closed").session_id(sid));
+        state.sessions.remove(sid).await;
+    }
+
+    // 5. Everything else (DELETE, well-known, oauth, GET, POST) → MCP upstream + path
     let (base, _) = split_upstream(&state.mcp_upstream);
     let upstream_url = format!("{}{}", base.trim_end_matches('/'), path);
     forward_and_passthrough(&state, &upstream_url, method, path, &headers, &body, start).await
@@ -292,6 +302,11 @@ async fn handle_mcp_post(
         state.sessions.touch(sid).await;
         if mcp_method == McpMethod::Initialized {
             state.sessions.update_state(sid, SessionState::Active).await;
+            state.logger.emit(
+                LogEntry::new("POST", path, 0, "session:active")
+                    .session_id(sid)
+                    .mcp_method(method_str),
+            );
         }
     }
 
@@ -344,9 +359,18 @@ async fn handle_mcp_post(
             .sessions
             .update_state(sid, SessionState::Initialized)
             .await;
+        let mut session_log = LogEntry::new("POST", path, 0, "session:created")
+            .session_id(sid)
+            .mcp_method(method_str);
         if let Some(info) = client_info {
+            let label = match &info.version {
+                Some(v) => format!("{} {v}", info.name),
+                None => info.name.clone(),
+            };
+            session_log = session_log.client_name(&label);
             state.sessions.set_client_info(sid, info).await;
         }
+        state.logger.emit(session_log);
     }
     // Use response session ID (for initialize) or request session ID (for everything else)
     let log_session_id = resp_session_id.or(req_session_id);

@@ -35,6 +35,9 @@ pub struct LogEntry {
     pub jsonrpc_error: Option<(i64, String)>,
     /// Extra detail: tool name for tools/call, resource URI for resources/read, etc.
     pub detail: Option<String>,
+    /// Client identity from MCP initialize (e.g. "claude-desktop 1.2").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
 }
 
 impl LogEntry {
@@ -58,6 +61,7 @@ impl LogEntry {
             upstream_ms: None,
             jsonrpc_error: None,
             detail: None,
+            client_name: None,
         }
     }
 
@@ -108,6 +112,11 @@ impl LogEntry {
 
     pub fn maybe_detail(mut self, d: Option<&str>) -> Self {
         self.detail = d.map(String::from);
+        self
+    }
+
+    pub fn client_name(mut self, name: &str) -> Self {
+        self.client_name = Some(name.to_string());
         self
     }
 }
