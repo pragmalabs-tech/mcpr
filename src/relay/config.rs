@@ -12,4 +12,5 @@ pub struct RelayConfig {
     pub auth_provider_secret: Option<String>,
     /// Static token → allowed subdomains map (alternative to auth provider)
     pub tokens: HashMap<String, Vec<String>>,
+    pub max_body_size: Option<usize>,
 }

@@ -825,4 +825,64 @@ mod tests {
         headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
         assert!(!is_widget_asset("/mcp", &headers));
     }
+
+    // ── DefaultBodyLimit integration ──
+
+    /// Create a test AppState pointing at the given upstream URL.
+    fn test_app_state(upstream_url: &str) -> crate::AppState {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        crate::AppState {
+            mcp_upstream: upstream_url.to_string(),
+            widget_source: None,
+            rewrite_config: Arc::new(RwLock::new(crate::rewrite::RewriteConfig {
+                proxy_url: "http://localhost:0".to_string(),
+                proxy_domain: "localhost".to_string(),
+                mcp_upstream: upstream_url.to_string(),
+                extra_csp_domains: vec![],
+                csp_mode: crate::config::CspMode::default(),
+            })),
+            http_client: reqwest::Client::new(),
+            tui_state: crate::tui::new_shared_state(),
+            sessions: crate::session::MemorySessionStore::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn body_limit_rejects_oversized_request() {
+        use axum::routing::post;
+
+        // Mock upstream that echoes back
+        let upstream = Router::new().route("/mcp", post(|body: Bytes| async move { body }));
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(upstream_listener, upstream).await.unwrap() });
+
+        let upstream_url = format!("http://{upstream_addr}/mcp");
+        let state = test_app_state(&upstream_url);
+        let app = crate::build_app(state, Some(1024)); // 1KB limit
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/mcp");
+
+        // Small JSON-RPC body (under 1KB) → should reach upstream → 200
+        let small_body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        let resp = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body(small_body.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+
+        // Large body (2KB, over limit) → 413
+        let large_body = vec![b'x'; 2048];
+        let resp = client.post(&url).body(large_body).send().await.unwrap();
+        assert_eq!(resp.status(), 413);
+    }
 }
