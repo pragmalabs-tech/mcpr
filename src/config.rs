@@ -430,6 +430,7 @@ fn load_relay(cli: Cli, file: FileConfig) -> Mode {
         auth_provider_secret: cli.auth_provider_secret.or(file.relay.auth_provider_secret),
         tokens,
         max_request_body_size: file.max_request_body_size,
+        max_response_body_size: file.max_response_body_size,
     })
 }
 
