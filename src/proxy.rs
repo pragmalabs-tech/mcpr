@@ -224,6 +224,7 @@ async fn handle_request(
             method.clone(),
             &headers,
             &Bytes::new(),
+            true, // SSE streaming — no request timeout
         )
         .await
         {
@@ -311,7 +312,8 @@ async fn handle_mcp_post(
     // Forward to upstream MCP URL
     let upstream_url = state.mcp_upstream.trim_end_matches('/').to_string();
     let upstream_start = Instant::now();
-    let resp = match forward_request(state, &upstream_url, Method::POST, headers, body).await {
+    let resp = match forward_request(state, &upstream_url, Method::POST, headers, body, false).await
+    {
         Ok(r) => r,
         Err(e) => {
             let upstream_ms = upstream_start.elapsed().as_millis() as u64;
@@ -430,9 +432,10 @@ async fn handle_resources_read(
     // Forward to upstream to get the metadata
     let upstream_url = state.mcp_upstream.trim_end_matches('/').to_string();
     let upstream_start = Instant::now();
-    let upstream_resp = forward_request(state, &upstream_url, Method::POST, headers, raw_body)
-        .await
-        .ok()?;
+    let upstream_resp =
+        forward_request(state, &upstream_url, Method::POST, headers, raw_body, false)
+            .await
+            .ok()?;
 
     let upstream_bytes = read_body_capped(upstream_resp, state.max_response_body)
         .await
@@ -483,8 +486,9 @@ async fn forward_and_passthrough(
     body: &Bytes,
     start: Instant,
 ) -> Response {
+    let is_streaming = is_mcp_sse(headers);
     let upstream_start = Instant::now();
-    match forward_request(state, url, method.clone(), headers, body).await {
+    match forward_request(state, url, method.clone(), headers, body, is_streaming).await {
         Ok(resp) => {
             let status = resp.status().as_u16();
             let resp_headers = resp.headers().clone();
@@ -548,12 +552,15 @@ async fn forward_and_passthrough(
 }
 
 /// Send a request to the upstream server, forwarding relevant headers.
+/// When `is_streaming` is false, applies the configured request timeout.
+/// Streaming requests (SSE) skip the timeout to allow long-lived connections.
 async fn forward_request(
     state: &AppState,
     url: &str,
     method: Method,
     headers: &HeaderMap,
     body: &Bytes,
+    is_streaming: bool,
 ) -> Result<reqwest::Response, reqwest::Error> {
     let _permit = state
         .upstream_semaphore
@@ -562,6 +569,10 @@ async fn forward_request(
         .expect("upstream semaphore closed");
 
     let mut req = state.http_client.request(method, url);
+
+    if !is_streaming {
+        req = req.timeout(state.request_timeout);
+    }
 
     for key in [header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT] {
         if let Some(val) = headers.get(&key) {
@@ -885,11 +896,15 @@ mod tests {
                 extra_csp_domains: vec![],
                 csp_mode: crate::config::CspMode::default(),
             })),
-            http_client: reqwest::Client::new(),
+            http_client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap(),
             tui_state: crate::tui::new_shared_state(),
             sessions: crate::session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
+            request_timeout: std::time::Duration::from_secs(30),
             upstream_semaphore: Arc::new(tokio::sync::Semaphore::new(100)),
         }
     }

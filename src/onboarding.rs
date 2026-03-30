@@ -45,7 +45,11 @@ pub fn run_claim_flow(existing_subdomain: Option<&str>) -> ClaimFuture<'_> {
 async fn run_claim_flow_inner(
     existing_subdomain: Option<&str>,
 ) -> Result<(String, String), String> {
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .expect("Failed to build onboarding HTTP client");
 
     // 1. Get subdomain
     let subdomain = match existing_subdomain {

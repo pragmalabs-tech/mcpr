@@ -11,6 +11,7 @@ mod tunnel;
 mod widgets;
 
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
 
 use axum::Router;
@@ -28,6 +29,8 @@ use widgets::WidgetSource;
 pub const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 5 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
 pub const DEFAULT_MAX_CONCURRENT_UPSTREAM: usize = 100;
+pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
 pub fn build_app(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -55,6 +58,7 @@ pub struct AppState {
     pub sessions: MemorySessionStore,
     pub max_request_body: usize,
     pub max_response_body: usize,
+    pub request_timeout: Duration,
     pub upstream_semaphore: Arc<Semaphore>,
 }
 
@@ -188,11 +192,21 @@ async fn run_gateway(cfg: GatewayConfig) {
         csp_mode: cfg.csp_mode,
     };
 
+    let connect_timeout =
+        Duration::from_secs(cfg.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT_SECS));
+    let request_timeout =
+        Duration::from_secs(cfg.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS));
+
     let state = AppState {
         mcp_upstream: mcp.clone(),
         widget_source,
         rewrite_config: Arc::new(RwLock::new(rewrite_config)),
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .connect_timeout(connect_timeout)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(10)
+            .build()
+            .expect("Failed to build HTTP client"),
         tui_state: tui_state.clone(),
         sessions: MemorySessionStore::new(),
         max_request_body: cfg
@@ -201,6 +215,7 @@ async fn run_gateway(cfg: GatewayConfig) {
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
+        request_timeout,
         upstream_semaphore: Arc::new(Semaphore::new(
             cfg.max_concurrent_upstream
                 .unwrap_or(DEFAULT_MAX_CONCURRENT_UPSTREAM),

@@ -84,7 +84,13 @@ pub async fn start_tunnel_client(
 
     let public_url = ack.url.clone();
     let local_base = format!("http://localhost:{port}");
-    let http_client = reqwest::Client::new();
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .pool_max_idle_per_host(10)
+        .build()
+        .expect("Failed to build tunnel HTTP client");
 
     // Mark tunnel as connected
     tui_state.lock().unwrap().tunnel_status = crate::tui::ConnectionStatus::Connected;
