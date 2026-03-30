@@ -21,7 +21,10 @@ use tower_http::cors::{Any, CorsLayer};
 
 use config::{GatewayConfig, Mode};
 use display::log_startup;
-use logger::{DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, TuiSink};
+use logger::{
+    DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, TuiSink,
+    prefix_from_upstream,
+};
 use proxy::proxy_routes;
 use rewrite::RewriteConfig;
 use session::MemorySessionStore;
@@ -220,6 +223,7 @@ async fn run_gateway(cfg: GatewayConfig) {
             dir: std::path::PathBuf::from(&dir),
             rotation,
             max_files: DEFAULT_MAX_FILES,
+            prefix: prefix_from_upstream(&mcp),
         }) {
             Ok(sink) => {
                 sinks.push(Box::new(sink));

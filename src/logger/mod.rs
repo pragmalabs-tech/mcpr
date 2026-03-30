@@ -4,13 +4,15 @@ mod sink;
 mod tui_sink;
 
 pub use entry::LogEntry;
-pub use file_sink::{DEFAULT_MAX_FILES, FileSink, FileSinkConfig, Rotation};
+pub use file_sink::{DEFAULT_MAX_FILES, FileSink, FileSinkConfig, Rotation, prefix_from_upstream};
 pub use sink::LogSink;
 pub use tui_sink::TuiSink;
 
 use tokio::sync::mpsc;
 
 const CHANNEL_CAPACITY: usize = 4096;
+const BATCH_SIZE: usize = 256;
+const FLUSH_INTERVAL_MS: u64 = 5000;
 
 /// Routes log entries to multiple sinks via a bounded async channel.
 ///
@@ -67,26 +69,59 @@ async fn router_task(
     mut shutdown_rx: mpsc::Receiver<()>,
     sinks: Vec<Box<dyn LogSink>>,
 ) {
+    let mut batch = Vec::with_capacity(BATCH_SIZE);
+    let mut flush_interval =
+        tokio::time::interval(tokio::time::Duration::from_millis(FLUSH_INTERVAL_MS));
+    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
     loop {
         tokio::select! {
             Some(entry) = rx.recv() => {
+                batch.push(entry);
+
+                // Drain more entries if available (non-blocking)
+                while batch.len() < BATCH_SIZE {
+                    match rx.try_recv() {
+                        Ok(entry) => batch.push(entry),
+                        Err(_) => break,
+                    }
+                }
+
+                // Dispatch the batch
+                dispatch_batch(&sinks, &batch);
+                batch.clear();
+            }
+            _ = flush_interval.tick() => {
+                // Periodic flush for sinks with internal buffers
                 for sink in &sinks {
-                    sink.emit(&entry);
+                    sink.flush();
                 }
             }
             _ = shutdown_rx.recv() => {
                 // Drain remaining entries
                 while let Ok(entry) = rx.try_recv() {
-                    for sink in &sinks {
-                        sink.emit(&entry);
-                    }
+                    batch.push(entry);
                 }
-                // Flush all sinks
+                if !batch.is_empty() {
+                    dispatch_batch(&sinks, &batch);
+                    batch.clear();
+                }
+                // Final flush
                 for sink in &sinks {
                     sink.flush();
                 }
                 return;
             }
+        }
+    }
+}
+
+fn dispatch_batch(sinks: &[Box<dyn LogSink>], batch: &[LogEntry]) {
+    for sink in sinks {
+        if batch.len() == 1 {
+            sink.emit(&batch[0]);
+        } else {
+            sink.emit_batch(batch);
         }
     }
 }

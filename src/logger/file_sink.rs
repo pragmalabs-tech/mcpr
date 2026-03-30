@@ -33,12 +33,43 @@ pub struct FileSinkConfig {
     /// Maximum number of log files to keep. Oldest are deleted when exceeded.
     /// Defaults to 10. This caps total disk usage to roughly `max_files * rotation_size`.
     pub max_files: usize,
+    /// Filename prefix, typically derived from the MCP upstream identity.
+    /// e.g. "mcpr-localhost-9000" → `mcpr-localhost-9000-2026-03-30.log`
+    /// Defaults to "mcpr" if empty.
+    pub prefix: String,
+}
+
+/// Derive a filesystem-safe prefix from an MCP upstream URL.
+/// `http://localhost:9000/mcp` → `mcpr-localhost-9000`
+/// `https://api.example.com` → `mcpr-api.example.com`
+pub fn prefix_from_upstream(url: &str) -> String {
+    let stripped = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    // Take host:port, drop path
+    let host_port = stripped.split('/').next().unwrap_or(stripped);
+    // Replace unsafe filesystem chars
+    let safe: String = host_port
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("mcpr-{safe}")
 }
 
 /// JSONL file sink with buffered writes and rotation.
 ///
 /// Writes one JSON object per line to `{dir}/mcpr-{date}.log`.
 /// Rotation happens by size or daily, depending on config.
+///
+/// Supports batch writes via `emit_batch()` for high-throughput scenarios.
+/// The `LogRouter` drains the channel in batches and calls `emit_batch()`
+/// to amortize the mutex acquisition and disk I/O cost.
 pub struct FileSink {
     config: FileSinkConfig,
     inner: Mutex<FileSinkInner>,
@@ -54,7 +85,7 @@ struct FileSinkInner {
 impl FileSink {
     pub fn new(config: FileSinkConfig) -> std::io::Result<Self> {
         fs::create_dir_all(&config.dir)?;
-        let (path, date) = Self::log_path(&config.dir);
+        let (path, date) = Self::log_path(&config.dir, &config.prefix);
         let file = Self::open_append(&path)?;
         let bytes_written = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(Self {
@@ -68,9 +99,9 @@ impl FileSink {
         })
     }
 
-    fn log_path(dir: &Path) -> (PathBuf, String) {
+    fn log_path(dir: &Path, prefix: &str) -> (PathBuf, String) {
         let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let path = dir.join(format!("mcpr-{date}.log"));
+        let path = dir.join(format!("{prefix}-{date}.log"));
         (path, date)
     }
 
@@ -94,16 +125,13 @@ impl FileSink {
 
         match &self.config.rotation {
             Rotation::Size(_) => {
-                // Rename current file with a sequence number
-                let mut seq = 1u32;
-                loop {
-                    let rotated = inner.current_path.with_extension(format!("{seq}.log"));
-                    if !rotated.exists() {
-                        fs::rename(&inner.current_path, &rotated)?;
-                        break;
-                    }
-                    seq += 1;
-                }
+                // Rename current file with UTC timestamp
+                let ts = chrono::Utc::now().format("%Y-%m-%dT%H-%M-%SZ");
+                let rotated = self
+                    .config
+                    .dir
+                    .join(format!("{}-{ts}.log", self.config.prefix));
+                fs::rename(&inner.current_path, &rotated)?;
                 // Re-open same path (now empty)
                 let file = Self::open_append(&inner.current_path)?;
                 inner.writer = BufWriter::with_capacity(BUFFER_CAPACITY, file);
@@ -111,7 +139,7 @@ impl FileSink {
             }
             Rotation::Daily => {
                 // Open new file with today's date
-                let (path, date) = Self::log_path(&self.config.dir);
+                let (path, date) = Self::log_path(&self.config.dir, &self.config.prefix);
                 let existing_size = path.metadata().map(|m| m.len()).unwrap_or(0);
                 let file = Self::open_append(&path)?;
                 inner.current_path = path;
@@ -138,9 +166,10 @@ impl FileSink {
             .filter_map(|e| e.ok())
             .map(|e| e.path())
             .filter(|p| {
+                let prefix = &self.config.prefix;
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("mcpr-") && n.ends_with(".log"))
+                    .is_some_and(|n| n.starts_with(&format!("{prefix}-")) && n.ends_with(".log"))
             })
             .collect();
 
@@ -156,15 +185,11 @@ impl FileSink {
             let _ = fs::remove_file(path);
         }
     }
-}
 
-impl LogSink for FileSink {
-    fn emit(&self, entry: &LogEntry) {
-        let mut inner = self.inner.lock().unwrap();
-
-        // Check rotation before writing
-        if self.should_rotate(&inner) {
-            match self.rotate(&mut inner) {
+    /// Write a single serialized line + check rotation.
+    fn write_line(&self, inner: &mut FileSinkInner, line: &str) {
+        if self.should_rotate(inner) {
+            match self.rotate(inner) {
                 Ok(()) => self.cleanup_old_files(),
                 Err(e) => {
                     eprintln!("mcpr: log rotation failed: {e}");
@@ -173,19 +198,40 @@ impl LogSink for FileSink {
             }
         }
 
-        // Serialize and write
-        match serde_json::to_string(entry) {
-            Ok(line) => {
-                let bytes = line.len() as u64 + 1; // +1 for newline
-                if let Err(e) = writeln!(inner.writer, "{line}") {
-                    eprintln!("mcpr: log write failed: {e}");
-                } else {
-                    inner.bytes_written += bytes;
-                }
-            }
-            Err(e) => {
-                eprintln!("mcpr: log serialize failed: {e}");
-            }
+        let bytes = line.len() as u64 + 1;
+        if let Err(e) = writeln!(inner.writer, "{line}") {
+            eprintln!("mcpr: log write failed: {e}");
+        } else {
+            inner.bytes_written += bytes;
+        }
+    }
+}
+
+impl LogSink for FileSink {
+    fn emit(&self, entry: &LogEntry) {
+        let Ok(line) = serde_json::to_string(entry) else {
+            eprintln!("mcpr: log serialize failed");
+            return;
+        };
+        let mut inner = self.inner.lock().unwrap();
+        self.write_line(&mut inner, &line);
+    }
+
+    fn emit_batch(&self, entries: &[LogEntry]) {
+        // Pre-serialize outside the lock
+        let lines: Vec<String> = entries
+            .iter()
+            .filter_map(|e| serde_json::to_string(e).ok())
+            .collect();
+
+        if lines.is_empty() {
+            return;
+        }
+
+        // Single lock acquisition for the entire batch
+        let mut inner = self.inner.lock().unwrap();
+        for line in &lines {
+            self.write_line(&mut inner, line);
         }
     }
 
@@ -212,6 +258,7 @@ mod tests {
             dir: dir.path().to_path_buf(),
             rotation: Rotation::Size(DEFAULT_MAX_FILE_SIZE),
             max_files: DEFAULT_MAX_FILES,
+            prefix: "mcpr-test".to_string(),
         };
         let sink = FileSink::new(config).unwrap();
 
@@ -248,12 +295,51 @@ mod tests {
     }
 
     #[test]
+    fn batch_writes_atomically() {
+        let dir = TempDir::new().unwrap();
+        let config = FileSinkConfig {
+            dir: dir.path().to_path_buf(),
+            rotation: Rotation::Size(DEFAULT_MAX_FILE_SIZE),
+            max_files: DEFAULT_MAX_FILES,
+            prefix: "mcpr-test".to_string(),
+        };
+        let sink = FileSink::new(config).unwrap();
+
+        let batch: Vec<LogEntry> = (0..5)
+            .map(|i| make_entry("POST", &format!("/path/{i}"), 200))
+            .collect();
+
+        sink.emit_batch(&batch);
+        sink.flush();
+
+        let entries: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
+            .flat_map(|e| {
+                fs::read_to_string(e.path())
+                    .unwrap()
+                    .lines()
+                    .map(String::from)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        assert_eq!(entries.len(), 5);
+        for (i, line) in entries.iter().enumerate() {
+            let val: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(val["path"], format!("/path/{i}"));
+        }
+    }
+
+    #[test]
     fn rotates_by_size() {
         let dir = TempDir::new().unwrap();
         let config = FileSinkConfig {
             dir: dir.path().to_path_buf(),
             rotation: Rotation::Size(100), // Very small threshold
             max_files: DEFAULT_MAX_FILES,
+            prefix: "mcpr-test".to_string(),
         };
         let sink = FileSink::new(config).unwrap();
 
@@ -291,6 +377,7 @@ mod tests {
             dir: dir.path().to_path_buf(),
             rotation: Rotation::Size(DEFAULT_MAX_FILE_SIZE),
             max_files: DEFAULT_MAX_FILES,
+            prefix: "mcpr-test".to_string(),
         };
         let sink = FileSink::new(config).unwrap();
 
@@ -338,6 +425,7 @@ mod tests {
             dir: nested.clone(),
             rotation: Rotation::Size(DEFAULT_MAX_FILE_SIZE),
             max_files: DEFAULT_MAX_FILES,
+            prefix: "mcpr-test".to_string(),
         };
 
         let sink = FileSink::new(config).unwrap();
@@ -354,6 +442,7 @@ mod tests {
             dir: dir.path().to_path_buf(),
             rotation: Rotation::Size(100), // Very small to trigger many rotations
             max_files: 3,
+            prefix: "mcpr-test".to_string(),
         };
         let sink = FileSink::new(config).unwrap();
 
