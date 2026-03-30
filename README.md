@@ -9,7 +9,11 @@
 MCP-aware proxy for ChatGPT Apps and Claude connectors.
 Tunnel, test, and ship — one command, one endpoint.
 
-https://github.com/cptrodgers/mcpr/raw/main/docs/videos/demo.mp4
+
+
+https://github.com/user-attachments/assets/680c8b9c-8ffb-4cfb-b175-bdaf5c6f49b4
+
+
 
 ## Install
 
