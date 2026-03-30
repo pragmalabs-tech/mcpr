@@ -9,7 +9,7 @@
 MCP-aware proxy for ChatGPT Apps and Claude connectors.
 Tunnel, test, and ship — one command, one endpoint.
 
-![mcpr Terminal UI](docs/images/mcpr-app-screenshot.png)
+https://github.com/cptrodgers/mcpr/raw/main/docs/videos/demo.mp4
 
 ## Install
 
@@ -50,6 +50,8 @@ Your machine                           AI client (ChatGPT / Claude)
 
 The URL stays the same across restarts — configure your AI client once, keep developing.
 
+![mcpr Requests](docs/images/mcpr-request-tui.png)
+
 ### mcpr Studio
 
 Test your MCP tools and preview widgets locally — no AI model, no API key, no subscription.
@@ -86,6 +88,8 @@ Every request is parsed as JSON-RPC 2.0, classified by MCP method, and logged wi
 - **Timing breakdown** — total round-trip, upstream server time (↑), proxy overhead (↓)
 - **JSON-RPC errors** — error codes and messages from the MCP server shown inline
 - **Session tracking** — track MCP sessions with client info, state, and request history
+
+![mcpr Session Tracking](docs/images/mcpr-session-tui.png)
 
 ### Edge Config
 
