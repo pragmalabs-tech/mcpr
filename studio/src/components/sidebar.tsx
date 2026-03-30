@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { isRemoteProxy, getBaseUrl } from "@/lib/api";
 import { useStore } from "@/lib/store";
 import type { SelectedItem } from "@/lib/store";
+import { Input } from "@/components/ui/input";
 import { AuthPanel } from "./auth-panel";
 
 function displayName(name: string) {
@@ -128,12 +129,12 @@ export function Sidebar() {
       {/* Search */}
       {totalItems > 5 && (
         <div className="px-3 py-2 border-b shrink-0">
-          <input
+          <Input
             type="text"
             placeholder="Filter…"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
-            className="w-full bg-secondary text-secondary-foreground rounded px-2 py-1 text-xs border-0"
+            className="h-7 text-xs"
           />
         </div>
       )}

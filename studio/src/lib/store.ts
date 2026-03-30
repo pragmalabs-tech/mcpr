@@ -311,6 +311,9 @@ interface StudioState {
   // Editor
   editorValue: string;
 
+  // Studio UI
+  studioTheme: "light" | "dark";
+
   // Widget config
   platform: Platform;
   theme: string;
@@ -358,6 +361,7 @@ interface StudioState {
   setOAuthDebugOpen: (open: boolean) => void;
   select: (item: SelectedItem) => void;
   setEditorValue: (value: string) => void;
+  setStudioTheme: (t: "light" | "dark") => void;
   setPlatform: (p: Platform) => void;
   setTheme: (t: string) => void;
   setLocale: (l: string) => void;
@@ -426,6 +430,9 @@ export const useStore = create<StudioState>((set, get) => ({
 
   // Editor
   editorValue: defaultEditorValue(),
+
+  // Studio UI
+  studioTheme: "dark" as const,
 
   // Widget config
   platform: "openai",
@@ -829,6 +836,10 @@ export const useStore = create<StudioState>((set, get) => ({
   },
 
   setEditorValue: (value) => set({ editorValue: value }),
+  setStudioTheme: (t) => {
+    set({ studioTheme: t });
+    document.documentElement.classList.toggle("dark", t === "dark");
+  },
   setPlatform: (p) => {
     set({ platform: p });
     setTimeout(() => get().loadWidget(), 50);

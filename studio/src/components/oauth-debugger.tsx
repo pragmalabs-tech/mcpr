@@ -518,7 +518,7 @@ function FlowVisualization({
                         ? "bg-red-500/20 text-red-400 ring-1 ring-red-500/40"
                         : status === "pending"
                           ? "bg-yellow-500/20 text-yellow-500 ring-1 ring-yellow-500/40 animate-pulse"
-                          : "bg-secondary text-muted-foreground/40 ring-1 ring-border"
+                          : "bg-secondary text-foreground ring-1 ring-border"
                   }`}
                 >
                   {status === "success"
