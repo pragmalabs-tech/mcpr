@@ -153,6 +153,35 @@ Patterns support glob-style `*` wildcard:
 | `pr-*-acme` | `pr-123-acme`, `pr-abc-acme` | `pr-123` |
 | `*` | anything | |
 
+## Resource Limits & Timeouts
+
+These apply to both gateway and relay modes.
+
+```toml
+# Max request body size in bytes (default: 5 MB)
+max_request_body_size = 5242880
+
+# Max response body size in bytes (default: 10 MB)
+max_response_body_size = 10485760
+
+# Max concurrent upstream connections (default: 100)
+max_concurrent_upstream = 100
+
+# Connect timeout in seconds (default: 5)
+connect_timeout = 5
+
+# Request timeout in seconds (default: 30)
+request_timeout = 30
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `max_request_body_size` | `5242880` (5 MB) | Reject inbound requests larger than this (413) |
+| `max_response_body_size` | `10485760` (10 MB) | Reject upstream responses larger than this (502) |
+| `max_concurrent_upstream` | `100` | Max in-flight requests to upstream (semaphore) |
+| `connect_timeout` | `5` (seconds) | TCP connect timeout to upstream |
+| `request_timeout` | `30` (seconds) | Total request timeout including response |
+
 ## Backward Compatibility
 
 Legacy flat fields from older config files are still supported:
