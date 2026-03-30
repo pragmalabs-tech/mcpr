@@ -125,6 +125,18 @@ struct FileTunnelConfig {
     subdomain: Option<String>,
 }
 
+/// `[logging]` table in config file
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct FileLoggingConfig {
+    /// Enable JSONL file logging.
+    file: bool,
+    /// Directory for log files (default: "./logs").
+    dir: Option<String>,
+    /// Rotation strategy: "daily" or "size:50MB" (default: "daily").
+    rotation: Option<String>,
+}
+
 /// Config file format (mcpr.toml)
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -144,6 +156,9 @@ struct FileConfig {
 
     // -- Tunnel client --
     tunnel: FileTunnelConfig,
+
+    // -- Logging --
+    logging: FileLoggingConfig,
 
     max_request_body_size: Option<usize>,
     max_response_body_size: Option<usize>,
@@ -239,6 +254,9 @@ pub struct GatewayConfig {
     pub max_concurrent_upstream: Option<usize>,
     pub connect_timeout: Option<u64>,
     pub request_timeout: Option<u64>,
+    pub log_file: bool,
+    pub log_dir: Option<String>,
+    pub log_rotation: Option<String>,
 }
 
 impl GatewayConfig {
@@ -559,6 +577,9 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         max_concurrent_upstream: file.max_concurrent_upstream,
         connect_timeout: file.connect_timeout,
         request_timeout: file.request_timeout,
+        log_file: file.logging.file,
+        log_dir: file.logging.dir,
+        log_rotation: file.logging.rotation,
     })
 }
 

@@ -12,11 +12,10 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::AppState;
-use crate::display::log_request;
 use crate::jsonrpc::{self, McpMethod};
+use crate::logger::LogEntry;
 use crate::rewrite::rewrite_response;
 use crate::session::{self, SessionState, SessionStore};
-use crate::tui::state::LogEntry;
 use crate::widgets::{
     fetch_widget_html, list_widgets, serve_studio, serve_widget_asset, serve_widget_html,
 };
@@ -232,8 +231,7 @@ async fn handle_request(
                 let upstream_ms = upstream_start.elapsed().as_millis() as u64;
                 let status = resp.status().as_u16();
                 let resp_headers = resp.headers().clone();
-                log_request(
-                    &state.tui_state,
+                state.logger.emit(
                     LogEntry::new("GET", path, status, "sse")
                         .upstream(&upstream_url)
                         .upstream_duration(upstream_ms)
@@ -247,8 +245,7 @@ async fn handle_request(
             }
             Err(e) => {
                 let upstream_ms = upstream_start.elapsed().as_millis() as u64;
-                log_request(
-                    &state.tui_state,
+                state.logger.emit(
                     LogEntry::new("GET", path, 502, "upstream error")
                         .upstream(&upstream_url)
                         .upstream_duration(upstream_ms)
@@ -317,8 +314,7 @@ async fn handle_mcp_post(
         Ok(r) => r,
         Err(e) => {
             let upstream_ms = upstream_start.elapsed().as_millis() as u64;
-            log_request(
-                &state.tui_state,
+            state.logger.emit(
                 LogEntry::new("POST", path, 502, "upstream error")
                     .mcp_method(method_str)
                     .maybe_detail(call_detail.as_deref())
@@ -393,11 +389,10 @@ async fn handle_mcp_post(
         if let Some((code, ref msg)) = rpc_error {
             entry = entry.jsonrpc_error(code, msg);
         }
-        log_request(&state.tui_state, entry);
+        state.logger.emit(entry);
         build_response(status, &resp_headers, Body::from(body))
     } else {
-        log_request(
-            &state.tui_state,
+        state.logger.emit(
             LogEntry::new("POST", path, status, "passthrough")
                 .mcp_method(method_str)
                 .maybe_detail(call_detail.as_deref())
@@ -463,8 +458,7 @@ async fn handle_resources_read(
     drop(config);
 
     let body = serde_json::to_vec(&json_body).unwrap_or_default();
-    log_request(
-        &state.tui_state,
+    state.logger.emit(
         LogEntry::new("POST", "/*", 200, "intercepted")
             .mcp_method(jsonrpc::RESOURCES_READ)
             .size(body.len())
@@ -516,8 +510,7 @@ async fn forward_and_passthrough(
                 );
                 drop(config);
                 let rewritten_bytes = rewritten.into_bytes();
-                log_request(
-                    &state.tui_state,
+                state.logger.emit(
                     LogEntry::new(method.as_str(), log_path, status, "rewritten")
                         .upstream(url)
                         .size(rewritten_bytes.len())
@@ -526,8 +519,7 @@ async fn forward_and_passthrough(
                 );
                 build_response(status, &resp_headers, Body::from(rewritten_bytes))
             } else {
-                log_request(
-                    &state.tui_state,
+                state.logger.emit(
                     LogEntry::new(method.as_str(), log_path, status, "passthrough")
                         .upstream(url)
                         .size(bytes.len())
@@ -539,8 +531,7 @@ async fn forward_and_passthrough(
         }
         Err(e) => {
             let upstream_ms = upstream_start.elapsed().as_millis() as u64;
-            log_request(
-                &state.tui_state,
+            state.logger.emit(
                 LogEntry::new(method.as_str(), log_path, 502, "upstream error")
                     .upstream(url)
                     .upstream_duration(upstream_ms)
@@ -901,6 +892,7 @@ mod tests {
                 .build()
                 .unwrap(),
             tui_state: crate::tui::new_shared_state(),
+            logger: crate::logger::LogRouter::start(vec![]).router,
             sessions: crate::session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
