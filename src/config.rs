@@ -147,6 +147,7 @@ struct FileConfig {
 
     max_request_body_size: Option<usize>,
     max_response_body_size: Option<usize>,
+    max_concurrent_upstream: Option<usize>,
 
     // -- Legacy flat fields (backward compat) --
     relay_domain: Option<String>,
@@ -233,6 +234,7 @@ pub struct GatewayConfig {
     pub config_path: Option<std::path::PathBuf>,
     pub max_request_body_size: Option<usize>,
     pub max_response_body_size: Option<usize>,
+    pub max_concurrent_upstream: Option<usize>,
 }
 
 impl GatewayConfig {
@@ -549,6 +551,7 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         config_path,
         max_request_body_size: file.max_request_body_size,
         max_response_body_size: file.max_response_body_size,
+        max_concurrent_upstream: file.max_concurrent_upstream,
     })
 }
 
@@ -786,5 +789,17 @@ mod tests {
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.max_request_body_size, None);
         assert_eq!(config.max_response_body_size, None);
+        assert_eq!(config.max_concurrent_upstream, None);
+    }
+
+    #[test]
+    fn max_concurrent_upstream_parses_from_toml() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+            port = 8080
+            max_concurrent_upstream = 50
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.max_concurrent_upstream, Some(50));
     }
 }
