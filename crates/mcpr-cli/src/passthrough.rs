@@ -8,7 +8,9 @@ use axum::{
 
 use crate::AppState;
 use crate::logger::LogEntry;
-use crate::proxy::{build_response, forward_request, read_body_capped, split_upstream};
+use crate::proxy::forward_request;
+use mcpr_core::forwarding::{build_response, read_body_capped};
+use mcpr_core::sse::split_upstream;
 
 /// Serve the OAuth callback relay page.
 ///

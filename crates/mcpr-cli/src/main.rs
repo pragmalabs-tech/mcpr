@@ -5,13 +5,14 @@ mod mcp_handler;
 mod onboarding;
 mod passthrough;
 mod proxy;
-mod router;
 mod tui;
 mod widgets;
 
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, Semaphore};
+use tokio::sync::RwLock;
+
+use mcpr_core::forwarding::UpstreamClient;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -56,14 +57,12 @@ pub struct AppState {
     pub mcp_upstream: String,
     pub widget_source: Option<WidgetSource>,
     pub rewrite_config: Arc<RwLock<RewriteConfig>>,
-    pub http_client: reqwest::Client,
+    pub upstream: UpstreamClient,
     pub tui_state: SharedTuiState,
     pub logger: LogRouter,
     pub sessions: MemorySessionStore,
     pub max_request_body: usize,
     pub max_response_body: usize,
-    pub request_timeout: Duration,
-    pub upstream_semaphore: Arc<Semaphore>,
 }
 
 /// Adapter to bridge mcpr-tunnel's TunnelStatusCallback to TUI state.
@@ -275,16 +274,25 @@ async fn run_gateway(cfg: GatewayConfig) {
 
     let log_handle = LogRouter::start(sinks);
 
-    let state = AppState {
-        mcp_upstream: mcp.clone(),
-        widget_source,
-        rewrite_config: Arc::new(RwLock::new(rewrite_config)),
+    let upstream = UpstreamClient {
         http_client: reqwest::Client::builder()
             .connect_timeout(connect_timeout)
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(10)
             .build()
             .expect("Failed to build HTTP client"),
+        semaphore: Arc::new(tokio::sync::Semaphore::new(
+            cfg.max_concurrent_upstream
+                .unwrap_or(DEFAULT_MAX_CONCURRENT_UPSTREAM),
+        )),
+        request_timeout,
+    };
+
+    let state = AppState {
+        mcp_upstream: mcp.clone(),
+        widget_source,
+        rewrite_config: Arc::new(RwLock::new(rewrite_config)),
+        upstream: upstream.clone(),
         tui_state: tui_state.clone(),
         logger: log_handle.router.clone(),
         sessions: MemorySessionStore::new(),
@@ -294,15 +302,10 @@ async fn run_gateway(cfg: GatewayConfig) {
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
-        request_timeout,
-        upstream_semaphore: Arc::new(Semaphore::new(
-            cfg.max_concurrent_upstream
-                .unwrap_or(DEFAULT_MAX_CONCURRENT_UPSTREAM),
-        )),
     };
 
     // Initial connectivity probe — warn early if the MCP URL seems wrong
-    probe_mcp_upstream(&mcp, &state.http_client, &tui_state).await;
+    probe_mcp_upstream(&mcp, &upstream.http_client, &tui_state).await;
 
     let health_state = state.clone();
     let tui_sessions = state.sessions.clone();

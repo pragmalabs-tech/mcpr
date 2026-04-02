@@ -6,13 +6,14 @@ members = [
     "crates/mcpr-widgets",
     "crates/mcpr-tunnel",
     "crates/mcpr-events",
+    "crates/mcpr-core",
 ]
 resolver = "2"
 
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-version = "0.1.0"
+version = "0.2.0"
 
 [workspace.dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -28,8 +29,9 @@ url = "2"
 base64 = "0.22"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
-mcpr-protocol = { path = "crates/mcpr-protocol" }
-mcpr-session = { path = "crates/mcpr-session" }
-mcpr-widgets = { path = "crates/mcpr-widgets" }
-mcpr-tunnel = { path = "crates/mcpr-tunnel" }
-mcpr-events = { path = "crates/mcpr-events" }
+mcpr-protocol = { path = "crates/mcpr-protocol", version = "0.2.0" }
+mcpr-session = { path = "crates/mcpr-session", version = "0.2.0" }
+mcpr-widgets = { path = "crates/mcpr-widgets", version = "0.2.0" }
+mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.2.0" }
+mcpr-events = { path = "crates/mcpr-events", version = "0.2.0" }
+mcpr-core = { path = "crates/mcpr-core", version = "0.2.0" }
