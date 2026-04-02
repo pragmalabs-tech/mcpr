@@ -43,6 +43,8 @@ pub struct TuiState {
     pub mcp_upstream: String,
     pub widgets: String,
     pub tunnel_status: ConnectionStatus,
+    /// Whether the tunnel is using an anonymous (temporary) subdomain.
+    pub tunnel_anonymous: bool,
     pub mcp_status: ConnectionStatus,
     pub widgets_status: ConnectionStatus,
     pub widget_count: Option<usize>,
@@ -70,6 +72,7 @@ impl TuiState {
             mcp_upstream: String::new(),
             widgets: "(none)".into(),
             tunnel_status: ConnectionStatus::Disconnected,
+            tunnel_anonymous: false,
             mcp_status: ConnectionStatus::Unknown,
             widgets_status: ConnectionStatus::Unknown,
             widget_count: None,

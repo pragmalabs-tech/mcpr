@@ -124,7 +124,7 @@ async fn run_gateway(cfg: GatewayConfig) {
                 colored::Colorize::cyan("→"),
             );
             match onboarding::run_claim_flow(cfg.tunnel_subdomain.as_deref()).await {
-                Ok((token, subdomain)) => {
+                Ok(result) => {
                     let save_path = config_path
                         .clone()
                         .unwrap_or_else(|| std::env::current_dir().unwrap().join("mcpr.toml"));
@@ -132,17 +132,29 @@ async fn run_gateway(cfg: GatewayConfig) {
                     if !save_path.exists() {
                         let _ = std::fs::write(&save_path, "");
                     }
-                    GatewayConfig::save_tunnel_config(&save_path, &token, &subdomain);
-                    eprintln!(
-                        "\n  {} We sent a verification link to your email.",
-                        colored::Colorize::yellow("!"),
-                    );
-                    eprintln!(
-                        "  {} Verify to keep '{}' permanently — it's reserved for 72 hours.\n",
-                        colored::Colorize::yellow("!"),
-                        subdomain,
-                    );
-                    (token, Some(subdomain))
+                    GatewayConfig::save_tunnel_config(&save_path, &result.token, &result.subdomain);
+                    if result.anonymous {
+                        eprintln!(
+                            "\n  {} This is a temporary tunnel (1 week). To keep a custom subdomain, re-run with --no-tunnel and reconfigure.",
+                            colored::Colorize::yellow("!"),
+                        );
+                    } else {
+                        eprintln!(
+                            "\n  {} We sent a verification link to your email.",
+                            colored::Colorize::yellow("!"),
+                        );
+                        eprintln!(
+                            "  {} Verify to keep '{}' permanently — it's reserved for 72 hours.\n",
+                            colored::Colorize::yellow("!"),
+                            result.subdomain,
+                        );
+                    }
+                    let anonymous = result.anonymous;
+                    let pair = (result.token, Some(result.subdomain));
+                    if anonymous {
+                        tui_state.lock().unwrap().tunnel_anonymous = true;
+                    }
+                    pair
                 }
                 Err(e) => {
                     eprintln!(
