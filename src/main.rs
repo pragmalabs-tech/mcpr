@@ -132,7 +132,12 @@ async fn run_gateway(cfg: GatewayConfig) {
                     if !save_path.exists() {
                         let _ = std::fs::write(&save_path, "");
                     }
-                    GatewayConfig::save_tunnel_config(&save_path, &result.token, &result.subdomain);
+                    GatewayConfig::save_tunnel_config(
+                        &save_path,
+                        &result.token,
+                        &result.subdomain,
+                        result.anonymous,
+                    );
                     if result.anonymous {
                         eprintln!(
                             "\n  {} This is a temporary tunnel (1 week). To keep a custom subdomain, re-run with --no-tunnel and reconfigure.",
@@ -175,7 +180,13 @@ async fn run_gateway(cfg: GatewayConfig) {
             })
         };
 
-        tui_state.lock().unwrap().tunnel_status = tui::ConnectionStatus::Connecting;
+        {
+            let mut state = tui_state.lock().unwrap();
+            state.tunnel_status = tui::ConnectionStatus::Connecting;
+            if cfg.tunnel_anonymous {
+                state.tunnel_anonymous = true;
+            }
+        }
 
         match tunnel::start_tunnel_client(
             actual_port,

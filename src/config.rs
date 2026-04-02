@@ -123,6 +123,7 @@ struct FileTunnelConfig {
     relay_url: Option<String>,
     token: Option<String>,
     subdomain: Option<String>,
+    anonymous: bool,
 }
 
 /// `[logging]` table in config file
@@ -247,6 +248,7 @@ pub struct GatewayConfig {
     pub relay_url: Option<String>,
     pub tunnel_token: Option<String>,
     pub tunnel_subdomain: Option<String>,
+    pub tunnel_anonymous: bool,
     pub no_tunnel: bool,
     pub config_path: Option<std::path::PathBuf>,
     pub max_request_body_size: Option<usize>,
@@ -357,7 +359,12 @@ impl GatewayConfig {
     }
 
     /// Save both tunnel token and subdomain to the config file.
-    pub fn save_tunnel_config(path: &std::path::Path, token: &str, subdomain: &str) {
+    pub fn save_tunnel_config(
+        path: &std::path::Path,
+        token: &str,
+        subdomain: &str,
+        anonymous: bool,
+    ) {
         match std::fs::read_to_string(path) {
             Ok(contents) => {
                 let mut new_contents = contents.clone();
@@ -372,14 +379,21 @@ impl GatewayConfig {
                     {
                         insert.push_str(&format!("subdomain = \"{subdomain}\"\n"));
                     }
+                    if anonymous
+                        && !new_contents.contains("anonymous =")
+                        && !new_contents.contains("anonymous=")
+                    {
+                        insert.push_str("anonymous = true\n");
+                    }
                     if !insert.is_empty() {
                         new_contents =
                             new_contents.replacen("[tunnel]", &format!("[tunnel]\n{insert}"), 1);
                     }
                 } else {
                     // No [tunnel] section — append one
+                    let anon_line = if anonymous { "anonymous = true\n" } else { "" };
                     new_contents = format!(
-                        "{}\n\n[tunnel]\ntoken = \"{token}\"\nsubdomain = \"{subdomain}\"\n",
+                        "{}\n\n[tunnel]\ntoken = \"{token}\"\nsubdomain = \"{subdomain}\"\n{anon_line}",
                         new_contents.trim_end()
                     );
                 }
@@ -456,6 +470,7 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
     let tunnel_relay_url = file.tunnel_relay_url();
     let tunnel_token = file.tunnel_token();
     let tunnel_subdomain = file.tunnel_subdomain();
+    let tunnel_anonymous = file.tunnel.anonymous;
 
     // Detect CLI overrides that differ from the config file
     if let Some(path) = &config_path {
@@ -570,6 +585,7 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         ),
         tunnel_token,
         tunnel_subdomain,
+        tunnel_anonymous,
         no_tunnel: cli.no_tunnel || file.no_tunnel,
         config_path,
         max_request_body_size: file.max_request_body_size,
@@ -718,7 +734,7 @@ mod tests {
         let path = dir.path().join("mcpr.toml");
         std::fs::write(&path, "").unwrap();
 
-        GatewayConfig::save_tunnel_config(&path, "tok123", "myapp");
+        GatewayConfig::save_tunnel_config(&path, "tok123", "myapp", false);
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("[tunnel]"));
@@ -732,7 +748,7 @@ mod tests {
         let path = dir.path().join("mcpr.toml");
         std::fs::write(&path, "port = 8080\n").unwrap();
 
-        GatewayConfig::save_tunnel_config(&path, "tok456", "demo");
+        GatewayConfig::save_tunnel_config(&path, "tok456", "demo", false);
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("port = 8080"));
@@ -747,7 +763,7 @@ mod tests {
         let path = dir.path().join("mcpr.toml");
         std::fs::write(&path, "[tunnel]\nrelay_url = \"https://tunnel.mcpr.app\"\n").unwrap();
 
-        GatewayConfig::save_tunnel_config(&path, "tok789", "example");
+        GatewayConfig::save_tunnel_config(&path, "tok789", "example", false);
 
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("relay_url = \"https://tunnel.mcpr.app\""));
@@ -765,7 +781,7 @@ mod tests {
         )
         .unwrap();
 
-        GatewayConfig::save_tunnel_config(&path, "new-tok", "new-sub");
+        GatewayConfig::save_tunnel_config(&path, "new-tok", "new-sub", false);
 
         let contents = std::fs::read_to_string(&path).unwrap();
         // Original values should be preserved, not duplicated
@@ -781,7 +797,7 @@ mod tests {
         let path = dir.path().join("nonexistent.toml");
 
         // Should not panic — just prints a warning
-        GatewayConfig::save_tunnel_config(&path, "tok", "sub");
+        GatewayConfig::save_tunnel_config(&path, "tok", "sub", false);
 
         assert!(!path.exists());
     }
