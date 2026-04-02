@@ -56,10 +56,11 @@ pub async fn handle_mcp_post(
     }
 
     // Intercept resources/read for widget HTML serving (single requests only)
-    if mcp_method == McpMethod::ResourcesRead && !parsed.is_batch && state.widget_source.is_some()
+    if mcp_method == McpMethod::ResourcesRead
+        && !parsed.is_batch
+        && state.widget_source.is_some()
         && let Ok(json_val) = serde_json::from_slice::<Value>(body)
-        && let Some(response) =
-            handle_resources_read(state, headers, body, &json_val, start).await
+        && let Some(response) = handle_resources_read(state, headers, body, &json_val, start).await
     {
         return response;
     }
