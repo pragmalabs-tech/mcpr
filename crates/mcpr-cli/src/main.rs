@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 
 use mcpr_core::forwarding::UpstreamClient;
+use mcpr_events::EventEmitter;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -60,6 +61,7 @@ pub struct AppState {
     pub upstream: UpstreamClient,
     pub tui_state: SharedTuiState,
     pub logger: LogRouter,
+    pub events: Arc<dyn EventEmitter>,
     pub sessions: MemorySessionStore,
     pub max_request_body: usize,
     pub max_response_body: usize,
@@ -288,6 +290,12 @@ async fn run_gateway(cfg: GatewayConfig) {
         request_timeout,
     };
 
+    let events: Arc<dyn EventEmitter> = if cfg.events {
+        Arc::new(mcpr_events::StdoutEmitter::new())
+    } else {
+        Arc::new(mcpr_events::NoopEmitter)
+    };
+
     let state = AppState {
         mcp_upstream: mcp.clone(),
         widget_source,
@@ -295,6 +303,7 @@ async fn run_gateway(cfg: GatewayConfig) {
         upstream: upstream.clone(),
         tui_state: tui_state.clone(),
         logger: log_handle.router.clone(),
+        events,
         sessions: MemorySessionStore::new(),
         max_request_body: cfg
             .max_request_body_size

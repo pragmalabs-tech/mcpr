@@ -16,6 +16,7 @@ use crate::passthrough::{forward_and_passthrough, serve_oauth_callback_relay};
 use crate::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
 use mcpr_core::router::{ClassifiedRequest, classify};
 use mcpr_core::sse::split_upstream;
+use mcpr_events::{EventType, McprEvent};
 use mcpr_session::SessionStore;
 
 /// Convenience wrapper: forward a request using this app's state.
@@ -78,6 +79,9 @@ async fn handle_request(
                 state
                     .logger
                     .emit(LogEntry::new("DELETE", path, 0, "session:closed").session_id(sid));
+                state
+                    .events
+                    .emit(McprEvent::new(EventType::SessionEnd).session(sid));
                 state.sessions.remove(sid).await;
             }
 
@@ -124,6 +128,7 @@ mod tests {
             },
             tui_state: crate::tui::new_shared_state(),
             logger: crate::logger::LogRouter::start(vec![]).router,
+            events: Arc::new(mcpr_events::NoopEmitter),
             sessions: mcpr_session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
