@@ -61,6 +61,10 @@ struct Cli {
     /// Don't start any tunnel (local-only mode)
     #[arg(long)]
     no_tunnel: bool,
+
+    /// Emit structured JSON events to stdout
+    #[arg(long)]
+    events: bool,
 }
 
 // ── TOML config file ────────────────────────────────────────────────────
@@ -233,6 +237,7 @@ pub struct GatewayConfig {
     pub log_file: bool,
     pub log_dir: Option<String>,
     pub log_rotation: Option<String>,
+    pub events: bool,
 }
 
 impl GatewayConfig {
@@ -583,6 +588,7 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         log_file: file.logging.file,
         log_dir: file.logging.dir,
         log_rotation: file.logging.rotation,
+        events: cli.events,
     })
 }
 

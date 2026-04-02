@@ -9,13 +9,24 @@ use serde_json::Value;
 
 use crate::AppState;
 use crate::logger::LogEntry;
-use crate::proxy::{
-    build_response, extract_json_from_sse, forward_request, read_body_capped, wrap_as_sse,
-};
+use crate::proxy::forward_request;
 use crate::widgets::fetch_widget_html;
+use mcpr_core::forwarding::{build_response, read_body_capped};
+use mcpr_core::sse::{extract_json_from_sse, wrap_as_sse};
+use mcpr_events::{EventStatus, EventType, McprEvent};
 use mcpr_protocol::{self as jsonrpc, McpMethod};
 use mcpr_session::{self as session, SessionState, SessionStore};
 use mcpr_widgets::rewrite_response;
+
+/// Map an MCP method to the corresponding event type.
+fn event_type_for(method: &McpMethod) -> EventType {
+    match method {
+        McpMethod::ToolsCall => EventType::ToolCall,
+        McpMethod::ToolsList => EventType::ToolList,
+        McpMethod::Initialize => EventType::SessionStart,
+        _ => EventType::Request,
+    }
+}
 
 /// Handle MCP JSON-RPC POST — intercept resources/read, forward, rewrite response.
 /// The body has already been validated as JSON-RPC 2.0 by `classify`.
@@ -82,6 +93,20 @@ pub async fn handle_mcp_post(
                     .upstream_duration(upstream_ms)
                     .duration(start),
             );
+            let mut evt = McprEvent::new(event_type_for(&mcp_method))
+                .method(method_str)
+                .upstream(&upstream_url)
+                .latency(start.elapsed().as_millis() as u64)
+                .status(EventStatus::Error);
+            if let Some(ref sid) = req_session_id {
+                evt = evt.session(sid);
+            }
+            if let Some(ref d) = call_detail
+                && mcp_method == McpMethod::ToolsCall
+            {
+                evt = evt.tool(d);
+            }
+            state.events.emit(evt);
             return (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response();
         }
     };
@@ -158,6 +183,28 @@ pub async fn handle_mcp_post(
             entry = entry.jsonrpc_error(code, msg);
         }
         state.logger.emit(entry);
+
+        // Emit structured event
+        let evt_status = if rpc_error.is_some() {
+            EventStatus::Error
+        } else {
+            EventStatus::Ok
+        };
+        let mut evt = McprEvent::new(event_type_for(&mcp_method))
+            .method(method_str)
+            .upstream(&upstream_url)
+            .latency(start.elapsed().as_millis() as u64)
+            .status(evt_status);
+        if let Some(ref sid) = log_session_id {
+            evt = evt.session(sid);
+        }
+        if let Some(ref d) = call_detail
+            && mcp_method == McpMethod::ToolsCall
+        {
+            evt = evt.tool(d);
+        }
+        state.events.emit(evt);
+
         build_response(status, &resp_headers, Body::from(body))
     } else {
         state.logger.emit(
@@ -169,6 +216,12 @@ pub async fn handle_mcp_post(
                 .size(resp_bytes.len())
                 .upstream_duration(upstream_ms)
                 .duration(start),
+        );
+        state.events.emit(
+            McprEvent::new(EventType::Request)
+                .method(method_str)
+                .upstream(&upstream_url)
+                .latency(start.elapsed().as_millis() as u64),
         );
         build_response(status, &resp_headers, Body::from(resp_bytes))
     }
@@ -216,6 +269,13 @@ pub async fn handle_mcp_sse(
                     .upstream(&upstream_url)
                     .upstream_duration(upstream_ms)
                     .duration(start),
+            );
+            state.events.emit(
+                McprEvent::new(EventType::Request)
+                    .method("SSE")
+                    .upstream(&upstream_url)
+                    .latency(start.elapsed().as_millis() as u64)
+                    .status(EventStatus::Error),
             );
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }
@@ -280,6 +340,11 @@ async fn handle_resources_read(
             .size(body.len())
             .upstream_duration(upstream_ms)
             .duration(start),
+    );
+    state.events.emit(
+        McprEvent::new(EventType::WidgetServe)
+            .method(jsonrpc::RESOURCES_READ)
+            .latency(start.elapsed().as_millis() as u64),
     );
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());

@@ -1006,7 +1006,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcpr"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
@@ -1017,6 +1017,7 @@ dependencies = [
  "dashmap",
  "futures-util",
  "http-body-util",
+ "mcpr-core",
  "mcpr-events",
  "mcpr-protocol",
  "mcpr-session",
@@ -1037,8 +1038,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcpr-core"
+version = "0.2.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "mcpr-protocol",
+ "reqwest",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mcpr-events"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "serde",
@@ -1047,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1055,7 +1068,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "dashmap",
@@ -1064,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-tunnel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64",
@@ -1083,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-widgets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "mcpr-protocol",
  "serde_json",

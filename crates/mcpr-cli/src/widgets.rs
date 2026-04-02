@@ -26,6 +26,7 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
         Some(WidgetSource::Proxy(base_url)) => {
             let url = format!("{}{}", base_url.trim_end_matches('/'), path);
             match state
+                .upstream
                 .http_client
                 .get(&url)
                 .timeout(Duration::from_secs(10))
@@ -102,6 +103,7 @@ pub async fn fetch_widget_html(state: &AppState, widget_name: &str) -> Option<St
                 widget_name
             );
             let resp = state
+                .upstream
                 .http_client
                 .get(&url)
                 .timeout(Duration::from_secs(10))
@@ -204,6 +206,7 @@ pub async fn discover_widget_names(state: &AppState) -> Vec<String> {
             for name in &candidates {
                 let url = format!("{base}/src/{name}/index.html");
                 if let Ok(resp) = state
+                    .upstream
                     .http_client
                     .head(&url)
                     .timeout(Duration::from_secs(10))
