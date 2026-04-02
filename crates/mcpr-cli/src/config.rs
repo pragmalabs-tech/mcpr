@@ -104,6 +104,13 @@ struct FileTunnelConfig {
     anonymous: bool,
 }
 
+/// `[events]` table in config file
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct FileEventsConfig {
+    enabled: bool,
+}
+
 /// `[logging]` table in config file
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -135,6 +142,9 @@ struct FileConfig {
 
     // -- Tunnel client --
     tunnel: FileTunnelConfig,
+
+    // -- Events --
+    events: FileEventsConfig,
 
     // -- Logging --
     logging: FileLoggingConfig,
@@ -588,7 +598,7 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         log_file: file.logging.file,
         log_dir: file.logging.dir,
         log_rotation: file.logging.rotation,
-        events: cli.events,
+        events: cli.events || file.events.enabled,
     })
 }
 
