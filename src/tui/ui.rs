@@ -118,7 +118,7 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
         .collect();
 
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
+    let mut tunnel_spans = vec![
         Span::styled("  Tunnel  ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             truncate(&s.tunnel_url),
@@ -126,7 +126,11 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-    ]));
+    ];
+    if s.tunnel_anonymous {
+        tunnel_spans.push(Span::styled(" (temp)", Style::default().fg(Color::Yellow)));
+    }
+    lines.push(Line::from(tunnel_spans));
     lines.push(Line::from(vec![
         Span::styled("  Proxy   ", Style::default().fg(Color::DarkGray)),
         Span::raw(truncate(&s.proxy_url)),
@@ -156,6 +160,18 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
         }
     }
     lines.push(status_line("Widgets", s.widgets_status));
+
+    if s.tunnel_anonymous {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  ⚠ Temporary tunnel — expires in 1 week",
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(Span::styled(
+            "    Provide email to keep your subdomain",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
 
     lines.extend([
         Line::from(""),

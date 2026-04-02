@@ -16,7 +16,16 @@ struct ClaimResponse {
     subdomain: String,
     token: String,
     status: String,
-    expires_at: u64,
+    expires_at: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct AnonymousResponse {
+    subdomain: String,
+    token: String,
+    status: String,
+    expires_at: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -32,37 +41,108 @@ struct ApiError {
     message: Option<String>,
 }
 
+/// Result of the onboarding flow.
+pub struct OnboardingResult {
+    pub token: String,
+    pub subdomain: String,
+    /// Whether this was an anonymous (no-email) claim.
+    pub anonymous: bool,
+}
+
 type ClaimFuture<'a> = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<(String, String), String>> + Send + 'a>,
+    Box<dyn std::future::Future<Output = Result<OnboardingResult, String>> + Send + 'a>,
 >;
 
 /// Run the interactive onboarding flow for tunnel.mcpr.app.
-/// Returns (token, subdomain) on success.
+/// Returns OnboardingResult on success.
 pub fn run_claim_flow(existing_subdomain: Option<&str>) -> ClaimFuture<'_> {
     Box::pin(run_claim_flow_inner(existing_subdomain))
 }
 
 async fn run_claim_flow_inner(
     existing_subdomain: Option<&str>,
-) -> Result<(String, String), String> {
+) -> Result<OnboardingResult, String> {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .expect("Failed to build onboarding HTTP client");
 
+    // If no existing subdomain, offer anonymous quick-start
+    if existing_subdomain.is_none() {
+        eprintln!(
+            "  {} Try instantly without an account, or claim a custom subdomain.",
+            colored::Colorize::cyan("?"),
+        );
+        eprint!("  Try instantly? [Y/n]: ");
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .map_err(|e| format!("Failed to read input: {e}"))?;
+        let input = input.trim().to_lowercase();
+
+        if input.is_empty() || input == "y" || input == "yes" {
+            return run_anonymous_flow(&http).await;
+        }
+        // User chose 'n' — fall through to the claim flow
+        eprintln!();
+    }
+
+    run_email_claim_flow(&http, existing_subdomain).await
+}
+
+/// Anonymous flow: no email, instant random subdomain.
+async fn run_anonymous_flow(http: &reqwest::Client) -> Result<OnboardingResult, String> {
+    eprintln!("  Creating anonymous tunnel...");
+    let resp = http
+        .post(format!("{API_BASE}/api/subdomains/anonymous"))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to reach API: {e}"))?;
+
+    let status = resp.status();
+    if status.is_success() {
+        let claim: AnonymousResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("Invalid API response: {e}"))?;
+        eprintln!(
+            "  {} tunnel ready at '{}.tunnel.mcpr.app' (expires in 1 week)",
+            colored::Colorize::green("✓"),
+            claim.subdomain,
+        );
+        Ok(OnboardingResult {
+            token: claim.token,
+            subdomain: claim.subdomain,
+            anonymous: true,
+        })
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        let msg = serde_json::from_str::<ApiError>(&body)
+            .ok()
+            .and_then(|e| e.message.or(e.error))
+            .unwrap_or(body);
+        Err(format!("Anonymous claim failed ({status}): {msg}"))
+    }
+}
+
+/// Email-based claim flow: pick a subdomain, provide email, get 72h reservation.
+async fn run_email_claim_flow(
+    http: &reqwest::Client,
+    existing_subdomain: Option<&str>,
+) -> Result<OnboardingResult, String> {
     // 1. Get subdomain
     let subdomain = match existing_subdomain {
         Some(s) => {
             eprintln!("  Using subdomain from config: {s}");
             s.to_string()
         }
-        None => ask_subdomain(&http).await?,
+        None => ask_subdomain(http).await?,
     };
 
     // Verify the subdomain is available (even if from config)
     if existing_subdomain.is_some() {
-        let available = check_subdomain(&http, &subdomain).await?;
+        let available = check_subdomain(http, &subdomain).await?;
         if !available {
             eprintln!(
                 "  {} subdomain '{}' is not available",
@@ -101,7 +181,11 @@ async fn run_claim_flow_inner(
             claim.subdomain,
             claim.status,
         );
-        Ok((claim.token, claim.subdomain))
+        Ok(OnboardingResult {
+            token: claim.token,
+            subdomain: claim.subdomain,
+            anonymous: false,
+        })
     } else if status.as_u16() == 409 {
         let body = resp.text().await.unwrap_or_default();
         let msg = serde_json::from_str::<ApiError>(&body)
