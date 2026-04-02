@@ -13,9 +13,7 @@ use serde_json::Value;
 
 use crate::AppState;
 use crate::logger::LogEntry;
-use crate::widgets::{
-    fetch_widget_html, list_widgets, serve_studio, serve_widget_asset, serve_widget_html,
-};
+use crate::widgets::{fetch_widget_html, list_widgets, serve_widget_asset, serve_widget_html};
 use mcpr_protocol::{self as jsonrpc, McpMethod};
 use mcpr_session::{self as session, SessionState, SessionStore};
 use mcpr_widgets::rewrite_response;
@@ -241,29 +239,13 @@ async fn handle_request(
         return serve_oauth_callback_relay(&uri).await;
     }
 
-    // 0. Studio SPA (bundled)
-    if method == Method::GET && (path == "/studio" || path.starts_with("/studio/")) {
-        return serve_studio(path).await;
-    }
-
-    // 1. Widget endpoints: /widgets/{name}.html?raw=1, /widgets (JSON), /widgets/preview → studio
+    // 1. Widget endpoints: /widgets/{name}.html, /widgets (JSON)
     if method == Method::GET {
-        if path == "/widgets/preview" || path == "/widgets/preview/" {
-            // Redirect to studio
-            return axum::response::Redirect::permanent("/studio").into_response();
-        }
         if let Some(name) = path
             .strip_prefix("/widgets/")
             .and_then(|s| s.strip_suffix(".html"))
         {
-            let query = uri.query().unwrap_or("");
-            if query.contains("debug=1") {
-                // Redirect to studio widget page
-                let redirect = format!("/studio/#/widgets/{name}");
-                return axum::response::Redirect::temporary(&redirect).into_response();
-            }
-            let raw = query.contains("raw=1");
-            return serve_widget_html(&state, name, raw).await;
+            return serve_widget_html(&state, name).await;
         }
         if path == "/widgets" || path == "/widgets/" {
             return list_widgets(&state).await;
