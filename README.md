@@ -1,20 +1,10 @@
-<p align="center">
-  <img src="docs/images/mcpr-logo.jpg" alt="mcpr logo" width="200" />
-</p>
-
 <h1 align="center">mcpr</h1>
 
-**Proxy, debug, and observe your MCP server.**
+<p align="center">Open-source proxy for MCP Apps — fixes CSP, handles auth, observes every tool call.</p>
 
-Building an MCP server? ChatGPT and Claude need a public HTTPS endpoint with correct CSP headers — but your server is on localhost, your widgets break in sandboxed iframes, and you can't see what the AI client is actually sending you.
-
-mcpr sits between your MCP server and the AI client. One command gives you a public tunnel, rewrites CSP so widgets just work, and logs every JSON-RPC call so you can see exactly what's happening.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/cptrodgers/mcpr/main/scripts/install.sh | sh
-mcpr --mcp http://localhost:9000
-# → https://abc123.tunnel.mcpr.app
-```
+<p align="center">
+  <a href="#install">Install</a> · <a href="#features">Features</a> · <a href="#getting-started">Getting Started</a> · <a href="docs/CONFIGURATION.md">Docs</a>
+</p>
 
 
 
@@ -28,84 +18,144 @@ https://github.com/user-attachments/assets/680c8b9c-8ffb-4cfb-b175-bdaf5c6f49b4
 curl -fsSL https://raw.githubusercontent.com/cptrodgers/mcpr/main/scripts/install.sh | sh
 ```
 
-## Proxy and Tunnel
+```bash
+mcpr --mcp http://localhost:9000
+# → https://abc123.tunnel.mcpr.app
+```
 
-Point mcpr at your MCP server. You get a public HTTPS URL, a TUI that shows every tool call, and CSP handled for you.
+## Features
+
+### MCP Tunnel
+
+Expose your local MCP server to ChatGPT, Claude, or any AI client — one command, public HTTPS.
 
 ```bash
 mcpr --mcp http://localhost:9000
 # → https://abc123.tunnel.mcpr.app
 ```
 
-Serving widgets too? Add `--widgets` — mcpr merges both behind one URL.
+Running widgets too? mcpr merges both services behind a single URL — MCP requests route to your backend, everything else serves your widgets.
 
 ```bash
 mcpr --mcp http://localhost:9000 --widgets http://localhost:4444
+# → https://abc123.tunnel.mcpr.app       (one URL, two services)
 ```
 
 ```
 Your machine                           AI client (ChatGPT / Claude)
 ┌─────────────────┐
 │ MCP server      │◄──┐
+│ :9000           │   │
 └─────────────────┘   │    mcpr         tunnel
                       ├──────────── ◄──────────── https://abc123.tunnel.mcpr.app
 ┌─────────────────┐   │
 │ Widgets         │◄──┘
+│ :4444           │
 └─────────────────┘
 ```
 
-The URL stays the same across restarts. Configure your AI client once, keep developing.
+The URL stays the same across restarts — configure your AI client once, keep developing.
 
-Every request is parsed as JSON-RPC 2.0 — you see methods, tool names, errors, and timing in the TUI:
+### mcpr Studio
+
+Test your MCP tools and preview widgets at [mcpr.app/studio](https://mcpr.app/studio) — no AI model, no API key, no subscription.
+
+Without Studio, the only way to test widgets is deploying to a public URL and opening them inside ChatGPT or Claude. Studio gives you the same sandboxed environment without the roundtrip.
+
+- **Call tools** — execute your MCP tools with custom input and see raw responses
+- **Render & interact with widgets** — preview the returned UI in a sandboxed iframe, just like ChatGPT and Claude do in production
+- **Full widget API simulation** — `window.openai` (ChatGPT) and JSON-RPC 2.0 (Claude) widget APIs are fully mocked, including `callTool`, `sendFollowUpMessage`, `openExternal`, resize, display modes, and more
+- **CSP & sandbox enforcement** — production-equivalent Content Security Policy and sandbox restrictions, catching violations before you deploy
+- **Switch platforms** — toggle between OpenAI and Claude simulation modes
+- **OAuth debugger** — visualize and debug MCP OAuth flows
+
+Point Studio at your running proxy:
+
+```
+https://mcpr.app/studio?proxy=https://abc123.tunnel.mcpr.app
+```
+
+The proxy shows the Studio URL in the terminal when you start it.
+
+### Protocol-Aware Debugging
+
+mcpr understands MCP at the protocol level — not just HTTP.
+
+Every request is parsed as JSON-RPC 2.0, classified by MCP method, and logged with full context: which tool was called, how long the upstream took, how much overhead the proxy added, and whether the response contained an error.
 
 ```
  21:23:11 POST 200  8.0KB  16ms  15ms↑  1ms↓ initialize → http://localhost:9000/mcp
+ 21:23:11 POST 200 73.6KB  11ms   7ms↑  4ms↓ tools/list → http://localhost:9000/mcp
  21:23:11 POST 200   147B   8ms   8ms↑  0ms↓ tools/call get_weather → http://localhost:9000/mcp
+ 21:23:11 POST 200   637B   4ms   4ms↑  0ms↓ resources/read ui://widget/clock.html
  21:23:11 POST 200   147B   8ms   8ms↑  0ms↓ tools/call search [-32602 Invalid params] → ...
 ```
 
-![mcpr Requests](docs/images/mcpr-tui.png)
+- **MCP method detection** — `initialize`, `tools/call`, `resources/read`, `prompts/get`, etc.
+- **Tool & resource names** — see which tool was called or which resource was read
+- **Timing breakdown** — total round-trip, upstream server time (↑), proxy overhead (↓)
+- **JSON-RPC errors** — error codes and messages from the MCP server shown inline
+- **Session tracking** — track MCP sessions with client info, state, and request history
 
-Need machine-readable output? Pipe structured events to any log aggregator:
+### Structured Events
+
+Every MCP request emits a structured JSON event — pipe to any log aggregator or query with `jq`:
 
 ```bash
 mcpr --mcp http://localhost:9000 --events 2>/dev/null | jq
 ```
 
 ```json
-{"ts":"...","type":"tool_call","tool":"search_products","latency_ms":142,"status":"ok"}
+{
+  "ts": "2026-04-02T10:15:30.142Z",
+  "type": "tool_call",
+  "method": "tools/call",
+  "tool": "search_products",
+  "session": "sess_abc123",
+  "latency_ms": 142,
+  "status": "ok",
+  "upstream": "http://localhost:9000"
+}
 ```
 
-CSP, widget domains, and OAuth URLs are rewritten at the proxy layer — your MCP server stays environment-agnostic. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for details.
+Event types: `tool_call`, `tool_list`, `session_start`, `session_end`, `widget_serve`, `csp_violation`.
 
-### mcpr Studio
+### Edge Config
 
-Test tools and preview widgets at [mcpr.app/studio](https://mcpr.app/studio) — call tools, render widgets in a sandboxed iframe, debug OAuth flows, toggle between OpenAI and Claude modes.
+Move environment-specific config out of your application and into the proxy layer.
 
-```
-https://mcpr.app/studio?proxy=https://abc123.tunnel.mcpr.app
-```
+AI clients require CSP headers, widget domains, and OAuth URLs tailored to each environment. Instead of hardcoding these in your MCP server, mcpr rewrites them at the edge — automatically, for both OpenAI and Claude formats.
 
-![mcpr Studio](docs/images/mcpr-studio.png)
+- **CSP headers** — inject or extend Content Security Policy per environment
+- **Widget & OAuth domains** — rewrite URLs so your server stays environment-agnostic
+- **Zero redeploy** — change config at the proxy, not in your application
 
 ## Comparison
 
 | | ngrok | Cloudflare Tunnel | MCPJam Inspector | mcpr |
 |---|---|---|---|---|
-| **MCP protocol awareness** | None | None | Yes — JSON-RPC inspection | Full JSON-RPC 2.0 parsing, method classification, timing breakdown |
-| **Multi-service behind one URL** | Separate URLs per service | Possible with Workers config | No — inspector only | Auto-merges MCP + widgets behind one URL |
+| **MCP protocol awareness** | None | None | Yes — JSON-RPC inspection | Full JSON-RPC 2.0 parsing, method classification, tool names, error codes, session tracking, timing |
+| **Multi-service behind one URL** | Separate URLs per service | Possible with Workers | No — inspector only | Auto-detects MCP vs widget requests, merges behind one URL |
 | **Tunnel to public HTTPS** | Yes | Yes | No | Yes, one command |
-| **Widget testing** | No | No | Yes — emulates ChatGPT & Claude widget APIs | Yes — Cloud Studio at mcpr.app with CSP enforcement |
-| **OAuth debugging** | No | No | Yes — visual OAuth flow debugger | Yes — OAuth debugger in Cloud Studio |
-| **CSP for MCP Apps** | Manual | Manual | CSP testing in inspector | Built-in per-environment CSP injection |
+| **Widget testing** | No | No | Yes — emulates ChatGPT & Claude widget APIs | Yes — Cloud Studio at [mcpr.app](https://mcpr.app/studio) with CSP enforcement |
+| **Widget HTML rewriting** | No | No | No — not a proxy | Rewrites relative paths so widgets work in sandboxed iframes |
+| **CSP for MCP Apps** | Manual Traffic Policy | Manual Workers | CSP testing in inspector | Automatic CSP injection at the proxy layer |
+| **Structured events** | No | No | No | JSON events for every tool call, session, CSP violation |
+| **OAuth debugging** | No | No | Yes — visual OAuth flow | Yes — OAuth debugger in Cloud Studio |
 | **LLM playground** | No | No | Yes — test against GPT-5, Claude, Gemini | No |
 | **Price** | Free tier; paid for path routing | Free | Free, open source | Free, open source |
+
+> **When ngrok is fine:** ngrok works well if you have a simple MCP server with no widgets (tool-only), bundled single-HTML widgets served inline, or you already have ngrok's paid plan with Traffic Policy.
+>
+> **When MCPJam is great:** MCPJam Inspector is an excellent standalone testing client. If you only need to inspect and test your MCP server without tunneling or proxying, it's a great choice. mcpr focuses on the proxy/tunnel side — they complement each other.
 
 ## Getting Started
 
 mcpr looks for `mcpr.toml` in the current directory (then parent dirs). CLI args override config values.
 
 ### MCP server only
+
+Tunnel your MCP server — no widgets.
 
 ```toml
 # mcpr.toml
@@ -118,6 +168,8 @@ mcpr
 ```
 
 ### MCP server + widgets
+
+Merge both services behind one URL.
 
 ```toml
 # mcpr.toml
@@ -158,23 +210,13 @@ mcp = "http://localhost:9000"
 widgets = "./widgets/dist"
 ```
 
-### Structured events via config
-
-```toml
-# mcpr.toml
-mcp = "http://localhost:9000"
-
-[events]
-enabled = true
-```
-
 ### Self-hosted relay
 
-Run your own tunnel relay instead of using `tunnel.mcpr.app`. Requires wildcard DNS and TLS termination.
+Run your own tunnel relay instead of using `tunnel.mcpr.app`. This requires wildcard DNS, TLS termination (e.g. Cloudflare Tunnel, Caddy, or nginx + Let's Encrypt), and careful configuration.
 
-See [docs/DEPLOY_RELAY_SERVER.md](docs/DEPLOY_RELAY_SERVER.md) for the full guide.
+See [docs/DEPLOY_RELAY_SERVER.md](docs/DEPLOY_RELAY_SERVER.md) for the full guide before getting started.
 
-The relay supports three auth modes — open, static tokens, or external auth provider. See [docs/AUTH_PROVIDER.md](docs/AUTH_PROVIDER.md) for details.
+The relay supports three auth modes — open (anyone can tunnel), static tokens (hardcoded in config), or external auth provider (for dynamic token management). See [docs/AUTH_PROVIDER.md](docs/AUTH_PROVIDER.md) for details on building an auth provider.
 
 ## CLI
 
@@ -182,19 +224,19 @@ The relay supports three auth modes — open, static tokens, or external auth pr
 mcpr [OPTIONS]
 
 Gateway mode (default):
-  --mcp <URL>              Upstream MCP server
-  --widgets <URL|PATH>     Widget source (URL = proxy, PATH = static serve)
-  --port <PORT>            Local proxy port
-  --csp <DOMAIN>           Extra CSP domains (repeatable)
-  --csp-mode <MODE>        CSP mode: "extend" (default) or "override"
-  --relay-url <URL>        Custom relay server (env: MCPR_RELAY_URL)
-  --no-tunnel              Local-only, no tunnel
-  --events                 Emit structured JSON events to stdout
+  --mcp <URL>                     Upstream MCP server
+  --widgets <URL|PATH>            Widget source (URL = proxy, PATH = static serve)
+  --port <PORT>                   Local proxy port
+  --csp <DOMAIN>                  Extra CSP domains (repeatable)
+  --csp-mode <MODE>               CSP mode: "extend" (default) or "override"
+  --relay-url <URL>               Custom relay server (env: MCPR_RELAY_URL)
+  --no-tunnel                     Local-only, no tunnel
+  --events                        Emit structured JSON events to stdout
 
 Relay mode:
-  --relay                  Run as relay server
-  --relay-domain <DOMAIN>  Relay base domain (required in relay mode)
-  --auth-provider <URL>    Auth provider URL (env: MCPR_AUTH_PROVIDER)
+  --relay                         Run as relay server
+  --relay-domain <DOMAIN>         Relay base domain (required in relay mode)
+  --auth-provider <URL>           Auth provider URL (env: MCPR_AUTH_PROVIDER)
   --auth-provider-secret <SECRET> Shared secret (env: MCPR_AUTH_PROVIDER_SECRET)
 ```
 
