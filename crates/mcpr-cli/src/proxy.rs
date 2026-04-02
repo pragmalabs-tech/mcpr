@@ -13,9 +13,7 @@ use serde_json::Value;
 
 use crate::AppState;
 use crate::logger::LogEntry;
-use crate::widgets::{
-    fetch_widget_html, list_widgets, serve_studio, serve_widget_asset, serve_widget_html,
-};
+use crate::widgets::{fetch_widget_html, list_widgets, serve_widget_asset, serve_widget_html};
 use mcpr_protocol::{self as jsonrpc, McpMethod};
 use mcpr_session::{self as session, SessionState, SessionStore};
 use mcpr_widgets::rewrite_response;
@@ -151,20 +149,16 @@ fn is_widget_asset(path: &str, headers: &HeaderMap) -> bool {
 
 /// Serve the OAuth callback relay page.
 ///
-/// When Studio is hosted on a different origin (e.g. mcpr.app) and the MCP server's
-/// OAuth flow redirects back to this proxy, this page relays the authorization code
-/// to the Studio opener window via postMessage. The `state` parameter provides CSRF
-/// protection, so posting to "*" is safe.
-async fn serve_oauth_callback_relay(uri: &axum::http::Uri) -> Response {
-    let query = uri.query().unwrap_or("");
-    let params: std::collections::HashMap<&str, &str> =
-        query.split('&').filter_map(|p| p.split_once('=')).collect();
-
-    let code = params.get("code").unwrap_or(&"");
-    let state = params.get("state").unwrap_or(&"");
-    let error = params.get("error").unwrap_or(&"");
-    let error_description = params.get("error_description").unwrap_or(&"");
-
+/// When the MCP server's OAuth flow redirects back to this proxy with an
+/// authorization code, this page forwards the code/state to the cloud Studio's
+/// own `/studio/oauth/callback` endpoint, which handles the token exchange.
+///
+/// The Studio URL is read from the `?studio=` query param (preferred) or
+/// inferred from known cloud origins. The page uses client-side redirect so
+/// the authorization code is forwarded to the correct Studio instance.
+async fn serve_oauth_callback_relay(_uri: &axum::http::Uri) -> Response {
+    // Forward the full query string to the Studio callback. The Studio
+    // callback page reads code, state, error, error_description from the URL.
     let html = format!(
         r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Authorization</title></head>
@@ -174,33 +168,25 @@ async fn serve_oauth_callback_relay(uri: &axum::http::Uri) -> Response {
 </div>
 <script>
 (function() {{
-  var data = {{
-    type: "mcpr_oauth_callback",
-    code: "{code}",
-    state: "{state}",
-    error: "{error}",
-    error_description: "{error_description}"
-  }};
-  if (!data.code && !data.error) {{
-    document.getElementById("msg").innerHTML = "<p>Missing authorization code.</p>";
-    return;
+  var params = new URLSearchParams(window.location.search);
+  // Redirect to the cloud Studio callback which handles the token exchange.
+  // Determine Studio origin: ?studio= param, or infer from current host.
+  var studioOrigin = params.get("studio");
+  if (!studioOrigin) {{
+    // In local dev (localhost), assume Studio is on port 5173 (Vite default).
+    // In production, the cloud app is at mcpr.app.
+    var host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1") {{
+      studioOrigin = window.location.protocol + "//localhost:5173";
+    }} else {{
+      studioOrigin = "https://mcpr.app";
+    }}
   }}
-  if (window.opener) {{
-    window.opener.postMessage(data, "*");
-    document.getElementById("msg").innerHTML = data.error
-      ? "<p style='color:#e55'>Sign in failed: " + (data.error_description || data.error) + "</p><p style='font-size:13px;margin-top:8px'>This window will close automatically.</p>"
-      : "<p style='color:#4a4'>Authorization received</p><p style='font-size:13px;margin-top:8px'>This window will close automatically.</p>";
-    setTimeout(function() {{ window.close(); }}, 1000);
-  }} else {{
-    document.getElementById("msg").innerHTML = "<p style='color:#4a4'>Authorization received</p><p style='font-size:13px;margin-top:8px'>Return to Studio to complete sign in.</p>";
-  }}
+  var callbackUrl = studioOrigin.replace(/\/+$/, "") + "/studio/oauth/callback?" + params.toString();
+  window.location.replace(callbackUrl);
 }})();
 </script>
 </body></html>"#,
-        code = code,
-        state = state,
-        error = error,
-        error_description = error_description,
     );
 
     let mut headers = HeaderMap::new();
@@ -241,29 +227,13 @@ async fn handle_request(
         return serve_oauth_callback_relay(&uri).await;
     }
 
-    // 0. Studio SPA (bundled)
-    if method == Method::GET && (path == "/studio" || path.starts_with("/studio/")) {
-        return serve_studio(path).await;
-    }
-
-    // 1. Widget endpoints: /widgets/{name}.html?raw=1, /widgets (JSON), /widgets/preview → studio
+    // 1. Widget endpoints: /widgets/{name}.html, /widgets (JSON)
     if method == Method::GET {
-        if path == "/widgets/preview" || path == "/widgets/preview/" {
-            // Redirect to studio
-            return axum::response::Redirect::permanent("/studio").into_response();
-        }
         if let Some(name) = path
             .strip_prefix("/widgets/")
             .and_then(|s| s.strip_suffix(".html"))
         {
-            let query = uri.query().unwrap_or("");
-            if query.contains("debug=1") {
-                // Redirect to studio widget page
-                let redirect = format!("/studio/#/widgets/{name}");
-                return axum::response::Redirect::temporary(&redirect).into_response();
-            }
-            let raw = query.contains("raw=1");
-            return serve_widget_html(&state, name, raw).await;
+            return serve_widget_html(&state, name).await;
         }
         if path == "/widgets" || path == "/widgets/" {
             return list_widgets(&state).await;

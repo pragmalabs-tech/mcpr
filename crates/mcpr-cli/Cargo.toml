@@ -27,7 +27,6 @@ uuid = { workspace = true }
 futures-util = { workspace = true }
 http-body-util = "0.1"
 toml = "0.8"
-include_dir = "0.7.4"
 dashmap = { workspace = true }
 url = { workspace = true }
 mcpr-protocol = { workspace = true }

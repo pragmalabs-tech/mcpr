@@ -126,14 +126,8 @@ pub async fn fetch_widget_html(state: &AppState, widget_name: &str) -> Option<St
     Some(rewrite_html_asset_urls(&html, proxy))
 }
 
-/// Serve raw widget HTML at `/widgets/{name}.html?raw=1`.
-/// Without `?raw=1`, redirects to studio.
-pub async fn serve_widget_html(state: &AppState, name: &str, raw: bool) -> Response {
-    if !raw {
-        let redirect = format!("/studio/#/widgets/{name}");
-        return axum::response::Redirect::temporary(&redirect).into_response();
-    }
-
+/// Serve raw widget HTML at `/widgets/{name}.html`.
+pub async fn serve_widget_html(state: &AppState, name: &str) -> Response {
     let Some(html) = fetch_widget_html(state, name).await else {
         state.logger.emit(LogEntry::new(
             "GET",
@@ -223,71 +217,6 @@ pub async fn discover_widget_names(state: &AppState) -> Vec<String> {
             found
         }
         None => vec![],
-    }
-}
-
-// ── Studio (fully embedded SPA) ─────────────────────────
-
-use include_dir::{Dir, include_dir};
-
-static STUDIO_DIR: Dir = include_dir!("static/studio");
-
-/// Serve the bundled studio SPA. Everything is embedded in the binary.
-pub async fn serve_studio(path: &str) -> Response {
-    let sub = path
-        .strip_prefix("/studio")
-        .unwrap_or("")
-        .trim_start_matches('/');
-
-    // Non-empty path with extension → try to serve the file
-    let file_path = if sub.is_empty() { "index.html" } else { sub };
-
-    if let Some(file) = STUDIO_DIR.get_file(file_path) {
-        let mime = mime_from_ext(
-            std::path::Path::new(file_path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or(""),
-        );
-        let cache = if file_path.starts_with("assets/") {
-            "public, max-age=31536000, immutable"
-        } else {
-            "no-cache"
-        };
-        let mut headers = HeaderMap::new();
-        headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
-        headers.insert(header::CACHE_CONTROL, cache.parse().unwrap());
-        return (StatusCode::OK, headers, file.contents()).into_response();
-    }
-
-    // SPA fallback: serve index.html for client-side routing
-    if let Some(index) = STUDIO_DIR.get_file("index.html") {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            "text/html; charset=utf-8".parse().unwrap(),
-        );
-        headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
-        return (StatusCode::OK, headers, index.contents()).into_response();
-    }
-
-    StatusCode::NOT_FOUND.into_response()
-}
-
-fn mime_from_ext(ext: &str) -> &'static str {
-    match ext {
-        "html" => "text/html; charset=utf-8",
-        "js" => "application/javascript",
-        "css" => "text/css",
-        "svg" => "image/svg+xml",
-        "json" => "application/json",
-        "woff" => "font/woff",
-        "woff2" => "font/woff2",
-        "ttf" => "font/ttf",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "ico" => "image/x-icon",
-        _ => "application/octet-stream",
     }
 }
 

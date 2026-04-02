@@ -9,5 +9,7 @@ dist/
 .claude/settings.local.json
 
 node_modules
+static/studio/
+studio/
 mcpr.toml
 logs
