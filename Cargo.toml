@@ -1,31 +1,35 @@
-[package]
-name = "mcpr"
-version = "0.1.0"
+[workspace]
+members = [
+    "crates/mcpr-cli",
+    "crates/mcpr-protocol",
+    "crates/mcpr-session",
+    "crates/mcpr-widgets",
+    "crates/mcpr-tunnel",
+    "crates/mcpr-events",
+]
+resolver = "2"
+
+[workspace.package]
 edition = "2024"
 license = "Apache-2.0"
+version = "0.1.0"
 
-[dependencies]
+[workspace.dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "sync"] }
-clap = { version = "4", features = ["derive", "env"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tower-http = { version = "0.6", features = ["cors"] }
-colored = "3"
-chrono = "0.4"
-ratatui = "0.29"
-crossterm = "0.28"
-tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
-sha2 = "0.10"
-base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-futures-util = "0.3"
-http-body-util = "0.1"
-toml = "0.8"
-include_dir = "0.7.4"
 dashmap = "6"
+futures-util = "0.3"
 url = "2"
-
-[dev-dependencies]
-tempfile = "3"
+base64 = "0.22"
+sha2 = "0.10"
+tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
+mcpr-protocol = { path = "crates/mcpr-protocol" }
+mcpr-session = { path = "crates/mcpr-session" }
+mcpr-widgets = { path = "crates/mcpr-widgets" }
+mcpr-tunnel = { path = "crates/mcpr-tunnel" }
+mcpr-events = { path = "crates/mcpr-events" }

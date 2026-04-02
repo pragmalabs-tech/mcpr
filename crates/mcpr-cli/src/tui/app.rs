@@ -6,7 +6,7 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
-use crate::session::MemorySessionStore;
+use mcpr_session::MemorySessionStore;
 
 use super::state::{SharedTuiState, Tab};
 use super::ui;

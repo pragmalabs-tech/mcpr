@@ -1,7 +1,7 @@
 use serde_json::Value;
 
-use crate::config::CspMode;
-use crate::jsonrpc;
+use crate::csp::CspMode;
+use mcpr_protocol as jsonrpc;
 
 #[derive(Clone)]
 pub struct RewriteConfig {

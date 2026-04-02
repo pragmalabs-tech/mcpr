@@ -1,14 +1,9 @@
 mod config;
 mod display;
-mod jsonrpc;
 pub mod logger;
 mod onboarding;
 mod proxy;
-mod relay;
-mod rewrite;
-mod session;
 mod tui;
-mod tunnel;
 mod widgets;
 
 use std::sync::Arc;
@@ -25,9 +20,9 @@ use logger::{
     DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, TuiSink,
     prefix_from_upstream,
 };
+use mcpr_session::MemorySessionStore;
+use mcpr_widgets::RewriteConfig;
 use proxy::proxy_routes;
-use rewrite::RewriteConfig;
-use session::MemorySessionStore;
 use tui::SharedTuiState;
 use widgets::WidgetSource;
 
@@ -68,11 +63,26 @@ pub struct AppState {
     pub upstream_semaphore: Arc<Semaphore>,
 }
 
+/// Adapter to bridge mcpr-tunnel's TunnelStatusCallback to TUI state.
+struct TuiTunnelStatus(SharedTuiState);
+
+impl mcpr_tunnel::TunnelStatusCallback for TuiTunnelStatus {
+    fn on_connected(&self, _url: &str) {
+        self.0.lock().unwrap().tunnel_status = tui::ConnectionStatus::Connected;
+    }
+    fn on_disconnected(&self) {
+        self.0.lock().unwrap().tunnel_status = tui::ConnectionStatus::Disconnected;
+    }
+    fn on_evicted(&self) {
+        self.0.lock().unwrap().tunnel_status = tui::ConnectionStatus::Evicted;
+    }
+}
+
 #[tokio::main]
 async fn main() {
     match config::load() {
         Mode::Relay(cfg) => {
-            relay::start_relay(cfg).await;
+            mcpr_tunnel::relay::start_relay(cfg).await;
         }
         Mode::Gateway(cfg) => {
             run_gateway(cfg).await;
@@ -188,12 +198,12 @@ async fn run_gateway(cfg: GatewayConfig) {
             }
         }
 
-        match tunnel::start_tunnel_client(
+        match mcpr_tunnel::start_tunnel_client(
             actual_port,
             relay_url,
             &token,
             desired_subdomain.as_deref(),
-            tui_state.clone(),
+            TuiTunnelStatus(tui_state.clone()),
         )
         .await
         {
