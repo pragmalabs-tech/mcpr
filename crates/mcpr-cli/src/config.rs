@@ -343,20 +343,33 @@ impl GatewayConfig {
             Ok(contents) => {
                 let mut new_contents = contents.clone();
 
-                if new_contents.contains("[tunnel]") {
+                // Check for uncommented [tunnel] section and keys
+                let has_tunnel_section = new_contents.lines().any(|l| l.trim() == "[tunnel]");
+                let has_token = new_contents.lines().any(|l| {
+                    let t = l.trim();
+                    !t.starts_with('#') && (t.starts_with("token =") || t.starts_with("token="))
+                });
+                let has_subdomain = new_contents.lines().any(|l| {
+                    let t = l.trim();
+                    !t.starts_with('#')
+                        && (t.starts_with("subdomain =") || t.starts_with("subdomain="))
+                });
+                let has_anonymous = new_contents.lines().any(|l| {
+                    let t = l.trim();
+                    !t.starts_with('#')
+                        && (t.starts_with("anonymous =") || t.starts_with("anonymous="))
+                });
+
+                if has_tunnel_section {
                     // Insert under existing [tunnel] section if keys are missing
                     let mut insert = String::new();
-                    if !new_contents.contains("token =") && !new_contents.contains("token=") {
+                    if !has_token {
                         insert.push_str(&format!("token = \"{token}\"\n"));
                     }
-                    if !new_contents.contains("subdomain =") && !new_contents.contains("subdomain=")
-                    {
+                    if !has_subdomain {
                         insert.push_str(&format!("subdomain = \"{subdomain}\"\n"));
                     }
-                    if anonymous
-                        && !new_contents.contains("anonymous =")
-                        && !new_contents.contains("anonymous=")
-                    {
+                    if anonymous && !has_anonymous {
                         insert.push_str("anonymous = true\n");
                     }
                     if !insert.is_empty() {

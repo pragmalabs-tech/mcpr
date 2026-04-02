@@ -149,6 +149,69 @@ fn is_widget_asset(path: &str, headers: &HeaderMap) -> bool {
     false
 }
 
+/// Serve the OAuth callback relay page.
+///
+/// When Studio is hosted on a different origin (e.g. mcpr.app) and the MCP server's
+/// OAuth flow redirects back to this proxy, this page relays the authorization code
+/// to the Studio opener window via postMessage. The `state` parameter provides CSRF
+/// protection, so posting to "*" is safe.
+async fn serve_oauth_callback_relay(uri: &axum::http::Uri) -> Response {
+    let query = uri.query().unwrap_or("");
+    let params: std::collections::HashMap<&str, &str> =
+        query.split('&').filter_map(|p| p.split_once('=')).collect();
+
+    let code = params.get("code").unwrap_or(&"");
+    let state = params.get("state").unwrap_or(&"");
+    let error = params.get("error").unwrap_or(&"");
+    let error_description = params.get("error_description").unwrap_or(&"");
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Authorization</title></head>
+<body>
+<div id="msg" style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;color:#888">
+<p>Completing authorization…</p>
+</div>
+<script>
+(function() {{
+  var data = {{
+    type: "mcpr_oauth_callback",
+    code: "{code}",
+    state: "{state}",
+    error: "{error}",
+    error_description: "{error_description}"
+  }};
+  if (!data.code && !data.error) {{
+    document.getElementById("msg").innerHTML = "<p>Missing authorization code.</p>";
+    return;
+  }}
+  if (window.opener) {{
+    window.opener.postMessage(data, "*");
+    document.getElementById("msg").innerHTML = data.error
+      ? "<p style='color:#e55'>Sign in failed: " + (data.error_description || data.error) + "</p><p style='font-size:13px;margin-top:8px'>This window will close automatically.</p>"
+      : "<p style='color:#4a4'>Authorization received</p><p style='font-size:13px;margin-top:8px'>This window will close automatically.</p>";
+    setTimeout(function() {{ window.close(); }}, 1000);
+  }} else {{
+    document.getElementById("msg").innerHTML = "<p style='color:#4a4'>Authorization received</p><p style='font-size:13px;margin-top:8px'>Return to Studio to complete sign in.</p>";
+  }}
+}})();
+</script>
+</body></html>"#,
+        code = code,
+        state = state,
+        error = error,
+        error_description = error_description,
+    );
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "text/html; charset=utf-8".parse().unwrap(),
+    );
+    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    (StatusCode::OK, headers, html).into_response()
+}
+
 /// All proxy routes — catch-all that routes by method + content-type.
 pub fn proxy_routes(router: Router<AppState>) -> Router<AppState> {
     router.fallback(any(handle_request))
@@ -170,6 +233,13 @@ async fn handle_request(
 ) -> Response {
     let start = Instant::now();
     let path = uri.path();
+
+    // 0a. OAuth callback relay — serves a tiny HTML page that posts the authorization
+    // code back to the Studio opener window via postMessage. This allows Studio hosted
+    // on a different origin (e.g. mcpr.app) to complete OAuth flows with this proxy.
+    if method == Method::GET && path == "/oauth/callback" {
+        return serve_oauth_callback_relay(&uri).await;
+    }
 
     // 0. Studio SPA (bundled)
     if method == Method::GET && (path == "/studio" || path.starts_with("/studio/")) {
