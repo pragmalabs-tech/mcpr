@@ -1,8 +1,11 @@
 mod config;
 mod display;
 pub mod logger;
+mod mcp_handler;
 mod onboarding;
+mod passthrough;
 mod proxy;
+mod router;
 mod tui;
 mod widgets;
 
