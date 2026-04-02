@@ -219,6 +219,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -1036,6 +1037,11 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "include_dir",
+ "mcpr-events",
+ "mcpr-protocol",
+ "mcpr-session",
+ "mcpr-tunnel",
+ "mcpr-widgets",
  "ratatui",
  "reqwest",
  "serde",
@@ -1048,6 +1054,59 @@ dependencies = [
  "tower-http",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "mcpr-events"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mcpr-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mcpr-session"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dashmap",
+ "serde_json",
+]
+
+[[package]]
+name = "mcpr-tunnel"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "colored",
+ "dashmap",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "uuid",
+]
+
+[[package]]
+name = "mcpr-widgets"
+version = "0.1.0"
+dependencies = [
+ "mcpr-protocol",
+ "serde_json",
 ]
 
 [[package]]

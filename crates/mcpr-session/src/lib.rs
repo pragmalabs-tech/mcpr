@@ -48,10 +48,6 @@ impl SessionInfo {
 
 /// Trait for session storage backends.
 /// Async to support I/O-backed stores (Redis, database, logging).
-#[allow(
-    dead_code,
-    reason = "trait defines full session API; unused methods needed for alternative backends"
-)]
 pub trait SessionStore: Send + Sync + 'static {
     fn create(&self, id: &str) -> impl Future<Output = SessionInfo> + Send;
     fn get(&self, id: &str) -> impl Future<Output = Option<SessionInfo>> + Send;
@@ -78,6 +74,12 @@ impl MemorySessionStore {
     /// Sync access to session list — for use in non-async contexts (TUI rendering).
     pub fn list_sync(&self) -> Vec<SessionInfo> {
         self.sessions.iter().map(|r| r.value().clone()).collect()
+    }
+}
+
+impl Default for MemorySessionStore {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

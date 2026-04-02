@@ -12,13 +12,13 @@ use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::AppState;
-use crate::jsonrpc::{self, McpMethod};
 use crate::logger::LogEntry;
-use crate::rewrite::rewrite_response;
-use crate::session::{self, SessionState, SessionStore};
 use crate::widgets::{
     fetch_widget_html, list_widgets, serve_studio, serve_widget_asset, serve_widget_html,
 };
+use mcpr_protocol::{self as jsonrpc, McpMethod};
+use mcpr_session::{self as session, SessionState, SessionStore};
+use mcpr_widgets::rewrite_response;
 
 /// Read a response body with a size cap. Returns 502 if the upstream response exceeds `max_bytes`.
 async fn read_body_capped(resp: reqwest::Response, max_bytes: usize) -> Result<Bytes, Response> {
@@ -904,12 +904,12 @@ mod tests {
         crate::AppState {
             mcp_upstream: upstream_url.to_string(),
             widget_source: None,
-            rewrite_config: Arc::new(RwLock::new(crate::rewrite::RewriteConfig {
+            rewrite_config: Arc::new(RwLock::new(mcpr_widgets::RewriteConfig {
                 proxy_url: "http://localhost:0".to_string(),
                 proxy_domain: "localhost".to_string(),
                 mcp_upstream: upstream_url.to_string(),
                 extra_csp_domains: vec![],
-                csp_mode: crate::config::CspMode::default(),
+                csp_mode: mcpr_widgets::CspMode::default(),
             })),
             http_client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(5))
@@ -917,7 +917,7 @@ mod tests {
                 .unwrap(),
             tui_state: crate::tui::new_shared_state(),
             logger: crate::logger::LogRouter::start(vec![]).router,
-            sessions: crate::session::MemorySessionStore::new(),
+            sessions: mcpr_session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
             request_timeout: std::time::Duration::from_secs(30),

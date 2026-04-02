@@ -6,7 +6,7 @@ use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs,
 };
 
-use crate::session::MemorySessionStore;
+use mcpr_session::MemorySessionStore;
 
 use super::state::{ConnectionStatus, SharedTuiState, Tab};
 
@@ -503,28 +503,28 @@ fn render_sessions_panel(
     render_session_detail(frame, chunks[1], session, s);
 }
 
-fn session_state_color(state: &crate::session::SessionState) -> Color {
+fn session_state_color(state: &mcpr_session::SessionState) -> Color {
     match state {
-        crate::session::SessionState::Created => Color::Yellow,
-        crate::session::SessionState::Initialized => Color::Cyan,
-        crate::session::SessionState::Active => Color::Green,
-        crate::session::SessionState::Closed => Color::Red,
+        mcpr_session::SessionState::Created => Color::Yellow,
+        mcpr_session::SessionState::Initialized => Color::Cyan,
+        mcpr_session::SessionState::Active => Color::Green,
+        mcpr_session::SessionState::Closed => Color::Red,
     }
 }
 
-fn session_state_label(state: &crate::session::SessionState) -> &'static str {
+fn session_state_label(state: &mcpr_session::SessionState) -> &'static str {
     match state {
-        crate::session::SessionState::Created => "CREATED",
-        crate::session::SessionState::Initialized => "INITIALIZED",
-        crate::session::SessionState::Active => "ACTIVE",
-        crate::session::SessionState::Closed => "CLOSED",
+        mcpr_session::SessionState::Created => "CREATED",
+        mcpr_session::SessionState::Initialized => "INITIALIZED",
+        mcpr_session::SessionState::Active => "ACTIVE",
+        mcpr_session::SessionState::Closed => "CLOSED",
     }
 }
 
 fn render_session_detail(
     frame: &mut Frame,
     area: Rect,
-    session: &crate::session::SessionInfo,
+    session: &mcpr_session::SessionInfo,
     s: &super::state::TuiState,
 ) {
     let block = Block::default()

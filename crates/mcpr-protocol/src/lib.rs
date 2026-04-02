@@ -24,8 +24,6 @@ impl std::fmt::Display for JsonRpcId {
 }
 
 /// A classified JSON-RPC 2.0 message.
-// Fields used by tests now; proxy.rs will consume them for batch handling + 202 notifications.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum JsonRpcMessage {
     /// Has `method` + `id` → expects a response.
@@ -36,7 +34,6 @@ pub enum JsonRpcMessage {
     Response(JsonRpcResponse),
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct JsonRpcRequest {
     pub id: JsonRpcId,
@@ -44,14 +41,12 @@ pub struct JsonRpcRequest {
     pub params: Option<Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct JsonRpcNotification {
     pub method: String,
     pub params: Option<Value>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct JsonRpcResponse {
     pub id: JsonRpcId,
@@ -59,7 +54,6 @@ pub struct JsonRpcResponse {
     pub error: Option<JsonRpcError>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub struct JsonRpcError {
     pub code: i64,
@@ -69,8 +63,6 @@ pub struct JsonRpcError {
 
 // ── JSON-RPC 2.0 error codes (spec: https://www.jsonrpc.org/specification#error_object) ──
 
-// Used by tests now; proxy.rs will use for returning spec-compliant errors (ACL, validation).
-#[allow(dead_code)]
 pub mod error_code {
     /// Invalid JSON was received.
     pub const PARSE_ERROR: i64 = -32700;
@@ -101,7 +93,6 @@ pub mod error_code {
 
 /// Build a JSON-RPC 2.0 error response as bytes.
 /// `id` can be a request id or `Value::Null` if the request id couldn't be parsed.
-#[allow(dead_code)] // needed for Phase 3 ACL (rejecting forbidden methods)
 pub fn error_response(id: &Value, code: i64, message: &str) -> Vec<u8> {
     let resp = serde_json::json!({
         "jsonrpc": "2.0",
@@ -293,7 +284,6 @@ impl ParsedBody {
     }
 
     /// Get the id of the first request (if any).
-    #[allow(dead_code)] // needed for batch response routing
     pub fn first_request_id(&self) -> Option<&JsonRpcId> {
         self.messages.iter().find_map(|m| match m {
             JsonRpcMessage::Request(r) => Some(&r.id),
@@ -302,7 +292,6 @@ impl ParsedBody {
     }
 
     /// True if every message is a notification (no id, no response expected).
-    #[allow(dead_code)] // needed for HTTP 202 handling per MCP spec
     pub fn is_notification_only(&self) -> bool {
         self.messages
             .iter()

@@ -5,9 +5,16 @@ use std::collections::HashMap;
 use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 
-use crate::relay::{
+use crate::protocol::{
     RegisterAck, RegisterRequest, SubdomainOffer, SubdomainPick, TunnelRequest, TunnelResponse,
 };
+
+/// Callback for tunnel status changes.
+pub trait TunnelStatusCallback: Send + Sync + 'static {
+    fn on_connected(&self, url: &str);
+    fn on_disconnected(&self);
+    fn on_evicted(&self);
+}
 
 /// Connect to a relay server and return the assigned public URL.
 /// Spawns a background task that proxies requests from relay → localhost.
@@ -17,7 +24,7 @@ pub async fn start_tunnel_client(
     relay_url: &str,
     token: &str,
     subdomain: Option<&str>,
-    tui_state: crate::tui::SharedTuiState,
+    status: impl TunnelStatusCallback,
 ) -> Result<String, String> {
     let relay = relay_url.trim_end_matches('/');
     let ws_url = if relay.starts_with("ws://") || relay.starts_with("wss://") {
@@ -93,7 +100,7 @@ pub async fn start_tunnel_client(
         .expect("Failed to build tunnel HTTP client");
 
     // Mark tunnel as connected
-    tui_state.lock().unwrap().tunnel_status = crate::tui::ConnectionStatus::Connected;
+    status.on_connected(&public_url);
 
     // Spawn background task: read requests from relay, forward to localhost, respond
     tokio::spawn(async move {
@@ -145,11 +152,11 @@ pub async fn start_tunnel_client(
         }
 
         // Update status based on disconnect reason
-        tui_state.lock().unwrap().tunnel_status = if evicted {
-            crate::tui::ConnectionStatus::Evicted
+        if evicted {
+            status.on_evicted();
         } else {
-            crate::tui::ConnectionStatus::Disconnected
-        };
+            status.on_disconnected();
+        }
 
         send_task.abort();
     });
