@@ -104,19 +104,7 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
         truncate(&s.widgets)
     };
 
-    // ASCII logo
-    let logo_color = Color::Rgb(210, 130, 50); // orange to match the logo
-    let logo_lines = [r"  ┌─┬─┐ ", r"  │╲│╱│ ", r"  │╱ ╲│ ", r"  └─┴─┘ "];
-    let mut lines: Vec<Line> = logo_lines
-        .iter()
-        .map(|l| {
-            Line::from(Span::styled(
-                *l,
-                Style::default().fg(logo_color).add_modifier(Modifier::BOLD),
-            ))
-        })
-        .collect();
-
+    let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(""));
     let mut tunnel_spans = vec![
         Span::styled("  Tunnel  ", Style::default().fg(Color::DarkGray)),
