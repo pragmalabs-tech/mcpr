@@ -472,6 +472,19 @@ async fn check_mcp_endpoint(
 
     let status_code = resp.status().as_u16();
 
+    // Auth-protected servers return 401/403 — the server is reachable and likely MCP,
+    // we just can't verify with a probe. Mark as connected; the first real client
+    // initialize will confirm status.
+    if status_code == 401 || status_code == 403 {
+        return (
+            tui::ConnectionStatus::Connected,
+            Some(
+                "Server requires authentication. Status will update on first client connection."
+                    .to_string(),
+            ),
+        );
+    }
+
     // Read the body (capped to avoid OOM on non-MCP endpoints)
     let body_bytes = match resp.bytes().await {
         Ok(b) => b,

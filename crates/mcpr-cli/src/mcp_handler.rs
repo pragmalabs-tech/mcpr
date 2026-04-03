@@ -119,6 +119,11 @@ pub async fn handle_mcp_post(
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
+    // On successful initialize, confirm MCP connectivity in the TUI
+    if mcp_method == McpMethod::Initialize && status < 400 {
+        state.tui_state.lock().unwrap().confirm_mcp_connected();
+    }
+
     if mcp_method == McpMethod::Initialize
         && status < 400
         && let Some(ref sid) = resp_session_id

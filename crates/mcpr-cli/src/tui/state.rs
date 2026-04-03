@@ -97,6 +97,12 @@ impl TuiState {
         }
     }
 
+    /// Mark the MCP upstream as confirmed connected (no warning).
+    pub fn confirm_mcp_connected(&mut self) {
+        self.mcp_status = ConnectionStatus::Connected;
+        self.mcp_warning = None;
+    }
+
     pub fn uptime(&self) -> String {
         let secs = self.started_at.elapsed().as_secs();
         if secs < 60 {
