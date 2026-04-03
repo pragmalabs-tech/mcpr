@@ -16,7 +16,7 @@ pub enum Mode {
 // ── CLI args ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "mcpr", about = "MCP proxy with widget serving and tunnel")]
+#[command(name = "mcpr", version, about = "Open-source proxy for MCP Apps — fixes CSP, handles auth, observes every tool call.")]
 struct Cli {
     /// Upstream MCP server URL
     #[arg(long)]
