@@ -33,7 +33,7 @@ pub async fn serve_oauth_callback_relay() -> Response {
     if (host === "localhost" || host === "127.0.0.1") {
       studioOrigin = window.location.protocol + "//localhost:5173";
     } else {
-      studioOrigin = "https://mcpr.app";
+      studioOrigin = "https://cloud.mcpr.app";
     }
   }
   var callbackUrl = studioOrigin.replace(/\/+$/, "") + "/studio/oauth/callback?" + params.toString();
