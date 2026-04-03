@@ -1,0 +1,144 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+#app {
+  width: 100%;
+  max-width: 420px;
+}
+
+/* Loading state */
+#loading {
+  text-align: center;
+  padding: 60px 20px;
+}
+
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin: 0 auto 16px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+#loading p {
+  opacity: 0.7;
+  font-size: 14px;
+}
+
+/* Weather card */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.icon {
+  font-size: 64px;
+  line-height: 1;
+}
+
+.info {
+  flex: 1;
+}
+
+.info h1 {
+  font-size: 24px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.condition {
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+.temp {
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Details */
+.details {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.detail {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+}
+
+.detail .label {
+  display: block;
+  font-size: 12px;
+  opacity: 0.7;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.detail .value {
+  display: block;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+/* Forecast */
+.forecast {
+  display: flex;
+  gap: 8px;
+}
+
+.forecast-day {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(10px);
+  border-radius: 12px;
+  padding: 12px 8px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.day-name {
+  font-size: 12px;
+  opacity: 0.7;
+  font-weight: 500;
+}
+
+.day-icon {
+  font-size: 24px;
+}
+
+.day-temp {
+  font-size: 16px;
+  font-weight: 600;
+}
