@@ -243,13 +243,17 @@ fn render_log_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) {
                 ),
             ];
 
-            // Size
-            let size_str = match entry.resp_size {
-                Some(size) => format!("{:>7}", format_bytes(size)),
-                None => "      -".to_string(),
+            // Size (req→resp)
+            let req_str = match entry.req_size {
+                Some(size) => format_bytes(size),
+                None => "-".to_string(),
+            };
+            let resp_str = match entry.resp_size {
+                Some(size) => format_bytes(size),
+                None => "-".to_string(),
             };
             spans.push(Span::styled(
-                format!("{size_str} "),
+                format!("{:>5}→{:<5} ", req_str, resp_str),
                 Style::default().fg(Color::DarkGray),
             ));
 
