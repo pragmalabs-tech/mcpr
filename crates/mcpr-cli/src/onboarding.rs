@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const API_BASE: &str = "https://api.mcpr.app";
+const API_BASE: &str = "https://api.cloud.mcpr.app";
 
 #[derive(Serialize)]
 struct ClaimRequest {

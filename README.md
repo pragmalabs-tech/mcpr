@@ -58,7 +58,7 @@ The URL stays the same across restarts — configure your AI client once, keep d
 
 ### mcpr Studio
 
-Test your MCP tools and preview widgets at [mcpr.app/studio](https://mcpr.app/studio) — no AI model, no API key, no subscription.
+Test your MCP tools and preview widgets at [cloud.mcpr.app/studio](https://cloud.mcpr.app/studio) — no AI model, no API key, no subscription.
 
 Without Studio, the only way to test widgets is deploying to a public URL and opening them inside ChatGPT or Claude. Studio gives you the same sandboxed environment without the roundtrip.
 
@@ -72,7 +72,7 @@ Without Studio, the only way to test widgets is deploying to a public URL and op
 Point Studio at your running proxy:
 
 ```
-https://mcpr.app/studio?proxy=https://abc123.tunnel.mcpr.app
+https://cloud.mcpr.app/studio?proxy=https://abc123.tunnel.mcpr.app
 ```
 
 The proxy shows the Studio URL in the terminal when you start it.
@@ -137,7 +137,7 @@ AI clients require CSP headers, widget domains, and OAuth URLs tailored to each 
 | **MCP protocol awareness** | None | None | Yes — JSON-RPC inspection | Full JSON-RPC 2.0 parsing, method classification, tool names, error codes, session tracking, timing |
 | **Multi-service behind one URL** | Separate URLs per service | Possible with Workers | No — inspector only | Auto-detects MCP vs widget requests, merges behind one URL |
 | **Tunnel to public HTTPS** | Yes | Yes | No | Yes, one command |
-| **Widget testing** | No | No | Yes — emulates ChatGPT & Claude widget APIs | Yes — Cloud Studio at [mcpr.app](https://mcpr.app/studio) with CSP enforcement |
+| **Widget testing** | No | No | Yes — emulates ChatGPT & Claude widget APIs | Yes — Cloud Studio at [cloud.mcpr.app](https://cloud.mcpr.app/studio) with CSP enforcement |
 | **Widget HTML rewriting** | No | No | No — not a proxy | Rewrites relative paths so widgets work in sandboxed iframes |
 | **CSP for MCP Apps** | Manual Traffic Policy | Manual Workers | CSP testing in inspector | Automatic CSP injection at the proxy layer |
 | **Structured events** | No | No | No | JSON events for every tool call, session, CSP violation |

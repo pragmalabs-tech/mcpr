@@ -168,7 +168,7 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
     } else {
         &s.proxy_url
     };
-    let studio_url = format!("https://mcpr.app/studio?proxy={}", proxy);
+    let studio_url = format!("https://cloud.mcpr.app/studio?proxy={}", proxy);
 
     let mut bottom_spans = vec![
         Span::styled(" Studio ", Style::default().fg(Color::DarkGray)),
