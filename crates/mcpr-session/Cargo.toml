@@ -3,6 +3,8 @@ name = "mcpr-session"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "MCP session management for mcpr"
 
 [dependencies]
 chrono = { workspace = true }

@@ -3,6 +3,8 @@ name = "mcpr-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "JSON-RPC 2.0 parser and MCP protocol types for mcpr"
 
 [dependencies]
 serde = { workspace = true }

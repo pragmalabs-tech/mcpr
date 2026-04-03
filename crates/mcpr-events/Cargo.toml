@@ -3,6 +3,8 @@ name = "mcpr-events"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Structured event system for MCP tool calls and sessions"
 
 [dependencies]
 serde = { workspace = true }

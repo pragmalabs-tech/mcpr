@@ -3,6 +3,8 @@ name = "mcpr-widgets"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "CSP handling and HTML rewriting for MCP widget iframes"
 
 [dependencies]
 mcpr-protocol = { workspace = true }

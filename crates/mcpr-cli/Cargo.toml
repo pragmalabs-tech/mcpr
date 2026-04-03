@@ -3,6 +3,8 @@ name = "mcpr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Open-source proxy for MCP Apps — fixes CSP, handles auth, observes every tool call."
 
 [[bin]]
 name = "mcpr"
