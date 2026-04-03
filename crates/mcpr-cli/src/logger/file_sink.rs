@@ -386,6 +386,7 @@ mod tests {
             .detail("get_weather")
             .session_id("sid-123")
             .upstream("http://localhost:9000/mcp")
+            .req_size(42)
             .size(147)
             .upstream_duration(7)
             .jsonrpc_error(-32602, "Invalid params");
@@ -410,6 +411,7 @@ mod tests {
         assert_eq!(val["detail"], "get_weather");
         assert_eq!(val["session_id"], "sid-123");
         assert_eq!(val["upstream_url"], "http://localhost:9000/mcp");
+        assert_eq!(val["req_size"], 42);
         assert_eq!(val["resp_size"], 147);
         assert_eq!(val["upstream_ms"], 7);
         assert_eq!(val["jsonrpc_error"][0], -32602);

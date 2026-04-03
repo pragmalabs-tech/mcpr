@@ -11,6 +11,7 @@ use serde::Serialize;
 ///     .detail("get_weather")
 ///     .session_id("sid-123")
 ///     .upstream("http://localhost:9000/mcp")
+///     .req_size(42)
 ///     .size(147)
 ///     .duration(start)
 ///     .upstream_duration(7)
@@ -27,6 +28,7 @@ pub struct LogEntry {
     pub status: u16,
     pub note: String,
     pub upstream_url: Option<String>,
+    pub req_size: Option<usize>,
     pub resp_size: Option<usize>,
     pub duration_ms: Option<u64>,
     /// Time spent waiting for upstream (network). Proxy overhead = duration_ms - upstream_ms.
@@ -56,6 +58,7 @@ impl LogEntry {
             status,
             note: note.to_string(),
             upstream_url: None,
+            req_size: None,
             resp_size: None,
             duration_ms: None,
             upstream_ms: None,
@@ -82,6 +85,11 @@ impl LogEntry {
 
     pub fn upstream(mut self, url: &str) -> Self {
         self.upstream_url = Some(url.to_string());
+        self
+    }
+
+    pub fn req_size(mut self, bytes: usize) -> Self {
+        self.req_size = Some(bytes);
         self
     }
 

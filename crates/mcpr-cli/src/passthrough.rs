@@ -97,6 +97,7 @@ pub async fn forward_and_passthrough(
                 state.logger.emit(
                     LogEntry::new(method.as_str(), log_path, status, "rewritten")
                         .upstream(url)
+                        .req_size(body.len())
                         .size(rewritten_bytes.len())
                         .upstream_duration(upstream_ms)
                         .duration(start),
@@ -106,6 +107,7 @@ pub async fn forward_and_passthrough(
                 state.logger.emit(
                     LogEntry::new(method.as_str(), log_path, status, "passthrough")
                         .upstream(url)
+                        .req_size(body.len())
                         .size(bytes.len())
                         .upstream_duration(upstream_ms)
                         .duration(start),

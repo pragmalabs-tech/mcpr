@@ -38,6 +38,7 @@ pub async fn handle_mcp_post(
     parsed: jsonrpc::ParsedBody,
     start: Instant,
 ) -> Response {
+    let raw_body_len = body.len();
     let mcp_method = parsed.mcp_method();
     let method_str = mcp_method.as_str();
     let call_detail = parsed.detail();
@@ -90,6 +91,7 @@ pub async fn handle_mcp_post(
                     .maybe_detail(call_detail.as_deref())
                     .maybe_session_id(req_session_id.as_deref())
                     .upstream(&upstream_url)
+                    .req_size(body.len())
                     .upstream_duration(upstream_ms)
                     .duration(start),
             );
@@ -181,6 +183,7 @@ pub async fn handle_mcp_post(
             .maybe_detail(call_detail.as_deref())
             .maybe_session_id(log_session_id.as_deref())
             .upstream(&upstream_url)
+            .req_size(raw_body_len)
             .size(body.len())
             .upstream_duration(upstream_ms)
             .duration(start);
@@ -218,6 +221,7 @@ pub async fn handle_mcp_post(
                 .maybe_detail(call_detail.as_deref())
                 .maybe_session_id(log_session_id.as_deref())
                 .upstream(&upstream_url)
+                .req_size(raw_body_len)
                 .size(resp_bytes.len())
                 .upstream_duration(upstream_ms)
                 .duration(start),
@@ -342,6 +346,7 @@ async fn handle_resources_read(
     state.logger.emit(
         LogEntry::new("POST", "/*", 200, "intercepted")
             .mcp_method(jsonrpc::RESOURCES_READ)
+            .req_size(raw_body.len())
             .size(body.len())
             .upstream_duration(upstream_ms)
             .duration(start),
