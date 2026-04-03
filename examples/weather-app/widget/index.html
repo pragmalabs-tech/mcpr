@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Weather Dashboard</title>
+  <!--
+    This font import requires CSP resourceDomains for fonts.googleapis.com
+    and fonts.gstatic.com. mcpr handles this automatically by reading
+    _meta.ui.csp from the MCP server response.
+  -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <div id="loading">
+      <div class="spinner"></div>
+      <p>Waiting for weather data...</p>
+    </div>
+    <div id="weather" style="display: none;">
+      <div class="header">
+        <div class="icon" id="weather-icon"></div>
+        <div class="info">
+          <h1 id="city-name"></h1>
+          <p class="condition" id="condition"></p>
+        </div>
+        <div class="temp" id="temperature"></div>
+      </div>
+      <div class="details">
+        <div class="detail">
+          <span class="label">Humidity</span>
+          <span class="value" id="humidity"></span>
+        </div>
+        <div class="detail">
+          <span class="label">Wind</span>
+          <span class="value" id="wind"></span>
+        </div>
+      </div>
+      <div class="forecast" id="forecast"></div>
+    </div>
+  </div>
+
+  <script>
+    // Minimal MCP Apps postMessage bridge (no dependencies)
+    let _rpcId = 0;
+
+    function sendRpc(method, params) {
+      const id = ++_rpcId;
+      window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+      return id;
+    }
+
+    // Listen for host messages
+    window.addEventListener("message", (event) => {
+      const msg = event.data;
+      if (!msg || msg.jsonrpc !== "2.0") return;
+
+      // Response to our ui/initialize request
+      if (msg.id && msg.result?.protocolVersion) {
+        // Handshake complete — send initialized notification
+        window.parent.postMessage({
+          jsonrpc: "2.0",
+          method: "ui/notifications/initialized",
+          params: {},
+        }, "*");
+      }
+
+      // Tool result notification from host
+      if (msg.method === "ui/notifications/tool-result") {
+        const result = msg.params;
+        if (result?.structuredContent) {
+          renderWeather(result.structuredContent);
+        } else if (result?.content?.[0]?.text) {
+          try { renderWeather(JSON.parse(result.content[0].text)); } catch {}
+        }
+      }
+    });
+
+    // OpenAI legacy mode — data is injected via window.openai global
+    if (window.openai?.toolOutput) {
+      renderWeather(window.openai.toolOutput);
+    }
+
+    // Claude / ext-apps mode — JSON-RPC handshake via postMessage
+    sendRpc("ui/initialize", {
+      protocolVersion: "2026-01-26",
+      appInfo: { name: "weather-app", version: "1.0.0" },
+      appCapabilities: {},
+    });
+
+    function renderWeather(data) {
+      document.getElementById("loading").style.display = "none";
+      document.getElementById("weather").style.display = "block";
+
+      document.getElementById("weather-icon").textContent = data.icon;
+      document.getElementById("city-name").textContent = data.city;
+      document.getElementById("condition").textContent = data.condition;
+      document.getElementById("temperature").textContent = `${data.temp}°C`;
+      document.getElementById("humidity").textContent = `${data.humidity}%`;
+      document.getElementById("wind").textContent = `${data.wind} km/h`;
+
+      const forecastEl = document.getElementById("forecast");
+      forecastEl.innerHTML = "";
+      if (data.forecast) {
+        data.forecast.forEach((day) => {
+          const dayEl = document.createElement("div");
+          dayEl.className = "forecast-day";
+          dayEl.innerHTML = `
+            <span class="day-name">${day.day}</span>
+            <span class="day-icon">${day.icon}</span>
+            <span class="day-temp">${day.temp}°</span>
+          `;
+          forecastEl.appendChild(dayEl);
+        });
+      }
+    }
+
+    // Demo: if loaded standalone (not in iframe), show sample data
+    if (window === window.parent) {
+      setTimeout(() => {
+        renderWeather({
+          city: "Tokyo",
+          temp: 22,
+          condition: "Partly Cloudy",
+          humidity: 65,
+          wind: 12,
+          icon: "⛅",
+          forecast: [
+            { day: "Mon", temp: 23, icon: "☀️" },
+            { day: "Tue", temp: 21, icon: "🌧️" },
+            { day: "Wed", temp: 24, icon: "☀️" },
+            { day: "Thu", temp: 20, icon: "⛅" },
+            { day: "Fri", temp: 22, icon: "☀️" },
+          ],
+        });
+      }, 500);
+    }
+  </script>
+</body>
+</html>
