@@ -7,8 +7,7 @@ curl -fsSL https://raw.githubusercontent.com/cptrodgers/mcpr/main/scripts/instal
 mcpr --mcp http://localhost:9000
 ```
 
-<!-- Screenshot: terminal showing mcpr running with structured events -->
-<!-- TODO: Replace with actual GIF showing install → run → tool call → CSP handled -->
+![mcpr demo](docs/demo.gif)
 
 ## The Problem
 
