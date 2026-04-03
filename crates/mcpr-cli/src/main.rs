@@ -486,15 +486,19 @@ async fn check_mcp_endpoint(
     // Try to parse as JSON-RPC response (possibly SSE-wrapped)
     let body_text = String::from_utf8_lossy(&body_bytes);
 
-    // Handle SSE-wrapped response: extract JSON from "data: {...}\n\n"
-    let json_str = if body_text.trim_start().starts_with("data:") {
-        body_text
-            .lines()
-            .find_map(|line| line.strip_prefix("data:").map(|d| d.trim().to_string()))
-            .unwrap_or_default()
-    } else {
-        body_text.to_string()
-    };
+    // Handle SSE-wrapped response: extract JSON from "data: {...}" lines.
+    // SSE format may include "event: message\n" before the data line.
+    let json_str = body_text
+        .lines()
+        .find_map(|line| {
+            let data = line.strip_prefix("data:")?.trim();
+            if data.is_empty() {
+                None
+            } else {
+                Some(data.to_string())
+            }
+        })
+        .unwrap_or_else(|| body_text.to_string());
 
     let parsed: serde_json::Value = match serde_json::from_str(&json_str) {
         Ok(v) => v,
