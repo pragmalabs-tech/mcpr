@@ -290,11 +290,9 @@ async fn run_gateway(cfg: GatewayConfig) {
         request_timeout,
     };
 
-    let events: Arc<dyn EventEmitter> = if cfg.events {
-        Arc::new(mcpr_events::StdoutEmitter::new())
-    } else {
-        Arc::new(mcpr_events::NoopEmitter)
-    };
+    // TUI owns stdout — never emit JSON events there while it's running.
+    // Events are still recorded in log files when configured.
+    let events: Arc<dyn EventEmitter> = Arc::new(mcpr_events::NoopEmitter);
 
     let state = AppState {
         mcp_upstream: mcp.clone(),

@@ -231,6 +231,7 @@ impl FileConfig {
 // ── Gateway config ──────────────────────────────────────────────────────
 
 /// Resolved configuration for gateway (proxy) mode.
+#[allow(dead_code)]
 pub struct GatewayConfig {
     pub mcp: Option<String>,
     pub widgets: Option<String>,
