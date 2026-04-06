@@ -886,4 +886,87 @@ mod tests {
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.max_concurrent_upstream, Some(50));
     }
+
+    // ── Cloud config parsing tests ─────────────────────────────────────
+
+    #[test]
+    fn cloud_config_parses_all_fields() {
+        let toml_str = r#"
+            [cloud]
+            token = "mcpr_abc123"
+            server = "my-proxy"
+            endpoint = "https://custom.api/ingest"
+            batch_size = 50
+            flush_interval_ms = 10000
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cloud.token.as_deref(), Some("mcpr_abc123"));
+        assert_eq!(config.cloud.server.as_deref(), Some("my-proxy"));
+        assert_eq!(
+            config.cloud.endpoint.as_deref(),
+            Some("https://custom.api/ingest")
+        );
+        assert_eq!(config.cloud.batch_size, Some(50));
+        assert_eq!(config.cloud.flush_interval_ms, Some(10000));
+    }
+
+    #[test]
+    fn cloud_config_defaults_to_none() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.cloud.token.is_none());
+        assert!(config.cloud.server.is_none());
+        assert!(config.cloud.endpoint.is_none());
+        assert!(config.cloud.batch_size.is_none());
+        assert!(config.cloud.flush_interval_ms.is_none());
+    }
+
+    #[test]
+    fn cloud_config_partial_fields() {
+        let toml_str = r#"
+            [cloud]
+            token = "mcpr_xyz"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cloud.token.as_deref(), Some("mcpr_xyz"));
+        assert!(config.cloud.server.is_none());
+        assert!(config.cloud.endpoint.is_none());
+        assert!(config.cloud.batch_size.is_none());
+        assert!(config.cloud.flush_interval_ms.is_none());
+    }
+
+    #[test]
+    fn cloud_config_coexists_with_other_sections() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+            port = 8080
+
+            [cloud]
+            token = "mcpr_tok"
+            server = "prod-1"
+
+            [tunnel]
+            relay_url = "https://tunnel.mcpr.app"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cloud.token.as_deref(), Some("mcpr_tok"));
+        assert_eq!(config.cloud.server.as_deref(), Some("prod-1"));
+        assert_eq!(config.mcp.as_deref(), Some("http://localhost:9000"));
+        assert_eq!(
+            config.tunnel.relay_url.as_deref(),
+            Some("https://tunnel.mcpr.app")
+        );
+    }
+
+    #[test]
+    fn empty_cloud_section_uses_defaults() {
+        let toml_str = r#"
+            [cloud]
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.cloud.token.is_none());
+        assert!(config.cloud.server.is_none());
+    }
 }
