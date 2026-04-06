@@ -104,6 +104,14 @@ pub async fn handle_mcp_post(
                 .error_detail(format!("{e}"));
             if let Some(ref sid) = req_session_id {
                 evt = evt.session(sid);
+                if let Some(info) =
+                    state.sessions.get(sid).await.and_then(|s| s.client_info)
+                {
+                    evt = evt.client_name(&info.name);
+                    if let Some(ref v) = info.version {
+                        evt = evt.client_version(v);
+                    }
+                }
             }
             if let Some(ref d) = call_detail
                 && mcp_method == McpMethod::ToolsCall
@@ -212,6 +220,14 @@ pub async fn handle_mcp_post(
         }
         if let Some(ref sid) = log_session_id {
             evt = evt.session(sid);
+            if let Some(info) =
+                state.sessions.get(sid).await.and_then(|s| s.client_info)
+            {
+                evt = evt.client_name(&info.name);
+                if let Some(ref v) = info.version {
+                    evt = evt.client_version(v);
+                }
+            }
         }
         if let Some(ref d) = call_detail
             && mcp_method == McpMethod::ToolsCall

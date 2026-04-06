@@ -157,6 +157,16 @@ impl McprEvent {
         self
     }
 
+    pub fn client_name(mut self, n: impl Into<String>) -> Self {
+        self.client_name = Some(n.into());
+        self
+    }
+
+    pub fn client_version(mut self, v: impl Into<String>) -> Self {
+        self.client_version = Some(v.into());
+        self
+    }
+
     pub fn request_size(mut self, n: u64) -> Self {
         self.request_size = Some(n);
         self
