@@ -55,6 +55,9 @@ fn compute_info_height(s: &super::state::TuiState) -> u16 {
     if s.mcp_warning.is_some() {
         rows += 1;
     }
+    if s.cloud_endpoint.is_some() {
+        rows += 1;
+    }
     if !s.widget_names.is_empty() {
         rows += 1; // widgets found line
     }
@@ -160,6 +163,37 @@ fn render_info_panel(frame: &mut Frame, area: Rect, s: &super::state::TuiState) 
             Span::styled(" ⚠ ", Style::default().fg(Color::Yellow)),
             Span::styled(warn_text, Style::default().fg(Color::Yellow)),
         ]));
+    }
+
+    // Cloud sync status
+    if let Some(ref endpoint) = s.cloud_endpoint {
+        let mut spans = vec![
+            Span::styled(" Cloud ", Style::default().fg(Color::DarkGray)),
+            Span::styled(endpoint.as_str(), Style::default().fg(Color::Cyan)),
+        ];
+        if let Some(ref sync) = s.cloud_sync {
+            match sync {
+                super::state::CloudSyncStatus::Ok { count } => {
+                    spans.push(Span::styled(
+                        format!("  synced {count}"),
+                        Style::default().fg(Color::Green),
+                    ));
+                }
+                super::state::CloudSyncStatus::Failed { message } => {
+                    let max_len = inner_width.saturating_sub(endpoint.len() + 12);
+                    let text = if message.len() > max_len {
+                        format!("{}…", &message[..max_len.saturating_sub(1)])
+                    } else {
+                        message.clone()
+                    };
+                    spans.push(Span::styled(
+                        format!("  {text}"),
+                        Style::default().fg(Color::Red),
+                    ));
+                }
+            }
+        }
+        lines.push(Line::from(spans));
     }
 
     // Row 3: Studio URL + widgets + shortcuts

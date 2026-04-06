@@ -99,7 +99,9 @@ pub async fn handle_mcp_post(
                 .method(method_str)
                 .upstream(&upstream_url)
                 .latency(start.elapsed().as_millis() as u64)
-                .status(EventStatus::Error);
+                .status(EventStatus::Error)
+                .request_size(raw_body_len as u64)
+                .error_detail(format!("{e}"));
             if let Some(ref sid) = req_session_id {
                 evt = evt.session(sid);
             }
@@ -202,7 +204,12 @@ pub async fn handle_mcp_post(
             .method(method_str)
             .upstream(&upstream_url)
             .latency(start.elapsed().as_millis() as u64)
-            .status(evt_status);
+            .status(evt_status)
+            .request_size(raw_body_len as u64)
+            .response_size(body.len() as u64);
+        if let Some((_, ref msg)) = rpc_error {
+            evt = evt.error_detail(msg);
+        }
         if let Some(ref sid) = log_session_id {
             evt = evt.session(sid);
         }
@@ -230,7 +237,9 @@ pub async fn handle_mcp_post(
             McprEvent::new(EventType::Request)
                 .method(method_str)
                 .upstream(&upstream_url)
-                .latency(start.elapsed().as_millis() as u64),
+                .latency(start.elapsed().as_millis() as u64)
+                .request_size(raw_body_len as u64)
+                .response_size(resp_bytes.len() as u64),
         );
         build_response(status, &resp_headers, Body::from(resp_bytes))
     }
@@ -284,7 +293,8 @@ pub async fn handle_mcp_sse(
                     .method("SSE")
                     .upstream(&upstream_url)
                     .latency(start.elapsed().as_millis() as u64)
-                    .status(EventStatus::Error),
+                    .status(EventStatus::Error)
+                    .error_detail(format!("{e}")),
             );
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }

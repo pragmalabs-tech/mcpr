@@ -10,7 +10,7 @@ const CONFIG_FILE: &str = "mcpr.toml";
 /// Top-level mode: either run as a relay server or as the gateway proxy.
 pub enum Mode {
     Relay(RelayConfig),
-    Gateway(GatewayConfig),
+    Gateway(Box<GatewayConfig>),
 }
 
 // ── CLI args ────────────────────────────────────────────────────────────
@@ -69,6 +69,14 @@ struct Cli {
     /// Emit structured JSON events to stdout
     #[arg(long)]
     events: bool,
+
+    /// Cloud sync token (from cloud.mcpr.app project settings)
+    #[arg(long, env = "MCPR_CLOUD_TOKEN")]
+    cloud_token: Option<String>,
+
+    /// Server slug for cloud routing (matches server name in cloud project)
+    #[arg(long)]
+    cloud_server: Option<String>,
 }
 
 // ── TOML config file ────────────────────────────────────────────────────
@@ -115,6 +123,17 @@ struct FileEventsConfig {
     enabled: bool,
 }
 
+/// `[cloud]` table in config file
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct FileCloudConfig {
+    token: Option<String>,
+    server: Option<String>,
+    endpoint: Option<String>,
+    batch_size: Option<usize>,
+    flush_interval_ms: Option<u64>,
+}
+
 /// `[logging]` table in config file
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -149,6 +168,9 @@ struct FileConfig {
 
     // -- Events --
     events: FileEventsConfig,
+
+    // -- Cloud sync --
+    cloud: FileCloudConfig,
 
     // -- Logging --
     logging: FileLoggingConfig,
@@ -253,6 +275,11 @@ pub struct GatewayConfig {
     pub log_dir: Option<String>,
     pub log_rotation: Option<String>,
     pub events: bool,
+    pub cloud_token: Option<String>,
+    pub cloud_server: Option<String>,
+    pub cloud_endpoint: Option<String>,
+    pub cloud_batch_size: Option<usize>,
+    pub cloud_flush_interval_ms: Option<u64>,
 }
 
 impl GatewayConfig {
@@ -579,7 +606,7 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         None => CspMode::default(),
     };
 
-    Mode::Gateway(GatewayConfig {
+    Mode::Gateway(Box::new(GatewayConfig {
         mcp: cli.mcp.or(file.mcp),
         widgets: cli.widgets.or(file.widgets),
         port: cli.port.or(file.port),
@@ -604,7 +631,12 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         log_dir: file.logging.dir,
         log_rotation: file.logging.rotation,
         events: cli.events || file.events.enabled,
-    })
+        cloud_token: cli.cloud_token.or(file.cloud.token),
+        cloud_server: cli.cloud_server.or(file.cloud.server),
+        cloud_endpoint: file.cloud.endpoint,
+        cloud_batch_size: file.cloud.batch_size,
+        cloud_flush_interval_ms: file.cloud.flush_interval_ms,
+    }))
 }
 
 /// Update the TOML config file with CLI overrides.
@@ -853,5 +885,88 @@ mod tests {
         "#;
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.max_concurrent_upstream, Some(50));
+    }
+
+    // ── Cloud config parsing tests ─────────────────────────────────────
+
+    #[test]
+    fn cloud_config_parses_all_fields() {
+        let toml_str = r#"
+            [cloud]
+            token = "mcpr_abc123"
+            server = "my-proxy"
+            endpoint = "https://custom.api/ingest"
+            batch_size = 50
+            flush_interval_ms = 10000
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cloud.token.as_deref(), Some("mcpr_abc123"));
+        assert_eq!(config.cloud.server.as_deref(), Some("my-proxy"));
+        assert_eq!(
+            config.cloud.endpoint.as_deref(),
+            Some("https://custom.api/ingest")
+        );
+        assert_eq!(config.cloud.batch_size, Some(50));
+        assert_eq!(config.cloud.flush_interval_ms, Some(10000));
+    }
+
+    #[test]
+    fn cloud_config_defaults_to_none() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.cloud.token.is_none());
+        assert!(config.cloud.server.is_none());
+        assert!(config.cloud.endpoint.is_none());
+        assert!(config.cloud.batch_size.is_none());
+        assert!(config.cloud.flush_interval_ms.is_none());
+    }
+
+    #[test]
+    fn cloud_config_partial_fields() {
+        let toml_str = r#"
+            [cloud]
+            token = "mcpr_xyz"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cloud.token.as_deref(), Some("mcpr_xyz"));
+        assert!(config.cloud.server.is_none());
+        assert!(config.cloud.endpoint.is_none());
+        assert!(config.cloud.batch_size.is_none());
+        assert!(config.cloud.flush_interval_ms.is_none());
+    }
+
+    #[test]
+    fn cloud_config_coexists_with_other_sections() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+            port = 8080
+
+            [cloud]
+            token = "mcpr_tok"
+            server = "prod-1"
+
+            [tunnel]
+            relay_url = "https://tunnel.mcpr.app"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.cloud.token.as_deref(), Some("mcpr_tok"));
+        assert_eq!(config.cloud.server.as_deref(), Some("prod-1"));
+        assert_eq!(config.mcp.as_deref(), Some("http://localhost:9000"));
+        assert_eq!(
+            config.tunnel.relay_url.as_deref(),
+            Some("https://tunnel.mcpr.app")
+        );
+    }
+
+    #[test]
+    fn empty_cloud_section_uses_defaults() {
+        let toml_str = r#"
+            [cloud]
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.cloud.token.is_none());
+        assert!(config.cloud.server.is_none());
     }
 }
