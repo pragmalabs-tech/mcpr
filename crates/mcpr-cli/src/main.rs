@@ -296,14 +296,29 @@ async fn run_gateway(cfg: GatewayConfig) {
         let endpoint = cfg
             .cloud_endpoint
             .clone()
-            .unwrap_or_else(|| "https://cloud.mcpr.app".to_string());
+            .unwrap_or_else(|| "https://api.mcpr.app".to_string());
+        let cloud_endpoint = format!("{}/api/ingest-events", endpoint.trim_end_matches('/'));
+        tui_state.lock().unwrap().cloud_endpoint = Some(cloud_endpoint.clone());
+        let tui_for_cloud = tui_state.clone();
         Arc::new(mcpr_events::CloudEmitter::new(
             mcpr_events::CloudEmitterConfig {
-                endpoint: format!("{}/v1/events", endpoint.trim_end_matches('/')),
+                endpoint: cloud_endpoint,
                 token: token.clone(),
                 server: cfg.cloud_server.clone(),
                 batch_size: cfg.cloud_batch_size.unwrap_or(100),
                 flush_interval: Duration::from_millis(cfg.cloud_flush_interval_ms.unwrap_or(5000)),
+                on_flush: Some(std::sync::Arc::new(move |status| {
+                    if let Ok(mut state) = tui_for_cloud.lock() {
+                        state.cloud_sync = Some(match status {
+                            mcpr_events::SyncStatus::Ok { count } => {
+                                tui::state::CloudSyncStatus::Ok { count }
+                            }
+                            mcpr_events::SyncStatus::Failed { message } => {
+                                tui::state::CloudSyncStatus::Failed { message }
+                            }
+                        });
+                    }
+                })),
             },
         ))
     } else {

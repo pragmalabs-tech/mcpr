@@ -36,6 +36,11 @@ impl ConnectionStatus {
     }
 }
 
+pub enum CloudSyncStatus {
+    Ok { count: usize },
+    Failed { message: String },
+}
+
 pub struct TuiState {
     // Info panel
     pub proxy_url: String,
@@ -50,6 +55,8 @@ pub struct TuiState {
     pub widget_count: Option<usize>,
     pub widget_names: Vec<String>,
     pub mcp_warning: Option<String>,
+    pub cloud_endpoint: Option<String>,
+    pub cloud_sync: Option<CloudSyncStatus>,
     pub started_at: Instant,
     pub request_count: u64,
 
@@ -78,6 +85,8 @@ impl TuiState {
             widget_count: None,
             widget_names: Vec::new(),
             mcp_warning: None,
+            cloud_endpoint: None,
+            cloud_sync: None,
             started_at: Instant::now(),
             request_count: 0,
             active_tab: Tab::Requests,

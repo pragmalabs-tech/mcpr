@@ -1,10 +1,20 @@
 use crate::{EventEmitter, McprEvent};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+/// Callback invoked after each cloud sync attempt (success or failure).
+pub type SyncCallback = Arc<dyn Fn(SyncStatus) + Send + Sync>;
+
+/// Result of a cloud sync flush.
+pub enum SyncStatus {
+    Ok { count: usize },
+    Failed { message: String },
+}
+
 /// Configuration for the cloud event emitter.
 pub struct CloudEmitterConfig {
-    /// Full ingest URL, e.g. "https://cloud.mcpr.app/v1/events"
+    /// Full ingest URL, e.g. "https://api.mcpr.app/api/ingest-events"
     pub endpoint: String,
     /// Project token, e.g. "mcpr_xxxxxxxx"
     pub token: String,
@@ -14,6 +24,8 @@ pub struct CloudEmitterConfig {
     pub batch_size: usize,
     /// Flush on this interval even if buffer isn't full (default: 5s)
     pub flush_interval: Duration,
+    /// Optional callback for reporting sync status (e.g. to TUI)
+    pub on_flush: Option<SyncCallback>,
 }
 
 /// Emitter that batches events and POSTs them to the mcpr cloud ingest API.
@@ -100,22 +112,39 @@ async fn flush_batch(
             .send()
             .await
         {
-            Ok(resp) if resp.status().is_success() => return,
+            Ok(resp) if matches!(resp.status().as_u16(), 200 | 202) => {
+                if let Some(ref cb) = config.on_flush {
+                    cb(SyncStatus::Ok {
+                        count: events.len(),
+                    });
+                }
+                return;
+            }
             Ok(resp) => {
-                eprintln!(
-                    "[cloud] flush attempt {}: HTTP {}",
-                    attempt + 1,
-                    resp.status()
-                );
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if let Some(ref cb) = config.on_flush {
+                    cb(SyncStatus::Failed {
+                        message: format!("HTTP {status} — {body}"),
+                    });
+                }
             }
             Err(e) => {
-                eprintln!("[cloud] flush attempt {}: {}", attempt + 1, e);
+                if let Some(ref cb) = config.on_flush {
+                    cb(SyncStatus::Failed {
+                        message: e.to_string(),
+                    });
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(1 << attempt)).await;
     }
 
-    eprintln!("[cloud] dropped {} events after 3 retries", events.len());
+    if let Some(ref cb) = config.on_flush {
+        cb(SyncStatus::Failed {
+            message: format!("dropped {} events after 3 retries", events.len()),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -126,11 +155,12 @@ mod tests {
     #[tokio::test]
     async fn emit_is_non_blocking() {
         let emitter = CloudEmitter::new(CloudEmitterConfig {
-            endpoint: "http://127.0.0.1:1/v1/events".into(), // unreachable
+            endpoint: "http://127.0.0.1:1/api/ingest-events".into(), // unreachable
             token: "t".into(),
             server: None,
             batch_size: 100,
             flush_interval: Duration::from_secs(60),
+            on_flush: None,
         });
 
         let start = std::time::Instant::now();
