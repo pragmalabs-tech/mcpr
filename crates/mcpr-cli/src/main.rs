@@ -89,7 +89,7 @@ async fn main() {
             mcpr_tunnel::relay::start_relay(cfg).await;
         }
         Mode::Gateway(cfg) => {
-            run_gateway(cfg).await;
+            run_gateway(*cfg).await;
         }
     }
 }
@@ -290,9 +290,25 @@ async fn run_gateway(cfg: GatewayConfig) {
         request_timeout,
     };
 
-    // TUI owns stdout — never emit JSON events there while it's running.
-    // Events are still recorded in log files when configured.
-    let events: Arc<dyn EventEmitter> = Arc::new(mcpr_events::NoopEmitter);
+    // Pick event emitter: cloud sync if token is set, otherwise noop.
+    // (TUI owns stdout, so StdoutEmitter can't run here. CloudEmitter uses HTTP.)
+    let events: Arc<dyn EventEmitter> = if let Some(ref token) = cfg.cloud_token {
+        let endpoint = cfg
+            .cloud_endpoint
+            .clone()
+            .unwrap_or_else(|| "https://cloud.mcpr.app".to_string());
+        Arc::new(mcpr_events::CloudEmitter::new(
+            mcpr_events::CloudEmitterConfig {
+                endpoint: format!("{}/v1/events", endpoint.trim_end_matches('/')),
+                token: token.clone(),
+                server: cfg.cloud_server.clone(),
+                batch_size: cfg.cloud_batch_size.unwrap_or(100),
+                flush_interval: Duration::from_millis(cfg.cloud_flush_interval_ms.unwrap_or(5000)),
+            },
+        ))
+    } else {
+        Arc::new(mcpr_events::NoopEmitter)
+    };
 
     let state = AppState {
         mcp_upstream: mcp.clone(),

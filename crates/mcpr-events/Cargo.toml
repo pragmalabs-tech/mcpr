@@ -10,3 +10,9 @@ description = "Structured event system for MCP tool calls and sessions"
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.6"
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -32,6 +32,36 @@ pub struct McprEvent {
     /// Whether CSP headers were injected
     #[serde(skip_serializing_if = "Option::is_none")]
     pub csp_applied: Option<bool>,
+    /// Server slug for cloud routing
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    /// Client name from MCP initialize clientInfo
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_name: Option<String>,
+    /// Client version from MCP initialize clientInfo
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    /// Request body size in bytes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_size: Option<u64>,
+    /// Response body size in bytes
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_size: Option<u64>,
+    /// Error message when status = error
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
+    /// Extensible metadata
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    /// Schema version
+    #[serde(default = "default_version")]
+    pub v: u8,
+}
+
+/// Default schema version for serde deserialization.
+#[allow(dead_code)]
+fn default_version() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +101,14 @@ impl McprEvent {
             status: EventStatus::Ok,
             upstream: None,
             csp_applied: None,
+            server: None,
+            client_name: None,
+            client_version: None,
+            request_size: None,
+            response_size: None,
+            error_detail: None,
+            meta: None,
+            v: 1,
         }
     }
 
@@ -106,6 +144,26 @@ impl McprEvent {
 
     pub fn csp(mut self, applied: bool) -> Self {
         self.csp_applied = Some(applied);
+        self
+    }
+
+    pub fn server(mut self, s: impl Into<String>) -> Self {
+        self.server = Some(s.into());
+        self
+    }
+
+    pub fn error_detail(mut self, d: impl Into<String>) -> Self {
+        self.error_detail = Some(d.into());
+        self
+    }
+
+    pub fn request_size(mut self, n: u64) -> Self {
+        self.request_size = Some(n);
+        self
+    }
+
+    pub fn response_size(mut self, n: u64) -> Self {
+        self.response_size = Some(n);
         self
     }
 }
