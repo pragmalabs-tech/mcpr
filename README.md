@@ -4,10 +4,10 @@
 Route, log, and secure MCP traffic — from dev to production.
 
 ```bash
-mcpr run --mcp http://localhost:9000
+mcpr run --mcp http://localhost:9000 --port 3000
 ```
 
-![mcpr TUI dashboard showing proxied MCP requests with tool names and latency](docs/tui-dashboard.png)
+![mcpr TUI dashboard showing proxied MCP requests with tool names and latency](docs/mcpr-demo.gif)
 
 ---
 
