@@ -677,7 +677,8 @@ pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
 
             // Validate CSP mode
             if let Some(ref mode) = config.csp.mode
-                && mode != "extend" && mode != "override"
+                && mode != "extend"
+                && mode != "override"
             {
                 issues.push((
                     "error",
