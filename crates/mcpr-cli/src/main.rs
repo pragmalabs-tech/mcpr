@@ -641,6 +641,25 @@ async fn health_check_loop(app_state: AppState) {
             s.widget_names = names;
         }
 
+        // Emit heartbeat event to cloud (carries current proxy status)
+        {
+            let s = app_state.tui_state.lock().unwrap();
+            let heartbeat_meta = serde_json::json!({
+                "mcp_status": s.mcp_status.label(),
+                "tunnel_status": s.tunnel_status.label(),
+                "widgets_status": s.widgets_status.label(),
+                "uptime_secs": s.started_at.elapsed().as_secs(),
+                "request_count": s.request_count,
+            });
+            drop(s);
+
+            app_state.events.emit(
+                mcpr_events::McprEvent::new(mcpr_events::EventType::Heartbeat)
+                    .status(mcpr_events::EventStatus::Ok)
+                    .meta(heartbeat_meta),
+            );
+        }
+
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
     }
 }

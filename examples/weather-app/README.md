@@ -13,7 +13,7 @@ npm start
 # → MCP server running on http://localhost:9000
 
 # 3. In another terminal, run mcpr
-mcpr --mcp http://localhost:9000/mcp --widgets ./widget --events
+mcpr --mcp http://localhost:9001/mcp --events
 # → https://abc123.tunnel.mcpr.app
 ```
 
@@ -67,5 +67,5 @@ Use `npm run dev` for auto-reload on server changes. The widget is plain HTML �
 npm run dev
 
 # Terminal 2: mcpr in local mode (no tunnel)
-mcpr --mcp http://localhost:9000/mcp --widgets ./widget --no-tunnel --events
+mcpr --mcp http://localhost:9001/mcp --events
 ```
