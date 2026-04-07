@@ -9,6 +9,5 @@ RUN ARCH=$(case "$TARGETARCH" in amd64) echo x86_64;; arm64) echo aarch64;; *) e
     curl -fsSL "https://github.com/cptrodgers/mcpr/releases/download/${VERSION}/mcpr-${VERSION}-${ARCH}-unknown-linux-gnu.tar.gz" | \
     tar -xz -C /usr/local/bin/
 
-EXPOSE 8080
+WORKDIR /app
 ENTRYPOINT ["mcpr"]
-CMD ["--relay", "--port", "8080"]
