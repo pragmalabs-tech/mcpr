@@ -46,12 +46,45 @@ token = "90c74def-8fdc-4922-8702-44bc5cabf830"
 # Fixed subdomain (optional -- derived from token if omitted)
 subdomain = "myapp"
 
+# Skip interactive claim flow (default: false)
+anonymous = false
+
 [csp]
 # CSP rewriting mode: "extend" (default) or "override"
 mode = "extend"
 
 # Additional CSP domains to allow
 domains = ["https://media.mcpr.app", "https://api.example.com"]
+
+[events]
+# Emit structured JSON events to stdout
+enabled = true
+
+[cloud]
+# Cloud sync token (from mcpr.app project settings)
+token = "mcpr_xxxxxxxx"
+
+# Server slug (matches server name in your mcpr.app project)
+server = "my-server"
+
+# Custom API endpoint (default: https://api.mcpr.app)
+# endpoint = "https://api.mcpr.app"
+
+# Events per batch
+# batch_size = 100
+
+# Flush interval in milliseconds
+# flush_interval_ms = 5000
+
+[logging]
+# Enable JSONL file logging
+file = true
+
+# Directory for log files (default: "./logs")
+dir = "./logs"
+
+# Rotation strategy: "daily" or "size:50MB" (default: "daily")
+rotation = "daily"
 ```
 
 ### Field reference
@@ -65,8 +98,18 @@ domains = ["https://media.mcpr.app", "https://api.example.com"]
 | `[tunnel].relay_url` | `--relay-url` | `MCPR_RELAY_URL` | Relay server URL |
 | `[tunnel].token` | | | Tunnel authentication token |
 | `[tunnel].subdomain` | | | Fixed subdomain for tunnel |
+| `[tunnel].anonymous` | | | Skip interactive claim flow (bool) |
 | `[csp].mode` | `--csp-mode` | | `"extend"` or `"override"` |
 | `[csp].domains` | `--csp` | | Extra CSP domains (repeatable via CLI) |
+| `[events].enabled` | `--events` | | Emit structured JSON events to stdout |
+| `[cloud].token` | `--cloud-token` | `MCPR_CLOUD_TOKEN` | Cloud sync token from mcpr.app |
+| `[cloud].server` | `--cloud-server` | | Server slug for cloud routing |
+| `[cloud].endpoint` | | | Custom cloud API endpoint |
+| `[cloud].batch_size` | | | Events per batch |
+| `[cloud].flush_interval_ms` | | | Flush interval in milliseconds |
+| `[logging].file` | | | Enable JSONL file logging (bool) |
+| `[logging].dir` | | | Directory for log files |
+| `[logging].rotation` | | | Rotation: `"daily"` or `"size:50MB"` |
 
 ## Relay Mode
 

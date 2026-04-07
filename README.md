@@ -17,7 +17,7 @@ mcpr sits between AI clients (ChatGPT, Claude, VS Code, Cursor) and your MCP ser
 
 - **Route** — MCP-aware reverse proxy. Tool calls, resource reads, session handshakes — all parsed and forwarded correctly.
 - **Observe** — Structured events for every request: tool name, latency, status, session ID. Pipe to stdout, Datadog, or [mcpr.app](https://mcpr.app).
-- **Handle CSP** — Scans widget HTML, detects missing domains, injects correct CSP headers per platform. Zero config.
+- **Handle CSP** — Rewrites CSP domain arrays in JSON-RPC metadata per platform (ChatGPT and Claude). Zero config.
 - **Edge config** — Change CSP, OAuth URLs, and domain settings at the proxy. No server redeploy.
 
 ## Install
@@ -28,13 +28,15 @@ curl -fsSL https://mcpr.app/install.sh | sh
 
 ## Deploy Anywhere
 
-| Environment | Command | Replaces |
-|---|---|---|
-| **Local dev** | `mcpr --mcp :9000` | — |
-| **Dev + tunnel** | `mcpr --mcp :9000` (tunnel auto) | ngrok |
-| **VPS / VM** | `mcpr --mcp :9000 --no-tunnel` | nginx reverse proxy |
-| **Docker** | `docker run mcpr --mcp server:9000` | nginx container |
-| **Kubernetes** | Deployment + Service | Kong, Envoy, nginx ingress |
+Single Rust binary. No JVM, no Kubernetes, no database.
+
+| Environment | How |
+|---|---|
+| **Local dev** | `mcpr --mcp :9000` |
+| **Dev + tunnel** | `mcpr --mcp :9000` (auto) |
+| **VPS / VM** | `mcpr --mcp :9000 --no-tunnel` |
+| **Docker** | `docker run mcpr --mcp server:9000` |
+| **Kubernetes** | Helm chart (coming soon) |
 
 ## Observability
 
@@ -61,19 +63,24 @@ Pipe to any log aggregator — or add one line to stream to [mcpr.app](https://m
 ```toml
 [cloud]
 token = "mcpr_xxxxxxxx"
+server = "my-server"          # matches server name in your mcpr.app project
+# endpoint = "https://api.mcpr.app"  # optional, default
+# batch_size = 100                    # optional, events per batch
+# flush_interval_ms = 5000           # optional, flush interval
 ```
 
 ## CSP Handling
 
 MCP Apps (ChatGPT Apps, Claude connectors) render widgets in sandboxed iframes with strict CSP. Every platform enforces it differently. mcpr handles this automatically:
 
-- Scans widget HTML for `<script src>`, `<link href>`, `fetch()`, `WebSocket` references
-- Adds missing domains to `connectDomains`, `resourceDomains`, `frameDomains`
-- Removes conflicting `<meta>` CSP tags injected by build tools
-- Adapts format per platform (ChatGPT needs `openai/widgetCSP`, Claude computes domain from SHA-256)
-- Expands known CDN pairs (`fonts.googleapis.com` → also adds `fonts.gstatic.com`)
+- Rewrites CSP domain arrays in JSON-RPC response metadata (`tools/list`, `tools/call`, `resources/list`, `resources/read`)
+- Replaces localhost/upstream URLs with the proxy (tunnel) domain
+- Adds extra domains from config to `connectDomains` and `resourceDomains`
+- Adapts format per platform (ChatGPT uses `openai/widgetCSP`, Claude uses `ui.csp`)
+- Deep-scans the entire response to catch CSP arrays in nested structures
+- Supports two modes: **extend** (keep external domains, strip localhost) or **override** (only configured domains)
 
-Zero config. Works on first proxy.
+Zero config in extend mode. Works on first proxy.
 
 ## Getting Started
 
@@ -110,8 +117,7 @@ widgets = "./widgets"
 mcp = "http://localhost:9000"
 
 [csp]
-extra_connect = ["api.stripe.com"]
-extra_resources = ["cdn.example.com"]
+domains = ["api.stripe.com", "cdn.example.com"]
 ```
 
 ## Roadmap
