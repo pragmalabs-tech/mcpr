@@ -370,12 +370,22 @@ async fn run_gateway(cfg: GatewayConfig) {
         });
     }
 
-    // Run the TUI on a blocking thread (it reads stdin)
-    let tui_handle = tokio::task::spawn_blocking(move || {
-        tui::run(tui_state, tui_sessions).expect("TUI failed");
-    });
-
-    tui_handle.await.unwrap();
+    // Run the TUI on a blocking thread (it reads stdin).
+    // Skip TUI when there's no terminal (e.g. Docker, CI, piped output).
+    let has_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    if has_terminal {
+        let tui_handle = tokio::task::spawn_blocking(move || {
+            tui::run(tui_state, tui_sessions).expect("TUI failed");
+        });
+        tui_handle.await.unwrap();
+    } else {
+        eprintln!("[mcpr] No terminal detected — TUI disabled. Running in headless mode.");
+        // Keep the process alive until interrupted
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to listen for ctrl-c");
+        eprintln!("[mcpr] Shutting down...");
+    }
 
     // Gracefully flush log sinks
     log_handle.shutdown().await;

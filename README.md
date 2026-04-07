@@ -35,7 +35,7 @@ Single Rust binary. No JVM, no Kubernetes, no database.
 | **Local dev** | `mcpr --mcp :9000` |
 | **Dev + tunnel** | `mcpr --mcp :9000` (auto) |
 | **VPS / VM** | `mcpr --mcp :9000 --no-tunnel` |
-| **Docker** | `docker run mcpr --mcp server:9000` |
+| **Docker** | `docker run -p 3000:3000 -v ./mcpr.toml:/app/mcpr.toml ghcr.io/cptrodgers/mcpr:latest --no-tunnel` |
 | **Kubernetes** | Helm chart (coming soon) |
 
 ## Observability
@@ -68,6 +68,28 @@ server = "my-server"          # matches server name in your mcpr.app project
 # batch_size = 100                    # optional, events per batch
 # flush_interval_ms = 5000           # optional, flush interval
 ```
+
+### mcpr.app Dashboard
+
+The cloud dashboard gives you:
+
+- **Tool Health** — per-tool status (healthy/degraded/down), error rate, p50/p95/p99 latency, sortable table
+- **Client Breakdown** — traffic by AI client (ChatGPT, Claude, VS Code, Cursor), detected from MCP `initialize` handshake
+- **Sessions** — per-session timeline with expandable event detail, active/ended status
+- **Latency Charts** — overall percentile timeline + per-tool line chart with p50/p95/p99 toggle
+- **Slow Calls** — outlier detection with "vs p50" multiplier, request/response sizes
+- **Error Grouping** — errors grouped by tool + message with timeline, first/last seen
+- **Event Log** — live streaming log with search, filters, export
+- **Global Filters** — filter by tools (multi-select), client, status, and custom time ranges
+
+<!-- SCREENSHOT: replace with actual dashboard screenshot -->
+![mcpr.app dashboard](docs/cloud-dashboard.png)
+
+Answer questions like:
+- "Which tool is slow?" — sort by p95, see the latency bar
+- "Is it my server or the client?" — filter by ChatGPT vs Claude vs VS Code
+- "What happened in this user's session?" — click a session ID, see every event in order
+- "When did errors start?" — error timeline shows exactly when and which tools broke
 
 ## CSP Handling
 
@@ -131,7 +153,7 @@ domains = ["api.stripe.com", "cdn.example.com"]
 - [x] TUI dashboard
 - [x] Cloud dashboard ([mcpr.app](https://mcpr.app))
 - [x] Cloud sync
-- [ ] Per-tool health (calls, errors, p50/p95)
+- [x] Per-tool health (calls, errors, p50/p95)
 - [ ] OAuth 2.1 at the proxy
 - [ ] ACL (per-tool access control)
 - [ ] Multi-server routing
