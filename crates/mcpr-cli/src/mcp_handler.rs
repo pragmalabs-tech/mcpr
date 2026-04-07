@@ -99,6 +99,7 @@ pub async fn handle_mcp_post(
                 .method(method_str)
                 .upstream(&upstream_url)
                 .latency(start.elapsed().as_millis() as u64)
+                .upstream_ms(upstream_ms)
                 .status(EventStatus::Error)
                 .request_size(raw_body_len as u64)
                 .error_detail(format!("{e}"));
@@ -210,6 +211,7 @@ pub async fn handle_mcp_post(
             .method(method_str)
             .upstream(&upstream_url)
             .latency(start.elapsed().as_millis() as u64)
+            .upstream_ms(upstream_ms)
             .status(evt_status)
             .request_size(raw_body_len as u64)
             .response_size(body.len() as u64);
@@ -250,6 +252,7 @@ pub async fn handle_mcp_post(
                 .method(method_str)
                 .upstream(&upstream_url)
                 .latency(start.elapsed().as_millis() as u64)
+                .upstream_ms(upstream_ms)
                 .request_size(raw_body_len as u64)
                 .response_size(resp_bytes.len() as u64),
         );
@@ -305,6 +308,7 @@ pub async fn handle_mcp_sse(
                     .method("SSE")
                     .upstream(&upstream_url)
                     .latency(start.elapsed().as_millis() as u64)
+                    .upstream_ms(upstream_ms)
                     .status(EventStatus::Error)
                     .error_detail(format!("{e}")),
             );
@@ -376,7 +380,10 @@ async fn handle_resources_read(
     state.events.emit(
         McprEvent::new(EventType::WidgetServe)
             .method(jsonrpc::RESOURCES_READ)
-            .latency(start.elapsed().as_millis() as u64),
+            .latency(start.elapsed().as_millis() as u64)
+            .upstream_ms(upstream_ms)
+            .request_size(raw_body.len() as u64)
+            .response_size(body.len() as u64),
     );
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());

@@ -21,9 +21,12 @@ pub struct McprEvent {
     /// Authenticated user (when OAuth is enabled)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    /// Request latency in milliseconds
+    /// Request latency in milliseconds (total end-to-end)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
+    /// Time spent waiting for upstream in milliseconds (proxy overhead = latency_ms - upstream_ms)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_ms: Option<u64>,
     /// Request outcome
     pub status: EventStatus,
     /// Which upstream handled this request
@@ -100,6 +103,7 @@ impl McprEvent {
             session: None,
             user: None,
             latency_ms: None,
+            upstream_ms: None,
             status: EventStatus::Ok,
             upstream: None,
             csp_applied: None,
@@ -131,6 +135,11 @@ impl McprEvent {
 
     pub fn latency(mut self, ms: u64) -> Self {
         self.latency_ms = Some(ms);
+        self
+    }
+
+    pub fn upstream_ms(mut self, ms: u64) -> Self {
+        self.upstream_ms = Some(ms);
         self
     }
 
@@ -197,6 +206,7 @@ mod tests {
         assert!(event.session.is_none());
         assert!(event.user.is_none());
         assert!(event.latency_ms.is_none());
+        assert!(event.upstream_ms.is_none());
         assert!(event.upstream.is_none());
         assert!(event.csp_applied.is_none());
         assert!(event.server.is_none());
@@ -256,6 +266,7 @@ mod tests {
         assert!(!obj.contains_key("session"));
         assert!(!obj.contains_key("user"));
         assert!(!obj.contains_key("latency_ms"));
+        assert!(!obj.contains_key("upstream_ms"));
         assert!(!obj.contains_key("upstream"));
         assert!(!obj.contains_key("csp_applied"));
         assert!(!obj.contains_key("server"));
