@@ -7,7 +7,7 @@ Route, log, and secure MCP traffic — from dev to production.
 mcpr --mcp http://localhost:9000
 ```
 
-<!-- TODO: screenshot — TUI showing proxied requests with tool names + latency -->
+![mcpr TUI dashboard showing proxied MCP requests with tool names and latency](docs/tui-dashboard.png)
 
 ---
 
@@ -16,7 +16,7 @@ mcpr --mcp http://localhost:9000
 mcpr sits between AI clients (ChatGPT, Claude, VS Code, Cursor) and your MCP server. It parses every JSON-RPC message at the protocol level — not as raw HTTP — so it can route, observe, and secure MCP traffic in ways generic proxies can't.
 
 - **Route** — MCP-aware reverse proxy. Tool calls, resource reads, session handshakes — all parsed and forwarded correctly.
-- **Observe** — Structured events for every request: tool name, latency, status, session ID. Pipe to stdout, Datadog, or [mcpr.app](https://mcpr.app).
+- **Observe** — Structured events for every request: tool name, latency, status, session ID. Pipe to stdout, or [mcpr.app](https://mcpr.app).
 - **Handle CSP** — Rewrites CSP domain arrays in JSON-RPC metadata per platform (ChatGPT and Claude). Zero config.
 - **Edge config** — Change CSP, OAuth URLs, and domain settings at the proxy. No server redeploy.
 
