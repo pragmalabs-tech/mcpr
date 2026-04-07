@@ -1,5 +1,9 @@
 # mcpr
 
+[![CI](https://github.com/cptrodgers/mcpr/actions/workflows/check.yml/badge.svg)](https://github.com/cptrodgers/mcpr/actions/workflows/check.yml)
+[![codecov](https://codecov.io/gh/cptrodgers/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/cptrodgers/mcpr)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 **The proxy for MCP servers.**
 Route, log, and secure MCP traffic — from dev to production.
 
