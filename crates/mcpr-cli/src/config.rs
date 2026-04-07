@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use mcpr_tunnel::RelayConfig;
 pub use mcpr_widgets::{CspMode, parse_csp_mode};
@@ -13,6 +13,43 @@ pub enum Mode {
     Gateway(Box<GatewayConfig>),
 }
 
+/// Result of parsing CLI args — either a subcommand action or the run mode.
+pub enum CliAction {
+    Run(Mode),
+    Validate(ValidateArgs),
+    Version,
+}
+
+// ── Log format ──────────────────────────────────────────────────────────
+
+/// Log output format for stderr.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LogFormat {
+    #[default]
+    Json,
+    Pretty,
+}
+
+impl std::str::FromStr for LogFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "json" => Ok(LogFormat::Json),
+            "pretty" | "text" => Ok(LogFormat::Pretty),
+            _ => Err(format!("unknown log format: {s} (expected: json, pretty)")),
+        }
+    }
+}
+
+impl std::fmt::Display for LogFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogFormat::Json => write!(f, "json"),
+            LogFormat::Pretty => write!(f, "pretty"),
+        }
+    }
+}
+
 // ── CLI args ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
@@ -22,61 +59,115 @@ pub enum Mode {
     about = "Open-source proxy for MCP Apps — fixes CSP, handles auth, observes every tool call."
 )]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    // ── Backward-compat: allow flags without subcommand (`mcpr --mcp ...`) ──
     /// Upstream MCP server URL
-    #[arg(long)]
+    #[arg(long, global = true)]
     mcp: Option<String>,
 
     /// Widget source: URL (proxy mode) or path (static mode)
-    #[arg(long)]
+    #[arg(long, global = true)]
     widgets: Option<String>,
 
     /// Local proxy port
-    #[arg(long)]
+    #[arg(long, global = true)]
     port: Option<u16>,
 
     /// Extra CSP domains
-    #[arg(long = "csp")]
+    #[arg(long = "csp", global = true)]
     csp_domains: Vec<String>,
 
     /// CSP mode: "extend" (add to upstream CSP) or "override" (replace upstream CSP)
-    #[arg(long = "csp-mode")]
+    #[arg(long = "csp-mode", global = true)]
     csp_mode: Option<String>,
 
     /// Run as relay server instead of client proxy
-    #[arg(long)]
+    #[arg(long, global = true)]
     relay: bool,
 
     /// Relay server base domain (for relay mode)
-    #[arg(long)]
+    #[arg(long, global = true)]
     relay_domain: Option<String>,
 
     /// Auth provider URL for token validation (relay mode)
-    #[arg(long, env = "MCPR_AUTH_PROVIDER")]
+    #[arg(long, env = "MCPR_AUTH_PROVIDER", global = true)]
     auth_provider: Option<String>,
 
     /// Shared secret between relay and auth provider
-    #[arg(long, env = "MCPR_AUTH_PROVIDER_SECRET")]
+    #[arg(long, env = "MCPR_AUTH_PROVIDER_SECRET", global = true)]
     auth_provider_secret: Option<String>,
 
     /// Relay server URL (for gateway tunnel mode)
-    #[arg(long, env = "MCPR_RELAY_URL")]
+    #[arg(long, env = "MCPR_RELAY_URL", global = true)]
     relay_url: Option<String>,
 
     /// Don't start any tunnel (local-only mode)
-    #[arg(long)]
+    #[arg(long, global = true)]
     no_tunnel: bool,
 
     /// Emit structured JSON events to stdout
-    #[arg(long)]
+    #[arg(long, global = true)]
     events: bool,
 
     /// Cloud sync token (from cloud.mcpr.app project settings)
-    #[arg(long, env = "MCPR_CLOUD_TOKEN")]
+    #[arg(long, env = "MCPR_CLOUD_TOKEN", global = true)]
     cloud_token: Option<String>,
 
     /// Server slug for cloud routing (matches server name in cloud project)
-    #[arg(long)]
+    #[arg(long, global = true)]
     cloud_server: Option<String>,
+
+    /// Force TUI on (default: auto-detect terminal)
+    #[arg(long, global = true, env = "MCPR_TUI")]
+    tui: bool,
+
+    /// Force TUI off (for Docker/CI environments)
+    #[arg(long, global = true, env = "MCPR_NO_TUI")]
+    no_tui: bool,
+
+    /// Graceful shutdown drain timeout in seconds
+    #[arg(long, global = true, default_value = "30")]
+    drain_timeout: u64,
+
+    /// Log format for stderr output: json (default) or pretty
+    #[arg(long, global = true, default_value = "json")]
+    log_format: LogFormat,
+
+    /// Admin API bind address (set to "none" to disable)
+    #[arg(long, global = true, default_value = "127.0.0.1:9901")]
+    admin_bind: String,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Start proxy in foreground (default if no subcommand given)
+    Run,
+    /// Validate config file and exit
+    Validate(ValidateArgs),
+    /// Print version information and exit
+    Version,
+}
+
+/// Arguments for the `validate` subcommand.
+#[derive(Parser, Clone)]
+pub struct ValidateArgs {
+    /// Config file path to validate
+    #[arg(short, long)]
+    pub config: Option<String>,
+    /// Dump resolved config to stdout after validation
+    #[arg(long)]
+    pub dump: bool,
+}
+
+/// Runtime options extracted from CLI args (used by main.rs).
+pub struct RuntimeOptions {
+    pub tui: bool,
+    pub no_tui: bool,
+    pub drain_timeout: u64,
+    pub log_format: LogFormat,
+    pub admin_bind: String,
 }
 
 // ── TOML config file ────────────────────────────────────────────────────
@@ -174,6 +265,14 @@ struct FileConfig {
 
     // -- Logging --
     logging: FileLoggingConfig,
+
+    // -- Runtime --
+    no_tui: bool,
+    drain_timeout: Option<u64>,
+    log_format: Option<String>,
+
+    // -- Admin --
+    admin_bind: Option<String>,
 
     max_request_body_size: Option<usize>,
     max_response_body_size: Option<usize>,
@@ -280,6 +379,7 @@ pub struct GatewayConfig {
     pub cloud_endpoint: Option<String>,
     pub cloud_batch_size: Option<usize>,
     pub cloud_flush_interval_ms: Option<u64>,
+    pub runtime: RuntimeOptions,
 }
 
 impl GatewayConfig {
@@ -461,19 +561,153 @@ impl GatewayConfig {
 
 // ── Load + dispatch ─────────────────────────────────────────────────────
 
-/// Parse CLI args, load config file, and return the resolved mode.
-pub fn load() -> Mode {
+/// Parse CLI args, load config file, and return the resolved action.
+pub fn load() -> CliAction {
     let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Validate(args)) => return CliAction::Validate(args),
+        Some(Commands::Version) => return CliAction::Version,
+        Some(Commands::Run) | None => {
+            // Continue to load config and determine run mode
+        }
+    }
+
     let (file, config_path) = FileConfig::load();
 
-    if cli.relay || file.is_relay() {
-        load_relay(cli, file)
+    // Merge TUI/runtime settings: CLI flags override file config
+    let runtime = RuntimeOptions {
+        tui: cli.tui,
+        no_tui: cli.no_tui || file.no_tui,
+        drain_timeout: if cli.drain_timeout != 30 {
+            cli.drain_timeout
+        } else {
+            file.drain_timeout.unwrap_or(30)
+        },
+        log_format: if cli.log_format != LogFormat::Json {
+            cli.log_format
+        } else {
+            file.log_format
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(LogFormat::Json)
+        },
+        admin_bind: if cli.admin_bind != "127.0.0.1:9901" {
+            cli.admin_bind.clone()
+        } else {
+            file.admin_bind
+                .clone()
+                .unwrap_or_else(|| "127.0.0.1:9901".to_string())
+        },
+    };
+
+    let mode = if cli.relay || file.is_relay() {
+        load_relay(cli, file, runtime)
     } else {
-        load_gateway(cli, file, config_path)
-    }
+        load_gateway(cli, file, config_path, runtime)
+    };
+
+    CliAction::Run(mode)
 }
 
-fn load_relay(cli: Cli, file: FileConfig) -> Mode {
+/// Validate a config file and return a list of (severity, message) tuples.
+/// Severity is "error" or "warn".
+pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut issues = Vec::new();
+
+    let config_path = path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap().join(CONFIG_FILE));
+
+    if !config_path.exists() {
+        issues.push((
+            "error",
+            format!("config file not found: {}", config_path.display()),
+        ));
+        return issues;
+    }
+
+    let contents = match std::fs::read_to_string(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            issues.push((
+                "error",
+                format!("cannot read {}: {}", config_path.display(), e),
+            ));
+            return issues;
+        }
+    };
+
+    match toml::from_str::<FileConfig>(&contents) {
+        Ok(config) => {
+            // Check required fields for gateway mode
+            if !config.is_relay() && config.mcp.is_none() {
+                issues.push((
+                    "warn",
+                    "no 'mcp' URL set — required for gateway mode".to_string(),
+                ));
+            }
+
+            // Check relay mode requirements
+            if config.is_relay() {
+                if config.port.is_none() {
+                    issues.push(("error", "'port' is required for relay mode".to_string()));
+                }
+                if config.relay_domain().is_none() {
+                    issues.push((
+                        "error",
+                        "'relay.domain' is required for relay mode".to_string(),
+                    ));
+                }
+            }
+
+            // Validate MCP URL if set
+            if let Some(ref mcp) = config.mcp
+                && url::Url::parse(mcp).is_err()
+            {
+                issues.push(("error", format!("invalid MCP URL: {mcp}")));
+            }
+
+            // Validate port range
+            if let Some(port) = config.port
+                && port == 0
+            {
+                issues.push(("warn", "port 0 will bind to a random port".to_string()));
+            }
+
+            // Validate CSP mode
+            if let Some(ref mode) = config.csp.mode
+                && mode != "extend" && mode != "override"
+            {
+                issues.push((
+                    "error",
+                    format!("invalid csp.mode: {mode} (expected: extend, override)"),
+                ));
+            }
+
+            // Validate log format
+            if let Some(ref fmt) = config.log_format
+                && fmt.parse::<LogFormat>().is_err()
+            {
+                issues.push((
+                    "error",
+                    format!("invalid log_format: {fmt} (expected: json, pretty)"),
+                ));
+            }
+
+            if issues.is_empty() {
+                issues.push(("ok", format!("config valid: {}", config_path.display())));
+            }
+        }
+        Err(e) => {
+            issues.push(("error", format!("invalid TOML: {e}")));
+        }
+    }
+
+    issues
+}
+
+fn load_relay(cli: Cli, file: FileConfig, _runtime: RuntimeOptions) -> Mode {
     let port = cli
         .port
         .or(file.port)
@@ -500,7 +734,12 @@ fn load_relay(cli: Cli, file: FileConfig) -> Mode {
     })
 }
 
-fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathBuf>) -> Mode {
+fn load_gateway(
+    cli: Cli,
+    file: FileConfig,
+    config_path: Option<std::path::PathBuf>,
+    runtime: RuntimeOptions,
+) -> Mode {
     let tunnel_relay_url = file.tunnel_relay_url();
     let tunnel_token = file.tunnel_token();
     let tunnel_subdomain = file.tunnel_subdomain();
@@ -580,18 +819,26 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
                 }
             }
 
-            eprint!(
-                "  {} Save to {}? [y/N] ",
-                colored::Colorize::cyan("?"),
-                path.display()
-            );
-            let mut input = String::new();
-            if std::io::stdin().read_line(&mut input).is_ok()
-                && input.trim().eq_ignore_ascii_case("y")
-            {
-                save_cli_overrides(path, &diffs, &port_diff);
+            if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+                eprint!(
+                    "  {} Save to {}? [y/N] ",
+                    colored::Colorize::cyan("?"),
+                    path.display()
+                );
+                let mut input = String::new();
+                if std::io::stdin().read_line(&mut input).is_ok()
+                    && input.trim().eq_ignore_ascii_case("y")
+                {
+                    save_cli_overrides(path, &diffs, &port_diff);
+                }
+                eprintln!();
+            } else {
+                eprintln!(
+                    "  {} Run interactively to save, or edit {} directly.",
+                    colored::Colorize::dimmed("hint"),
+                    path.display()
+                );
             }
-            eprintln!();
         }
     }
 
@@ -636,6 +883,7 @@ fn load_gateway(cli: Cli, file: FileConfig, config_path: Option<std::path::PathB
         cloud_endpoint: file.cloud.endpoint,
         cloud_batch_size: file.cloud.batch_size,
         cloud_flush_interval_ms: file.cloud.flush_interval_ms,
+        runtime,
     }))
 }
 

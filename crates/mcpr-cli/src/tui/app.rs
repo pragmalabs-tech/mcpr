@@ -21,8 +21,13 @@ fn install_panic_hook() {
     }));
 }
 
-/// Run the TUI event/render loop. Blocks until the user presses Ctrl+C or q.
-pub fn run(state: SharedTuiState, sessions: MemorySessionStore) -> io::Result<()> {
+/// Run the TUI event/render loop. Blocks until the user presses Ctrl+C, q,
+/// or the shutdown signal fires.
+pub fn run(
+    state: SharedTuiState,
+    sessions: MemorySessionStore,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> io::Result<()> {
     install_panic_hook();
 
     terminal::enable_raw_mode()?;
@@ -32,6 +37,11 @@ pub fn run(state: SharedTuiState, sessions: MemorySessionStore) -> io::Result<()
     let mut terminal = Terminal::new(backend)?;
 
     loop {
+        // Check if shutdown was signaled
+        if *shutdown.borrow() {
+            break;
+        }
+
         terminal.draw(|f| ui::render(f, &state, &sessions))?;
 
         // Poll with 100ms timeout → ~10 FPS refresh

@@ -4,7 +4,7 @@
 Route, log, and secure MCP traffic — from dev to production.
 
 ```bash
-mcpr --mcp http://localhost:9000
+mcpr run --mcp http://localhost:9000
 ```
 
 ![mcpr TUI dashboard showing proxied MCP requests with tool names and latency](docs/tui-dashboard.png)
@@ -32,18 +32,20 @@ Single Rust binary. No JVM, no Kubernetes, no database.
 
 | Environment | How |
 |---|---|
-| **Local dev** | `mcpr --mcp :9000` |
-| **Dev + tunnel** | `mcpr --mcp :9000` (auto) |
-| **VPS / VM** | `mcpr --mcp :9000 --no-tunnel` |
-| **Docker** | `docker run -p 3000:3000 -v ./mcpr.toml:/app/mcpr.toml ghcr.io/cptrodgers/mcpr:latest --no-tunnel` |
+| **Local dev** | `mcpr run --mcp :9000` |
+| **Dev + tunnel** | `mcpr run --mcp :9000` (auto) |
+| **VPS / VM** | `mcpr run --mcp :9000 --no-tunnel` |
+| **Docker** | `docker run -p 3000:3000 -p 9901:9901 -v ./mcpr.toml:/app/mcpr.toml ghcr.io/cptrodgers/mcpr:latest` |
 | **Kubernetes** | Helm chart (coming soon) |
+
+> **Backward compat:** `mcpr --mcp ...` (no subcommand) still works and defaults to `run`.
 
 ## Observability
 
 Every MCP request emits a structured JSON event:
 
 ```bash
-mcpr --mcp :9000 --events
+mcpr run --mcp :9000 --events
 ```
 
 ```json
@@ -104,12 +106,38 @@ MCP Apps (ChatGPT Apps, Claude connectors) render widgets in sandboxed iframes w
 
 Zero config in extend mode. Works on first proxy.
 
+## Health & Admin
+
+mcpr runs an admin API on port `9901` (configurable via `--admin-bind`):
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /healthz` | Liveness — 200 unless shutting down |
+| `GET /ready` | Readiness — 503 while draining or MCP upstream disconnected |
+| `GET /version` | Version info as JSON |
+
+Kubernetes probes:
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 9901 }
+readinessProbe:
+  httpGet: { path: /ready, port: 9901 }
+```
+
+## CLI Subcommands
+
+```
+mcpr run [OPTIONS]       Start proxy in foreground (default)
+mcpr validate [-c PATH]  Validate config and exit
+mcpr version             Print version info as JSON
+```
+
 ## Getting Started
 
 ### Proxy an MCP server
 
 ```bash
-mcpr --mcp http://localhost:9000
+mcpr run --mcp http://localhost:9000
 ```
 
 ### Proxy MCP server + widget dev server
@@ -154,6 +182,13 @@ domains = ["api.stripe.com", "cdn.example.com"]
 - [x] Cloud dashboard ([mcpr.app](https://mcpr.app))
 - [x] Cloud sync
 - [x] Per-tool health (calls, errors, p50/p95)
+- [x] Subcommand CLI (`run`, `validate`, `version`)
+- [x] Admin API with health endpoints (`/healthz`, `/ready`)
+- [x] SIGTERM graceful drain for Kubernetes
+- [x] Structured stderr logging (JSON/pretty)
+- [x] `--tui` / `--no-tui` flags for Docker/CI
+- [ ] Prometheus metrics (`/metrics`)
+- [ ] SIGHUP config reload
 - [ ] OAuth 2.1 at the proxy
 - [ ] ACL (per-tool access control)
 - [ ] Multi-server routing
