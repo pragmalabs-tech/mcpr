@@ -75,6 +75,8 @@ pub enum EventType {
     CspViolation,
     AuthEvent,
     AclDeny,
+    /// Periodic heartbeat with proxy status information.
+    Heartbeat,
     /// Catch-all for passthrough requests (OAuth, well-known, etc.)
     Request,
 }
@@ -174,6 +176,11 @@ impl McprEvent {
 
     pub fn response_size(mut self, n: u64) -> Self {
         self.response_size = Some(n);
+        self
+    }
+
+    pub fn meta(mut self, m: serde_json::Value) -> Self {
+        self.meta = Some(m);
         self
     }
 }
@@ -292,6 +299,7 @@ mod tests {
             (EventType::CspViolation, "csp_violation"),
             (EventType::AuthEvent, "auth_event"),
             (EventType::AclDeny, "acl_deny"),
+            (EventType::Heartbeat, "heartbeat"),
             (EventType::Request, "request"),
         ];
 

@@ -156,7 +156,7 @@ function createServer() {
 const app = express();
 app.use(express.json());
 
-const PORT = Number(process.env.PORT ?? 9000);
+const PORT = Number(process.env.PORT ?? 9001);
 
 // Store transports by session ID
 const transports: Record<string, StreamableHTTPServerTransport> = {};
@@ -232,9 +232,7 @@ app.listen(PORT, () => {
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   console.log("");
   console.log("Next: run mcpr to proxy it:");
-  console.log(
-    `  mcpr --mcp http://localhost:${PORT}/mcp --widgets ./widget --events`,
-  );
+  console.log(`  mcpr --mcp http://localhost:${PORT}/mcp`);
 });
 
 // Graceful shutdown — close all active transports
