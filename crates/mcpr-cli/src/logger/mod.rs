@@ -1,11 +1,13 @@
 mod entry;
 pub mod file_sink;
 mod sink;
+mod stderr_sink;
 mod tui_sink;
 
 pub use entry::LogEntry;
 pub use file_sink::{DEFAULT_MAX_FILES, FileSink, FileSinkConfig, Rotation, prefix_from_upstream};
 pub use sink::LogSink;
+pub use stderr_sink::StderrSink;
 pub use tui_sink::TuiSink;
 
 use tokio::sync::mpsc;

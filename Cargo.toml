@@ -13,7 +13,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-version = "0.2.0"
+version = "0.3.0"
 repository = "https://github.com/cptrodgers/mcpr"
 homepage = "https://mcpr.app"
 description = "Open-source proxy for MCP Apps — fixes CSP, handles auth, observes every tool call."
@@ -32,12 +32,12 @@ url = "2"
 base64 = "0.22"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
-mcpr-protocol = { path = "crates/mcpr-protocol", version = "0.2.0" }
-mcpr-session = { path = "crates/mcpr-session", version = "0.2.0" }
-mcpr-widgets = { path = "crates/mcpr-widgets", version = "0.2.0" }
-mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.2.0" }
-mcpr-events = { path = "crates/mcpr-events", version = "0.2.0" }
-mcpr-core = { path = "crates/mcpr-core", version = "0.2.0" }
+mcpr-protocol = { path = "crates/mcpr-protocol", version = "0.3.0" }
+mcpr-session = { path = "crates/mcpr-session", version = "0.3.0" }
+mcpr-widgets = { path = "crates/mcpr-widgets", version = "0.3.0" }
+mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.3.0" }
+mcpr-events = { path = "crates/mcpr-events", version = "0.3.0" }
+mcpr-core = { path = "crates/mcpr-core", version = "0.3.0" }
 
 [workspace.metadata.release]
 shared-version = true

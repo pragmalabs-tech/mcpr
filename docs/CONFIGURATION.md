@@ -33,8 +33,8 @@ widgets = "http://localhost:4444"
 # Local proxy port (optional in tunnel mode -- picks random port if omitted)
 port = 3000
 
-# Disable tunnel -- local-only mode
-no_tunnel = false
+# Disable tunnel -- local-only mode (set to true for production)
+# no_tunnel = true
 
 [tunnel]
 # Relay server URL (default: https://tunnel.mcpr.app)

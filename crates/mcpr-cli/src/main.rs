@@ -1,3 +1,4 @@
+mod admin;
 mod config;
 mod display;
 pub mod logger;
@@ -9,6 +10,7 @@ mod tui;
 mod widgets;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -19,10 +21,10 @@ use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use tower_http::cors::{Any, CorsLayer};
 
-use config::{GatewayConfig, Mode};
+use config::{CliAction, GatewayConfig, Mode};
 use display::log_startup;
 use logger::{
-    DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, TuiSink,
+    DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, StderrSink, TuiSink,
     prefix_from_upstream,
 };
 use mcpr_session::MemorySessionStore;
@@ -30,6 +32,9 @@ use mcpr_widgets::RewriteConfig;
 use proxy::proxy_routes;
 use tui::SharedTuiState;
 use widgets::WidgetSource;
+
+/// Global drain flag — set to true when graceful shutdown begins.
+static IS_DRAINING: AtomicBool = AtomicBool::new(false);
 
 pub const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 5 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
@@ -85,11 +90,41 @@ impl mcpr_tunnel::TunnelStatusCallback for TuiTunnelStatus {
 #[tokio::main]
 async fn main() {
     match config::load() {
-        Mode::Relay(cfg) => {
-            mcpr_tunnel::relay::start_relay(cfg).await;
+        CliAction::Run(mode) => match mode {
+            Mode::Relay(cfg) => {
+                mcpr_tunnel::relay::start_relay(cfg).await;
+            }
+            Mode::Gateway(cfg) => {
+                run_gateway(*cfg).await;
+            }
+        },
+        CliAction::Validate(args) => {
+            let issues = config::validate_config(args.config.as_deref());
+            let mut has_error = false;
+            for (severity, msg) in &issues {
+                match *severity {
+                    "error" => {
+                        has_error = true;
+                        eprintln!("  {} {msg}", colored::Colorize::red("error"),);
+                    }
+                    "warn" => {
+                        eprintln!("  {} {msg}", colored::Colorize::yellow("warn"),);
+                    }
+                    _ => {
+                        eprintln!("  {} {msg}", colored::Colorize::green("ok"),);
+                    }
+                }
+            }
+            std::process::exit(if has_error { 1 } else { 0 });
         }
-        Mode::Gateway(cfg) => {
-            run_gateway(*cfg).await;
+        CliAction::Version => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "target": option_env!("TARGET").unwrap_or("unknown"),
+                })
+            );
         }
     }
 }
@@ -243,8 +278,20 @@ async fn run_gateway(cfg: GatewayConfig) {
     let request_timeout =
         Duration::from_secs(cfg.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS));
 
+    // Determine TUI mode
+    let use_tui = match (cfg.runtime.tui, cfg.runtime.no_tui) {
+        (true, _) => true,
+        (_, true) => false,
+        _ => std::io::IsTerminal::is_terminal(&std::io::stdout()),
+    };
+
     // Build log sinks
-    let mut sinks: Vec<Box<dyn LogSink>> = vec![Box::new(TuiSink::new(tui_state.clone()))];
+    let mut sinks: Vec<Box<dyn LogSink>> = Vec::new();
+    if use_tui {
+        sinks.push(Box::new(TuiSink::new(tui_state.clone())));
+    } else {
+        sinks.push(Box::new(StderrSink::new(cfg.runtime.log_format)));
+    }
 
     if cfg.log_file {
         let rotation = match cfg.log_rotation.as_deref() {
@@ -358,37 +405,87 @@ async fn run_gateway(cfg: GatewayConfig) {
         cfg.widgets.as_deref(),
     );
 
-    // Spawn the axum server as a background task
+    let drain_timeout = cfg.runtime.drain_timeout;
+    let admin_bind = cfg.runtime.admin_bind.clone();
+
+    // Create a shutdown signal that responds to SIGTERM and SIGINT
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Spawn the axum server with graceful shutdown
+    let shutdown_for_server = shutdown_tx.subscribe();
     tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("Server failed");
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let mut rx = shutdown_for_server;
+                let _ = rx.changed().await;
+            })
+            .await
+            .expect("Server failed");
     });
 
-    // Spawn health check task: periodically probe MCP + widgets status
-    {
+    // Spawn admin server (health + readiness endpoints)
+    if admin_bind != "none" {
+        let admin_tui_state = tui_state.clone();
+        let admin_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            health_check_loop(health_state).await;
+            admin::start_admin_server(&admin_bind, admin_tui_state, admin_shutdown).await;
         });
     }
 
-    // Run the TUI on a blocking thread (it reads stdin).
-    // Skip TUI when there's no terminal (e.g. Docker, CI, piped output).
-    let has_terminal = std::io::IsTerminal::is_terminal(&std::io::stdout());
-    if has_terminal {
+    // Spawn health check task: periodically probe MCP + widgets status
+    tokio::spawn(async move {
+        health_check_loop(health_state).await;
+    });
+
+    // Spawn signal handler
+    let shutdown_trigger = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM");
+            tokio::select! {
+                _ = ctrl_c => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.expect("Failed to listen for ctrl-c");
+        }
+
+        eprintln!("[mcpr] Received shutdown signal, draining...");
+        IS_DRAINING.store(true, Ordering::SeqCst);
+        let _ = shutdown_trigger.send(true);
+    });
+
+    if use_tui {
+        // Run the TUI on a blocking thread (it reads stdin).
+        let tui_shutdown = shutdown_tx.subscribe();
         let tui_handle = tokio::task::spawn_blocking(move || {
-            tui::run(tui_state, tui_sessions).expect("TUI failed");
+            tui::run(tui_state, tui_sessions, tui_shutdown).expect("TUI failed");
         });
         tui_handle.await.unwrap();
+        // TUI exited (user pressed q or signal received) — trigger shutdown
+        let _ = shutdown_tx.send(true);
     } else {
-        eprintln!("[mcpr] No terminal detected — TUI disabled. Running in headless mode.");
-        // Keep the process alive until interrupted
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to listen for ctrl-c");
-        eprintln!("[mcpr] Shutting down...");
+        if !cfg.runtime.no_tui {
+            eprintln!("[mcpr] No terminal detected — TUI disabled. Running in headless mode.");
+        }
+        // Wait for shutdown signal
+        let _ = shutdown_rx.changed().await;
     }
+
+    // Graceful drain: wait for in-flight requests
+    eprintln!("[mcpr] Waiting up to {drain_timeout}s for in-flight requests...");
+    tokio::time::sleep(Duration::from_secs(drain_timeout.min(5))).await;
 
     // Gracefully flush log sinks
     log_handle.shutdown().await;
+    eprintln!("[mcpr] Shutdown complete.");
 }
 
 /// Parse a human-readable size string like "50MB", "100KB", "1GB" into bytes.
