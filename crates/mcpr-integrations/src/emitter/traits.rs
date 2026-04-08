@@ -1,4 +1,4 @@
-use crate::event::McprEvent;
+use super::event::McprEvent;
 
 /// Trait for event output backends.
 ///

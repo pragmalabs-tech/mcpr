@@ -1,4 +1,5 @@
-use crate::{EventEmitter, McprEvent};
+use super::event::McprEvent;
+use super::traits::EventEmitter;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -150,7 +151,7 @@ async fn flush_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EventType, McprEvent};
+    use crate::emitter::event::{EventType, McprEvent};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{header, method, path};

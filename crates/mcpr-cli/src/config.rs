@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
+pub use mcpr_proxy::{CspMode, parse_csp_mode};
 use mcpr_tunnel::RelayConfig;
-pub use mcpr_widgets::{CspMode, parse_csp_mode};
 
 const CONFIG_FILE: &str = "mcpr.toml";
 

@@ -1,3 +1,57 @@
+//! # mcpr (CLI binary)
+//!
+//! The main mcpr binary: an open-source reverse proxy for MCP applications.
+//! This crate orchestrates all library crates into a runnable gateway or
+//! relay server.
+//!
+//! ## Responsibilities
+//!
+//! - **Configuration** (`config`): CLI argument parsing (clap), TOML config
+//!   file loading, and config validation. Resolves the run mode (gateway vs
+//!   relay) and merges CLI args with file-based config.
+//!
+//! - **Proxy orchestration** (`proxy`): Catch-all HTTP handler that dispatches
+//!   classified requests to the appropriate handler (MCP, widgets, passthrough).
+//!
+//! - **MCP request handling** (`mcp_handler`): Processes MCP JSON-RPC POST and
+//!   SSE requests — forwards to upstream, rewrites responses, tracks sessions,
+//!   and emits structured events.
+//!
+//! - **Widget serving** (`widgets`): Serves widget HTML pages, static assets,
+//!   and widget list endpoints from local filesystem or upstream proxy.
+//!
+//! - **Passthrough** (`passthrough`): Forwards non-MCP requests (OAuth, .well-known,
+//!   etc.) to upstream with URL rewriting.
+//!
+//! - **Terminal UI** (`tui`): Real-time dashboard showing connection status,
+//!   request log, sessions, and cloud sync status. Built with ratatui.
+//!
+//! - **Logging** (`logger`): Multi-sink structured logging with support for
+//!   stderr, TUI, and file sinks (daily/size rotation).
+//!
+//! - **Admin endpoints** (`admin`): Health check and readiness probe endpoints
+//!   on a separate port for orchestration (k8s, docker, etc.).
+//!
+//! - **Onboarding** (`onboarding`): Interactive tunnel setup flow for first-time
+//!   users connecting to tunnel.mcpr.app.
+//!
+//! ## Module Structure
+//!
+//! ```text
+//! mcpr-cli/src/
+//! +-- main.rs         # Entry point, gateway startup, signal handling
+//! +-- config.rs       # CLI args, TOML config, validation
+//! +-- proxy.rs        # Request dispatcher (classify -> handle)
+//! +-- mcp_handler.rs  # MCP POST/SSE handling, session tracking, events
+//! +-- widgets.rs      # Widget HTML serving, asset proxying
+//! +-- passthrough.rs  # Non-MCP request forwarding
+//! +-- admin.rs        # Health/readiness admin server
+//! +-- onboarding.rs   # Interactive tunnel claim flow
+//! +-- display.rs      # Startup banner and formatting
+//! +-- logger/         # LogRouter, FileSink, StderrSink, TuiSink
+//! +-- tui/            # Terminal UI (app loop, rendering, state)
+//! ```
+
 mod admin;
 mod config;
 mod display;
@@ -14,8 +68,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use mcpr_core::forwarding::UpstreamClient;
-use mcpr_events::EventEmitter;
+use mcpr_integrations::EventEmitter;
+use mcpr_proxy::forwarding::UpstreamClient;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -27,8 +81,8 @@ use logger::{
     DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, StderrSink, TuiSink,
     prefix_from_upstream,
 };
-use mcpr_session::MemorySessionStore;
-use mcpr_widgets::RewriteConfig;
+use mcpr_protocol::session::MemorySessionStore;
+use mcpr_proxy::RewriteConfig;
 use proxy::proxy_routes;
 use tui::SharedTuiState;
 use widgets::WidgetSource;
@@ -347,8 +401,8 @@ async fn run_gateway(cfg: GatewayConfig) {
         let cloud_endpoint = format!("{}/api/ingest-events", endpoint.trim_end_matches('/'));
         tui_state.lock().unwrap().cloud_endpoint = Some(cloud_endpoint.clone());
         let tui_for_cloud = tui_state.clone();
-        Arc::new(mcpr_events::CloudEmitter::new(
-            mcpr_events::CloudEmitterConfig {
+        Arc::new(mcpr_integrations::CloudEmitter::new(
+            mcpr_integrations::CloudEmitterConfig {
                 endpoint: cloud_endpoint,
                 token: token.clone(),
                 server: cfg.cloud_server.clone(),
@@ -357,10 +411,10 @@ async fn run_gateway(cfg: GatewayConfig) {
                 on_flush: Some(std::sync::Arc::new(move |status| {
                     if let Ok(mut state) = tui_for_cloud.lock() {
                         state.cloud_sync = Some(match status {
-                            mcpr_events::SyncStatus::Ok { count } => {
+                            mcpr_integrations::SyncStatus::Ok { count } => {
                                 tui::state::CloudSyncStatus::Ok { count }
                             }
-                            mcpr_events::SyncStatus::Failed { message } => {
+                            mcpr_integrations::SyncStatus::Failed { message } => {
                                 tui::state::CloudSyncStatus::Failed { message }
                             }
                         });
@@ -369,7 +423,7 @@ async fn run_gateway(cfg: GatewayConfig) {
             },
         ))
     } else {
-        Arc::new(mcpr_events::NoopEmitter)
+        Arc::new(mcpr_integrations::NoopEmitter)
     };
 
     let state = AppState {
@@ -761,8 +815,8 @@ async fn health_check_loop(app_state: AppState) {
             drop(s);
 
             app_state.events.emit(
-                mcpr_events::McprEvent::new(mcpr_events::EventType::Heartbeat)
-                    .status(mcpr_events::EventStatus::Ok)
+                mcpr_integrations::McprEvent::new(mcpr_integrations::EventType::Heartbeat)
+                    .status(mcpr_integrations::EventStatus::Ok)
                     .meta(heartbeat_meta),
             );
         }

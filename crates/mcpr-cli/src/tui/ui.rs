@@ -6,7 +6,7 @@ use ratatui::widgets::{
     Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Tabs,
 };
 
-use mcpr_session::MemorySessionStore;
+use mcpr_protocol::session::MemorySessionStore;
 
 use super::state::{ConnectionStatus, SharedTuiState, Tab};
 
@@ -495,28 +495,28 @@ fn render_sessions_panel(
     render_session_detail(frame, chunks[1], session, s);
 }
 
-fn session_state_color(state: &mcpr_session::SessionState) -> Color {
+fn session_state_color(state: &mcpr_protocol::session::SessionState) -> Color {
     match state {
-        mcpr_session::SessionState::Created => Color::Yellow,
-        mcpr_session::SessionState::Initialized => Color::Cyan,
-        mcpr_session::SessionState::Active => Color::Green,
-        mcpr_session::SessionState::Closed => Color::Red,
+        mcpr_protocol::session::SessionState::Created => Color::Yellow,
+        mcpr_protocol::session::SessionState::Initialized => Color::Cyan,
+        mcpr_protocol::session::SessionState::Active => Color::Green,
+        mcpr_protocol::session::SessionState::Closed => Color::Red,
     }
 }
 
-fn session_state_label(state: &mcpr_session::SessionState) -> &'static str {
+fn session_state_label(state: &mcpr_protocol::session::SessionState) -> &'static str {
     match state {
-        mcpr_session::SessionState::Created => "CREATED",
-        mcpr_session::SessionState::Initialized => "INITIALIZED",
-        mcpr_session::SessionState::Active => "ACTIVE",
-        mcpr_session::SessionState::Closed => "CLOSED",
+        mcpr_protocol::session::SessionState::Created => "CREATED",
+        mcpr_protocol::session::SessionState::Initialized => "INITIALIZED",
+        mcpr_protocol::session::SessionState::Active => "ACTIVE",
+        mcpr_protocol::session::SessionState::Closed => "CLOSED",
     }
 }
 
 fn render_session_detail(
     frame: &mut Frame,
     area: Rect,
-    session: &mcpr_session::SessionInfo,
+    session: &mcpr_protocol::session::SessionInfo,
     s: &super::state::TuiState,
 ) {
     let block = Block::default()

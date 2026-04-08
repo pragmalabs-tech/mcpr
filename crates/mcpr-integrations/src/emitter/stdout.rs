@@ -1,5 +1,5 @@
-use crate::emitter::EventEmitter;
-use crate::event::McprEvent;
+use super::event::McprEvent;
+use super::traits::EventEmitter;
 
 /// Emits events as one-line JSON to stdout.
 ///

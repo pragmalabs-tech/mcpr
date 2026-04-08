@@ -1,10 +1,10 @@
 [package]
-name = "mcpr-events"
+name = "mcpr-integrations"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Structured event system for MCP tool calls and sessions"
+description = "External integrations for mcpr: event emitters, metrics, feature flags, and analytics"
 
 [dependencies]
 serde = { workspace = true }

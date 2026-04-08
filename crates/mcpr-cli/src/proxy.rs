@@ -14,10 +14,10 @@ use crate::logger::LogEntry;
 use crate::mcp_handler::{handle_mcp_post, handle_mcp_sse};
 use crate::passthrough::{forward_and_passthrough, serve_oauth_callback_relay};
 use crate::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
-use mcpr_core::router::{ClassifiedRequest, classify};
-use mcpr_core::sse::split_upstream;
-use mcpr_events::{EventType, McprEvent};
-use mcpr_session::SessionStore;
+use mcpr_integrations::{EventType, McprEvent};
+use mcpr_protocol::session::SessionStore;
+use mcpr_proxy::router::{ClassifiedRequest, classify};
+use mcpr_proxy::sse::split_upstream;
 
 /// Convenience wrapper: forward a request using this app's state.
 pub(crate) async fn forward_request(
@@ -28,7 +28,7 @@ pub(crate) async fn forward_request(
     body: &Bytes,
     is_streaming: bool,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    mcpr_core::forwarding::forward_request(
+    mcpr_proxy::forwarding::forward_request(
         &state.upstream,
         url,
         method,
@@ -111,14 +111,14 @@ mod tests {
         crate::AppState {
             mcp_upstream: upstream_url.to_string(),
             widget_source: None,
-            rewrite_config: Arc::new(RwLock::new(mcpr_widgets::RewriteConfig {
+            rewrite_config: Arc::new(RwLock::new(mcpr_proxy::RewriteConfig {
                 proxy_url: "http://localhost:0".to_string(),
                 proxy_domain: "localhost".to_string(),
                 mcp_upstream: upstream_url.to_string(),
                 extra_csp_domains: vec![],
-                csp_mode: mcpr_widgets::CspMode::default(),
+                csp_mode: mcpr_proxy::CspMode::default(),
             })),
-            upstream: mcpr_core::forwarding::UpstreamClient {
+            upstream: mcpr_proxy::forwarding::UpstreamClient {
                 http_client: reqwest::Client::builder()
                     .connect_timeout(std::time::Duration::from_secs(5))
                     .build()
@@ -128,8 +128,8 @@ mod tests {
             },
             tui_state: crate::tui::new_shared_state(),
             logger: crate::logger::LogRouter::start(vec![]).router,
-            events: Arc::new(mcpr_events::NoopEmitter),
-            sessions: mcpr_session::MemorySessionStore::new(),
+            events: Arc::new(mcpr_integrations::NoopEmitter),
+            sessions: mcpr_protocol::session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
         }

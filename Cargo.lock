@@ -1120,12 +1120,10 @@ dependencies = [
  "dashmap",
  "futures-util",
  "http-body-util",
- "mcpr-core",
- "mcpr-events",
+ "mcpr-integrations",
  "mcpr-protocol",
- "mcpr-session",
+ "mcpr-proxy",
  "mcpr-tunnel",
- "mcpr-widgets",
  "ratatui",
  "reqwest",
  "serde",
@@ -1141,19 +1139,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mcpr-core"
-version = "0.3.0"
-dependencies = [
- "axum",
- "futures-util",
- "mcpr-protocol",
- "reqwest",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "mcpr-events"
+name = "mcpr-integrations"
 version = "0.3.0"
 dependencies = [
  "chrono",
@@ -1168,17 +1154,22 @@ dependencies = [
 name = "mcpr-protocol"
 version = "0.3.0"
 dependencies = [
+ "chrono",
+ "dashmap",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "mcpr-session"
+name = "mcpr-proxy"
 version = "0.3.0"
 dependencies = [
- "chrono",
- "dashmap",
+ "axum",
+ "futures-util",
+ "mcpr-protocol",
+ "reqwest",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1198,14 +1189,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "uuid",
-]
-
-[[package]]
-name = "mcpr-widgets"
-version = "0.3.0"
-dependencies = [
- "mcpr-protocol",
- "serde_json",
 ]
 
 [[package]]

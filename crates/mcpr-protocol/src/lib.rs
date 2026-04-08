@@ -1,8 +1,42 @@
-/// JSON-RPC 2.0 parsing and MCP method classification.
-///
-/// Provides typed structs for JSON-RPC 2.0 messages and MCP-specific
-/// method detection. Used by the proxy to classify incoming requests
-/// and log which MCP function is being called.
+//! # mcpr-protocol
+//!
+//! MCP specification layer: JSON-RPC 2.0 parsing, MCP method classification,
+//! and session lifecycle management.
+//!
+//! This crate is the foundation of the mcpr workspace. It contains everything
+//! related to understanding the MCP protocol itself, with zero coupling to
+//! HTTP frameworks or proxy logic.
+//!
+//! ## Responsibilities
+//!
+//! - **JSON-RPC 2.0 parsing** (`lib.rs`): Parse and classify JSON-RPC 2.0
+//!   messages (requests, notifications, responses). Provides `ParsedBody` for
+//!   batch-aware parsing and `McpMethod` for typed MCP method discrimination.
+//!
+//! - **MCP method constants**: Single source of truth for MCP method strings
+//!   (`initialize`, `tools/call`, `resources/read`, etc.).
+//!
+//! - **Error handling**: JSON-RPC error codes, error response builders, and
+//!   error extraction from response bodies.
+//!
+//! - **Session management** (`session` module): MCP session state machine
+//!   (`Created -> Initialized -> Active -> Closed`), `SessionStore` trait for
+//!   pluggable storage backends, and `MemorySessionStore` for in-memory use.
+//!
+//! ## Module Structure
+//!
+//! ```text
+//! mcpr-protocol/src/
+//! +-- lib.rs          # JSON-RPC 2.0 types, parsing, MCP method classification
+//! +-- session.rs      # Session state, SessionStore trait, MemorySessionStore
+//! ```
+//!
+//! ## Dependencies
+//!
+//! Minimal: `serde`, `serde_json`, `chrono`, `dashmap`. No HTTP framework deps.
+
+pub mod session;
+
 use serde_json::Value;
 
 // ── JSON-RPC 2.0 types ──

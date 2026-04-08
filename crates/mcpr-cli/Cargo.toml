@@ -32,11 +32,10 @@ toml = "0.8"
 dashmap = { workspace = true }
 url = { workspace = true }
 mcpr-protocol = { workspace = true }
-mcpr-session = { workspace = true }
-mcpr-widgets = { workspace = true }
+
 mcpr-tunnel = { workspace = true }
-mcpr-events = { workspace = true }
-mcpr-core = { workspace = true }
+mcpr-integrations = { workspace = true }
+mcpr-proxy = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

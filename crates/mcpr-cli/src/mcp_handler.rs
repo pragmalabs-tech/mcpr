@@ -11,12 +11,12 @@ use crate::AppState;
 use crate::logger::LogEntry;
 use crate::proxy::forward_request;
 use crate::widgets::fetch_widget_html;
-use mcpr_core::forwarding::{build_response, read_body_capped};
-use mcpr_core::sse::{extract_json_from_sse, wrap_as_sse};
-use mcpr_events::{EventStatus, EventType, McprEvent};
+use mcpr_integrations::{EventStatus, EventType, McprEvent};
+use mcpr_protocol::session::{self as session, SessionState, SessionStore};
 use mcpr_protocol::{self as jsonrpc, McpMethod};
-use mcpr_session::{self as session, SessionState, SessionStore};
-use mcpr_widgets::rewrite_response;
+use mcpr_proxy::forwarding::{build_response, read_body_capped};
+use mcpr_proxy::rewrite_response;
+use mcpr_proxy::sse::{extract_json_from_sse, wrap_as_sse};
 
 /// Map an MCP method to the corresponding event type.
 fn event_type_for(method: &McpMethod) -> EventType {
