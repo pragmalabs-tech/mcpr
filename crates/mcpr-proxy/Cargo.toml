@@ -1,13 +1,10 @@
 [package]
-name = "mcpr-core"
+name = "mcpr-proxy"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Proxy engine, router, and request forwarding for mcpr"
-
-[dev-dependencies]
-serde_json = { workspace = true }
+description = "Proxy engine for mcpr: request routing, upstream forwarding, SSE streaming, and widget CSP rewriting"
 
 [dependencies]
 mcpr-protocol = { workspace = true }
@@ -15,3 +12,7 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 futures-util = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
