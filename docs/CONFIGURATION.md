@@ -85,6 +85,20 @@ dir = "./logs"
 
 # Rotation strategy: "daily" or "size:50MB" (default: "daily")
 rotation = "daily"
+
+[store]
+# Enable request storage (default: true)
+# When false, no SQLite database is created and CLI query commands are unavailable.
+# enabled = true
+
+# Override the database file path (default: platform-specific)
+# Linux:   ~/.local/share/mcpr/mcpr.db
+# macOS:   ~/Library/Application Support/mcpr/mcpr.db
+# path = "/var/lib/mcpr/requests.db"
+
+# Proxy name written to every stored request (default: derived from mcp URL)
+# Used by `mcpr proxy logs <name>`, `mcpr proxy stats <name>`, etc.
+# name = "api-server"
 ```
 
 ### Field reference
@@ -110,6 +124,9 @@ rotation = "daily"
 | `[logging].file` | | | Enable JSONL file logging (bool) |
 | `[logging].dir` | | | Directory for log files |
 | `[logging].rotation` | | | Rotation: `"daily"` or `"size:50MB"` |
+| `[store].enabled` | | | Enable SQLite request storage (default: true) |
+| `[store].path` | | `MCPR_DB` | Override database file path |
+| `[store].name` | | | Proxy name for stored requests |
 
 ## Relay Mode
 

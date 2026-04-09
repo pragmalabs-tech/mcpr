@@ -8,7 +8,7 @@
 Route, log, and secure MCP traffic — from dev to production.
 
 ```bash
-mcpr run --mcp http://localhost:9000 --port 3000
+mcpr start --mcp http://localhost:9000 --port 3000
 ```
 
 ![mcpr TUI dashboard showing proxied MCP requests with tool names and latency](docs/mcpr-demo.gif)
@@ -36,20 +36,20 @@ Single Rust binary. No JVM, no Kubernetes, no database.
 
 | Environment | How |
 |---|---|
-| **Local dev** | `mcpr run --mcp :9000` |
-| **Dev + tunnel** | `mcpr run --mcp :9000` (auto) |
-| **VPS / VM** | `mcpr run --mcp :9000 --no-tunnel` |
+| **Local dev** | `mcpr start --mcp :9000 --no-tunnel` |
+| **Dev + tunnel** | `mcpr start --mcp :9000` (auto-tunnel) |
+| **VPS / VM** | `mcpr start --mcp :9000 --no-tunnel` |
 | **Docker** | `docker run -p 3000:3000 -p 9901:9901 -v ./mcpr.toml:/app/mcpr.toml ghcr.io/cptrodgers/mcpr:latest` |
 | **Kubernetes** | Helm chart (coming soon) |
 
-> **Backward compat:** `mcpr --mcp ...` (no subcommand) still works and defaults to `run`.
+> `mcpr start` runs as a background daemon. Use `mcpr start --foreground` for Docker/systemd.
 
 ## Observability
 
 Every MCP request emits a structured JSON event:
 
 ```bash
-mcpr run --mcp :9000 --events
+mcpr start --mcp :9000 --events
 ```
 
 ```json
@@ -128,50 +128,75 @@ readinessProbe:
   httpGet: { path: /ready, port: 9901 }
 ```
 
-## CLI Subcommands
+## CLI
+
+mcpr runs as a background daemon. Start it, observe it, stop it.
 
 ```
-mcpr run [OPTIONS]       Start proxy in foreground (default)
-mcpr validate [-c PATH]  Validate config and exit
-mcpr version             Print version info as JSON
+mcpr start                     Start proxy daemon (default)
+mcpr start --foreground        Start in foreground (Docker/systemd)
+mcpr stop                      Stop the daemon
+mcpr restart                   Restart the daemon
+mcpr status                    Show PID, port, uptime, proxy name
+
+mcpr proxy logs [name]         Request logs (--follow, --json, --tool, --status)
+mcpr proxy slow [name]         Slow calls above threshold
+mcpr proxy stats [name]        Per-tool metrics (calls, avg, p95, errors)
+mcpr proxy sessions [name]     MCP sessions with client info
+mcpr proxy clients [name]      AI client breakdown
+
+mcpr store stats               Database size and row counts
+mcpr store vacuum --before 7d  Delete old records, reclaim disk
+
+mcpr validate                  Validate mcpr.toml
+mcpr version                   Print version as JSON
 ```
+
+`[name]` is optional when one proxy is running — auto-detected from the daemon.
+
+See [docs/CLI.md](docs/CLI.md) for full reference with all flags and examples.
 
 ## Getting Started
 
 ### Proxy an MCP server
 
 ```bash
-mcpr run --mcp http://localhost:9000
+mcpr start --mcp http://localhost:9000 --port 3000 --no-tunnel
+# → mcpr daemon started (PID: 12345, port: 3000)
+
+mcpr status
+# → mcpr daemon is running
+#     Proxy: localhost-9000   PID: 12345   Port: 3000
+
+mcpr proxy logs
+# → recent request log
+
+mcpr stop
 ```
 
-### Proxy MCP server + widget dev server
+### Use a config file
 
 ```toml
 # mcpr.toml
 mcp = "http://localhost:9000"
+port = 3000
 widgets = "http://localhost:4444"
-```
-
-```bash
-mcpr
-```
-
-### Serve static widgets from disk
-
-```toml
-# mcpr.toml
-mcp = "http://localhost:9000"
-widgets = "./widgets"
-```
-
-### Add extra CSP domains
-
-```toml
-# mcpr.toml
-mcp = "http://localhost:9000"
 
 [csp]
 domains = ["api.stripe.com", "cdn.example.com"]
+```
+
+```bash
+mcpr start
+```
+
+### Observe traffic
+
+```bash
+mcpr proxy stats              # per-tool metrics
+mcpr proxy slow --threshold 1s  # find slow calls
+mcpr proxy logs --follow      # live tail
+mcpr proxy clients            # who's calling?
 ```
 
 ## Roadmap
@@ -186,11 +211,15 @@ domains = ["api.stripe.com", "cdn.example.com"]
 - [x] Cloud dashboard ([mcpr.app](https://mcpr.app))
 - [x] Cloud sync
 - [x] Per-tool health (calls, errors, p50/p95)
-- [x] Subcommand CLI (`run`, `validate`, `version`)
 - [x] Admin API with health endpoints (`/healthz`, `/ready`)
 - [x] SIGTERM graceful drain for Kubernetes
 - [x] Structured stderr logging (JSON/pretty)
-- [x] `--tui` / `--no-tui` flags for Docker/CI
+- [x] Daemon mode (`mcpr start/stop/restart/status`)
+- [x] SQLite request storage engine
+- [x] CLI observability (`mcpr proxy logs/slow/stats/sessions/clients`)
+- [x] Storage maintenance (`mcpr store stats/vacuum`)
+- [ ] `mcpr proxy view` — TUI viewer that attaches to running daemon
+- [ ] Multiple proxies in one daemon (`[[proxy]]` config array)
 - [ ] Prometheus metrics (`/metrics`)
 - [ ] SIGHUP config reload
 - [ ] OAuth 2.1 at the proxy
