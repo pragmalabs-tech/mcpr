@@ -41,6 +41,7 @@ pub struct DaemonInfo {
     pub pid: u32,
     pub started_at: i64,
     pub port: u16,
+    pub proxy_name: String,
 }
 
 /// Current state of the daemon.
@@ -82,22 +83,24 @@ pub fn read_pid_file() -> Option<DaemonInfo> {
     let pid: u32 = lines.next()?.parse().ok()?;
     let started_at: i64 = lines.next()?.parse().ok()?;
     let port: u16 = lines.next()?.parse().ok()?;
+    let proxy_name: String = lines.next().unwrap_or("unknown").to_string();
 
     Some(DaemonInfo {
         pid,
         started_at,
         port,
+        proxy_name,
     })
 }
 
 /// Write the PID file with current process info.
-pub fn write_pid_file(port: u16) -> std::io::Result<()> {
+pub fn write_pid_file(port: u16, proxy_name: &str) -> std::io::Result<()> {
     let dir = data_dir();
     fs::create_dir_all(&dir)?;
 
     let pid = std::process::id();
     let started_at = chrono::Utc::now().timestamp();
-    let content = format!("{pid}\n{started_at}\n{port}\n");
+    let content = format!("{pid}\n{started_at}\n{port}\n{proxy_name}\n");
 
     fs::write(pid_file_path(), content)
 }
@@ -151,8 +154,7 @@ pub fn daemonize(timeout: Duration) -> Result<std::os::unix::io::RawFd, String> 
     use std::os::unix::io::{IntoRawFd, RawFd};
 
     // Create pipe for readiness signaling: parent reads, daemon writes.
-    let (read_owned, write_owned) =
-        pipe().map_err(|e| format!("pipe failed: {e}"))?;
+    let (read_owned, write_owned) = pipe().map_err(|e| format!("pipe failed: {e}"))?;
     let read_fd: RawFd = read_owned.into_raw_fd();
     let write_fd: RawFd = write_owned.into_raw_fd();
 
@@ -178,8 +180,7 @@ pub fn daemonize(timeout: Duration) -> Result<std::os::unix::io::RawFd, String> 
                 }
                 ForkResult::Child => {
                     // This is the daemon process.
-                    redirect_stdio()
-                        .map_err(|e| format!("failed to redirect stdio: {e}"))?;
+                    redirect_stdio().map_err(|e| format!("failed to redirect stdio: {e}"))?;
                     Ok(write_fd)
                 }
             }
@@ -245,9 +246,7 @@ fn redirect_stdio() -> std::io::Result<()> {
     }
 
     // Open /dev/null for stdin.
-    let dev_null = fs::OpenOptions::new()
-        .read(true)
-        .open("/dev/null")?;
+    let dev_null = fs::OpenOptions::new().read(true).open("/dev/null")?;
 
     // Open daemon log for stdout/stderr (append mode).
     let log_file = fs::OpenOptions::new()
@@ -256,9 +255,9 @@ fn redirect_stdio() -> std::io::Result<()> {
         .open(&log_path)?;
 
     // Redirect file descriptors using nix (no raw libc needed).
-    dup2(dev_null.as_raw_fd(), 0).map_err(|e| std::io::Error::other(e))?; // stdin
-    dup2(log_file.as_raw_fd(), 1).map_err(|e| std::io::Error::other(e))?; // stdout
-    dup2(log_file.as_raw_fd(), 2).map_err(|e| std::io::Error::other(e))?; // stderr
+    dup2(dev_null.as_raw_fd(), 0).map_err(std::io::Error::other)?; // stdin
+    dup2(log_file.as_raw_fd(), 1).map_err(std::io::Error::other)?; // stdout
+    dup2(log_file.as_raw_fd(), 2).map_err(std::io::Error::other)?; // stderr
 
     Ok(())
 }
@@ -269,7 +268,7 @@ pub fn signal_ready(write_fd: std::os::unix::io::RawFd) {
     use std::os::unix::io::FromRawFd;
 
     let mut pipe_write = unsafe { std::fs::File::from_raw_fd(write_fd) };
-    let _ = pipe_write.write_all(&[b'1']);
+    let _ = pipe_write.write_all(b"1");
     // File is dropped here, closing the pipe.
 }
 
@@ -350,11 +349,21 @@ pub fn print_status() {
             let seconds = uptime % 60;
 
             println!("mcpr daemon is running");
+            println!("  Proxy:  {}", info.proxy_name);
             println!("  PID:    {}", info.pid);
             println!("  Port:   {}", info.port);
             println!("  Uptime: {}h {}m {}s", hours, minutes, seconds);
             println!("  PID file: {}", pid_file_path().display());
             println!("  Log file: {}", daemon_log_path().display());
+            println!();
+            println!(
+                "  Use `mcpr proxy logs {}` to view request logs.",
+                info.proxy_name
+            );
+            println!(
+                "  Use `mcpr proxy stats {}` to view metrics.",
+                info.proxy_name
+            );
         }
         DaemonStatus::Stale(info) => {
             eprintln!(

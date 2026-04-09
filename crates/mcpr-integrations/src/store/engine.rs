@@ -148,10 +148,10 @@ impl Store {
         drop(old_tx);
 
         // Wait for the writer thread to finish.
-        if let Some(handle) = self.writer_handle.take() {
-            if let Err(e) = handle.join() {
-                eprintln!("mcpr-store: writer thread panicked: {e:?}");
-            }
+        if let Some(handle) = self.writer_handle.take()
+            && let Err(e) = handle.join()
+        {
+            eprintln!("mcpr-store: writer thread panicked: {e:?}");
         }
     }
 }

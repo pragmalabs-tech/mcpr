@@ -15,14 +15,16 @@ pub enum Mode {
 
 /// Result of parsing CLI args — either a subcommand action or the run mode.
 pub enum CliAction {
-    Run(Mode),
-    /// Start proxy as a background daemon (detached from terminal).
-    Start(Mode),
+    /// Start the proxy (daemon by default, foreground with --foreground).
+    Start {
+        mode: Mode,
+        foreground: bool,
+    },
     /// Stop the running daemon via SIGTERM.
     Stop,
     /// Stop + start the daemon.
     Restart(Mode),
-    /// Show daemon status (PID, port, uptime).
+    /// Show daemon status (PID, port, uptime, proxy name).
     Status,
     Validate(ValidateArgs),
     Version,
@@ -154,15 +156,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start proxy in foreground (default if no subcommand given)
-    Run,
-    /// Start proxy as a background daemon
-    Start,
+    /// Start the proxy (daemon by default, --foreground for attached mode)
+    Start(StartArgs),
     /// Stop the running daemon
     Stop,
     /// Restart the daemon (stop + start)
     Restart,
-    /// Show daemon status (PID, port, uptime)
+    /// Show daemon status (PID, port, uptime, proxy name)
     Status,
     /// Validate config file and exit
     Validate(ValidateArgs),
@@ -172,6 +172,14 @@ enum Commands {
     Proxy(ProxyArgs),
     /// Storage maintenance (stats, vacuum)
     Store(StoreArgs),
+}
+
+/// Arguments for `mcpr start`.
+#[derive(Parser, Clone)]
+pub struct StartArgs {
+    /// Run in foreground instead of daemonizing (for Docker, systemd, debugging)
+    #[arg(long)]
+    pub foreground: bool,
 }
 
 // ── Proxy query subcommands ────────────────────────────────────────────
@@ -198,11 +206,12 @@ pub enum ProxyCommand {
     Clients(ProxyClientsArgs),
 }
 
-/// Arguments for `mcpr proxy logs <name>`.
+/// Arguments for `mcpr proxy logs [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxyLogsArgs {
-    /// Proxy name to query (derived from upstream URL if not set in config)
-    pub name: String,
+    /// Proxy name to query. Optional when only one proxy is running —
+    /// auto-detected from the running daemon's config.
+    pub name: Option<String>,
 
     /// Number of recent rows to show
     #[arg(long, default_value = "50")]
@@ -229,11 +238,11 @@ pub struct ProxyLogsArgs {
     pub follow: bool,
 }
 
-/// Arguments for `mcpr proxy slow <name>`.
+/// Arguments for `mcpr proxy slow [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxySlowArgs {
-    /// Proxy name to query
-    pub name: String,
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
 
     /// Minimum latency to include (e.g., 500ms, 1s, 2s). Default: 500ms
     #[arg(long, default_value = "500ms")]
@@ -252,11 +261,11 @@ pub struct ProxySlowArgs {
     pub json: bool,
 }
 
-/// Arguments for `mcpr proxy stats <name>`.
+/// Arguments for `mcpr proxy stats [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxyStatsArgs {
-    /// Proxy name to query
-    pub name: String,
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
 
     /// Aggregation window (e.g., 1h, 24h)
     #[arg(long, default_value = "1h")]
@@ -267,11 +276,11 @@ pub struct ProxyStatsArgs {
     pub json: bool,
 }
 
-/// Arguments for `mcpr proxy sessions <name>`.
+/// Arguments for `mcpr proxy sessions [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxySessionsArgs {
-    /// Proxy name to query
-    pub name: String,
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
 
     /// Only show active sessions (seen in last 5 minutes)
     #[arg(long)]
@@ -294,11 +303,11 @@ pub struct ProxySessionsArgs {
     pub json: bool,
 }
 
-/// Arguments for `mcpr proxy clients <name>`.
+/// Arguments for `mcpr proxy clients [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxyClientsArgs {
-    /// Proxy name to query
-    pub name: String,
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
 
     /// Lookback window (default longer: clients change slowly)
     #[arg(long, default_value = "7d")]
@@ -764,14 +773,13 @@ pub fn load() -> CliAction {
         Some(Commands::Store(args)) => return CliAction::Store(args.command),
         Some(Commands::Stop) => return CliAction::Stop,
         Some(Commands::Status) => return CliAction::Status,
-        Some(Commands::Run) | None | Some(Commands::Start) | Some(Commands::Restart) => {
+        Some(Commands::Start(_)) | None | Some(Commands::Restart) => {
             // Continue to load config and determine run mode.
-            // Start/Restart need the same config resolution as Run.
         }
     }
 
-    // Remember if this is a start/restart for after config resolution.
-    let is_start = matches!(cli.command, Some(Commands::Start));
+    // Extract flags from the start command.
+    let foreground = matches!(&cli.command, Some(Commands::Start(args)) if args.foreground);
     let is_restart = matches!(cli.command, Some(Commands::Restart));
 
     let (file, config_path) = FileConfig::load();
@@ -808,12 +816,10 @@ pub fn load() -> CliAction {
         load_gateway(cli, file, config_path, runtime)
     };
 
-    if is_start {
-        CliAction::Start(mode)
-    } else if is_restart {
+    if is_restart {
         CliAction::Restart(mode)
     } else {
-        CliAction::Run(mode)
+        CliAction::Start { mode, foreground }
     }
 }
 

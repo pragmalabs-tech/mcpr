@@ -151,36 +151,39 @@ impl mcpr_tunnel::TunnelStatusCallback for TuiTunnelStatus {
 #[tokio::main]
 async fn main() {
     match config::load() {
-        CliAction::Run(mode) => match mode {
+        CliAction::Start { mode, foreground } => match mode {
             Mode::Relay(cfg) => {
+                if !foreground {
+                    eprintln!("error: relay mode requires --foreground");
+                    std::process::exit(1);
+                }
                 mcpr_tunnel::relay::start_relay(cfg).await;
             }
             Mode::Gateway(cfg) => {
-                run_gateway(*cfg, None).await;
-            }
-        },
-        #[cfg(unix)]
-        CliAction::Start(mode) => match mode {
-            Mode::Relay(_) => {
-                eprintln!("error: relay mode does not support daemon mode yet");
-                std::process::exit(1);
-            }
-            Mode::Gateway(cfg) => {
-                daemon::ensure_not_running();
-                let ready_fd = daemon::daemonize(Duration::from_secs(10))
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: {e}");
+                if foreground {
+                    // Foreground mode: no daemon, attach to terminal.
+                    run_gateway(*cfg, None).await;
+                } else {
+                    // Daemon mode (default).
+                    #[cfg(unix)]
+                    {
+                        daemon::ensure_not_running();
+                        let ready_fd =
+                            daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
+                                eprintln!("error: {e}");
+                                std::process::exit(1);
+                            });
+                        run_gateway(*cfg, Some(ready_fd)).await;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        eprintln!("error: daemon mode is not supported on this platform");
+                        eprintln!("  Use `mcpr start --foreground` or a service manager.");
                         std::process::exit(1);
-                    });
-                run_gateway(*cfg, Some(ready_fd)).await;
+                    }
+                }
             }
         },
-        #[cfg(not(unix))]
-        CliAction::Start(_) => {
-            eprintln!("error: daemon mode is not supported on this platform");
-            eprintln!("  Use `mcpr run` for foreground mode, or a service manager (nssm, sc).");
-            std::process::exit(1);
-        }
         CliAction::Stop => {
             #[cfg(unix)]
             daemon::stop_daemon();
@@ -190,27 +193,29 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        #[cfg(unix)]
         CliAction::Restart(mode) => match mode {
             Mode::Relay(_) => {
-                eprintln!("error: relay mode does not support daemon mode yet");
+                eprintln!("error: relay mode does not support daemon mode");
                 std::process::exit(1);
             }
             Mode::Gateway(cfg) => {
-                daemon::stop_daemon_if_running();
-                let ready_fd = daemon::daemonize(Duration::from_secs(10))
-                    .unwrap_or_else(|e| {
+                #[cfg(unix)]
+                {
+                    daemon::stop_daemon_if_running();
+                    let ready_fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
                         eprintln!("error: {e}");
                         std::process::exit(1);
                     });
-                run_gateway(*cfg, Some(ready_fd)).await;
+                    run_gateway(*cfg, Some(ready_fd)).await;
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = cfg;
+                    eprintln!("error: daemon management not supported on this platform");
+                    std::process::exit(1);
+                }
             }
         },
-        #[cfg(not(unix))]
-        CliAction::Restart(_) => {
-            eprintln!("error: daemon management not supported on this platform");
-            std::process::exit(1);
-        }
         CliAction::Status => {
             #[cfg(unix)]
             daemon::print_status();
@@ -268,6 +273,9 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     // Validate MCP URL format
     validate_mcp_url(&mcp);
 
+    // Derive proxy name early — needed for PID file and store tagging.
+    let proxy_name = prefix_from_upstream(&mcp);
+
     let widget_source = cfg.widgets.as_ref().map(|w| {
         if w.starts_with("http://") || w.starts_with("https://") {
             WidgetSource::Proxy(w.clone())
@@ -290,7 +298,7 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     // If daemon mode, write PID file and signal readiness to the parent.
     #[cfg(unix)]
     if let Some(fd) = ready_fd {
-        if let Err(e) = daemon::write_pid_file(actual_port) {
+        if let Err(e) = daemon::write_pid_file(actual_port, &proxy_name) {
             eprintln!("error: failed to write PID file: {e}");
             std::process::exit(1);
         }
@@ -513,9 +521,6 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         Arc::new(mcpr_integrations::NoopEmitter)
     };
 
-    // Derive proxy name from upstream URL (e.g., "localhost-9000") for store tagging.
-    let proxy_name = prefix_from_upstream(&mcp);
-
     // Open the request storage database.
     let store = match mcpr_integrations::store::path::resolve_db_path(None) {
         Some(db_path) => {
@@ -663,11 +668,10 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     tokio::time::sleep(Duration::from_secs(drain_timeout.min(5))).await;
 
     // Flush storage before logs — store events are emitted from the same code paths.
-    if let Some(store) = store {
-        if let Some(s) = Arc::into_inner(store) {
-            let mut s = s;
-            s.shutdown();
-        }
+    if let Some(store) = store
+        && let Some(mut s) = Arc::into_inner(store)
+    {
+        s.shutdown();
     }
 
     // Gracefully flush log sinks

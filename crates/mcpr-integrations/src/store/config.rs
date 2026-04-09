@@ -80,25 +80,25 @@ impl ModuleConfig for FileStoreConfig {
         let mut issues = Vec::new();
 
         // Path must not be empty if explicitly set.
-        if let Some(ref p) = self.path {
-            if p.trim().is_empty() {
-                issues.push(ConfigIssue {
-                    severity: Severity::Error,
-                    module: "store",
-                    message: "store.path cannot be an empty string — remove the key to use the platform default, or set a valid path".into(),
-                });
-            }
+        if let Some(ref p) = self.path
+            && p.trim().is_empty()
+        {
+            issues.push(ConfigIssue {
+                severity: Severity::Error,
+                module: "store",
+                message: "store.path cannot be an empty string — remove the key to use the platform default, or set a valid path".into(),
+            });
         }
 
         // Name must not be empty if explicitly set.
-        if let Some(ref n) = self.name {
-            if n.trim().is_empty() {
-                issues.push(ConfigIssue {
-                    severity: Severity::Error,
-                    module: "store",
-                    message: "store.name cannot be an empty string — remove the key to auto-derive from the upstream URL, or set a valid name".into(),
-                });
-            }
+        if let Some(ref n) = self.name
+            && n.trim().is_empty()
+        {
+            issues.push(ConfigIssue {
+                severity: Severity::Error,
+                module: "store",
+                message: "store.name cannot be an empty string — remove the key to auto-derive from the upstream URL, or set a valid name".into(),
+            });
         }
 
         issues

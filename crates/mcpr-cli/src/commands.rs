@@ -7,17 +7,30 @@
 use mcpr_integrations::store::{
     self,
     query::{
-        QueryEngine,
-        clients::ClientsParams,
-        logs::LogsParams,
-        sessions::SessionsParams,
-        slow::SlowParams,
-        stats::StatsParams,
-        store_ops::VacuumParams,
+        QueryEngine, clients::ClientsParams, logs::LogsParams, sessions::SessionsParams,
+        slow::SlowParams, stats::StatsParams, store_ops::VacuumParams,
     },
 };
 
 use crate::config::*;
+#[cfg(unix)]
+use crate::daemon;
+
+/// Resolve the proxy name — use the provided name, or auto-detect from the
+/// running daemon's PID file (since we only have one proxy right now).
+fn resolve_proxy_name(name: Option<String>) -> Result<String, String> {
+    if let Some(n) = name {
+        return Ok(n);
+    }
+
+    // Auto-detect from PID file.
+    #[cfg(unix)]
+    if let Some(info) = daemon::read_pid_file() {
+        return Ok(info.proxy_name);
+    }
+
+    Err("proxy name required — pass it as an argument, or start the daemon first".to_string())
+}
 
 /// Resolve the store database path.
 /// Uses platform default for now — will integrate with [store] config later.
@@ -32,8 +45,7 @@ fn open_query_engine() -> Result<(QueryEngine, std::path::PathBuf), String> {
         ));
     }
 
-    let engine = QueryEngine::open(&db_path)
-        .map_err(|e| format!("failed to open store: {e}"))?;
+    let engine = QueryEngine::open(&db_path).map_err(|e| format!("failed to open store: {e}"))?;
 
     Ok((engine, db_path))
 }
@@ -49,7 +61,10 @@ fn parse_since(s: &str) -> Result<i64, String> {
 fn parse_threshold_ms(s: &str) -> Result<i64, String> {
     // Support "500ms", "1s", "2s" shorthand.
     if let Some(ms_str) = s.strip_suffix("ms") {
-        return ms_str.trim().parse::<i64>().map_err(|_| format!("invalid threshold: {s}"));
+        return ms_str
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| format!("invalid threshold: {s}"));
     }
     let dur = store::parse_duration(s)
         .ok_or_else(|| format!("invalid threshold: {s} (expected: 500ms, 1s, etc.)"))?;
@@ -59,7 +74,11 @@ fn parse_threshold_ms(s: &str) -> Result<i64, String> {
 /// Format a unix ms timestamp as a human-readable local time.
 fn format_ts(ts: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ts)
-        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| "?".to_string())
 }
 
@@ -111,17 +130,20 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
 
 fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
+    let name = resolve_proxy_name(args.name)?;
     let since_ts = parse_since(&args.since)?;
 
     let params = LogsParams {
-        proxy: args.name.clone(),
+        proxy: name.clone(),
         since_ts,
         limit: args.tail,
         tool: args.tool.clone(),
         status: args.status.clone(),
     };
 
-    let rows = engine.logs(&params).map_err(|e| format!("query failed: {e}"))?;
+    let rows = engine
+        .logs(&params)
+        .map_err(|e| format!("query failed: {e}"))?;
 
     if args.json {
         for row in &rows {
@@ -143,8 +165,8 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
         }
     } else {
         println!(
-            "{:<21} {:<14} {:<22} {:>8}  {}",
-            "TIME", "METHOD", "TOOL", "LATENCY", "STATUS"
+            "{:<21} {:<14} {:<22} {:>8}  STATUS",
+            "TIME", "METHOD", "TOOL", "LATENCY"
         );
         for row in &rows {
             let tool = row.tool.as_deref().unwrap_or("—");
@@ -209,17 +231,20 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
 
 fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
+    let name = resolve_proxy_name(args.name)?;
     let since_ts = parse_since(&args.since)?;
     let threshold_ms = parse_threshold_ms(&args.threshold)?;
 
     let params = SlowParams {
-        proxy: args.name.clone(),
+        proxy: name.clone(),
         threshold_ms,
         since_ts,
         limit: args.limit,
     };
 
-    let rows = engine.slow(&params).map_err(|e| format!("query failed: {e}"))?;
+    let rows = engine
+        .slow(&params)
+        .map_err(|e| format!("query failed: {e}"))?;
 
     if args.json {
         for row in &rows {
@@ -239,11 +264,11 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
     } else {
         println!(
             "TOP SLOW CALLS — {} — last {} (threshold: {})\n",
-            args.name, args.since, args.threshold
+            name, args.since, args.threshold
         );
         println!(
-            "  {:<22} {:>10}   {:<21}  {}",
-            "TOOL", "LATENCY", "TIME", "STATUS"
+            "  {:<22} {:>10}   {:<21}  STATUS",
+            "TOOL", "LATENCY", "TIME"
         );
         for row in &rows {
             let tool = row.tool.as_deref().unwrap_or(&row.method);
@@ -273,11 +298,12 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
 
 fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
+    let name = resolve_proxy_name(args.name)?;
     let since_ts = parse_since(&args.since)?;
 
     let result = engine
         .stats(&StatsParams {
-            proxy: args.name.clone(),
+            proxy: name.clone(),
             since_ts,
         })
         .map_err(|e| format!("query failed: {e}"))?;
@@ -300,7 +326,7 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
         println!(
             "{}",
             serde_json::json!({
-                "proxy": args.name,
+                "proxy": name,
                 "period": args.since,
                 "total_calls": result.total_calls,
                 "error_pct": (result.error_pct * 100.0).round() / 100.0,
@@ -310,7 +336,7 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
     } else {
         println!(
             "STATS — {} — last {}   Total: {} calls   Errors: {:.1}%\n",
-            args.name, args.since, result.total_calls, result.error_pct
+            name, args.since, result.total_calls, result.error_pct
         );
         println!(
             "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}",
@@ -342,11 +368,12 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
 
 fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
+    let name = resolve_proxy_name(args.name)?;
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
         .sessions(&SessionsParams {
-            proxy: args.name.clone(),
+            proxy: name.clone(),
             since_ts,
             limit: args.limit,
             active_only: args.active,
@@ -373,7 +400,7 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
             );
         }
     } else {
-        println!("SESSIONS — {} — last {}\n", args.name, args.since);
+        println!("SESSIONS — {} — last {}\n", name, args.since);
         println!(
             "  {:<16} {:<24} {:<17} {:>12} {:>6} {:>6}",
             "SESSION", "CLIENT", "STARTED", "LAST SEEN", "CALLS", "ERRS"
@@ -395,7 +422,11 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
                 sid,
                 format!("{client} {status_icon}"),
                 format_ts(row.started_at),
-                if row.is_active { "just now".to_string() } else { format_ts(row.last_seen_at) },
+                if row.is_active {
+                    "just now".to_string()
+                } else {
+                    format_ts(row.last_seen_at)
+                },
                 row.total_calls,
                 row.total_errors,
             );
@@ -413,11 +444,12 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
 
 fn cmd_proxy_clients(args: ProxyClientsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
+    let name = resolve_proxy_name(args.name)?;
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
         .clients(&ClientsParams {
-            proxy: args.name.clone(),
+            proxy: name.clone(),
             since_ts,
         })
         .map_err(|e| format!("query failed: {e}"))?;
@@ -440,7 +472,7 @@ fn cmd_proxy_clients(args: ProxyClientsArgs) -> Result<(), String> {
             );
         }
     } else {
-        println!("CLIENTS — {} — last {}\n", args.name, args.since);
+        println!("CLIENTS — {} — last {}\n", name, args.since);
         println!(
             "  {:<20} {:<10} {:<10} {:>8} {:>8} {:>8}",
             "CLIENT", "VERSION", "PLATFORM", "SESSIONS", "CALLS", "ERRORS"
@@ -506,9 +538,7 @@ fn cmd_store_stats() -> Result<(), String> {
     println!("  WAL file:          {}", format_bytes(stats.wal_file_size));
 
     if stats.db_file_size > 500 * 1024 * 1024 {
-        println!(
-            "\n  Run `mcpr store vacuum --before 7d` to remove records older than 7 days."
-        );
+        println!("\n  Run `mcpr store vacuum --before 7d` to remove records older than 7 days.");
     }
 
     Ok(())
@@ -529,7 +559,10 @@ fn cmd_store_vacuum(args: StoreVacuumArgs) -> Result<(), String> {
     if args.dry_run {
         println!("DRY RUN — no changes made\n");
         println!("  Would delete: {} requests", result.deleted_requests);
-        println!("  Would delete: {} orphaned sessions", result.deleted_sessions);
+        println!(
+            "  Would delete: {} orphaned sessions",
+            result.deleted_sessions
+        );
         println!("\n  Run without --dry-run to apply.");
     } else {
         println!("  Deleted {} requests.", result.deleted_requests);

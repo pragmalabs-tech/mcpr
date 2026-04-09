@@ -36,10 +36,10 @@ pub fn resolve_db_path(config_path: Option<&str>) -> Option<PathBuf> {
     }
 
     // 2. Environment variable — useful for CI, Docker, or scripting.
-    if let Ok(p) = std::env::var(MCPR_DB_ENV) {
-        if !p.is_empty() {
-            return Some(PathBuf::from(p));
-        }
+    if let Ok(p) = std::env::var(MCPR_DB_ENV)
+        && !p.is_empty()
+    {
+        return Some(PathBuf::from(p));
     }
 
     // 3. Platform default — follows OS conventions via the `dirs` crate.

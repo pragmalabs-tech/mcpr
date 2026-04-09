@@ -4,6 +4,9 @@ use rusqlite::params;
 
 use super::QueryEngine;
 
+/// Raw aggregate row from SQL: (label, calls, avg_ms, min_ms, max_ms, error_pct, bytes_in, bytes_out).
+type AggRow = (String, i64, f64, i64, i64, f64, i64, i64);
+
 /// Filter parameters for the stats query.
 pub struct StatsParams {
     /// Proxy name to filter by.
@@ -72,7 +75,7 @@ impl QueryEngine {
         ";
 
         let mut stmt = self.conn().prepare(agg_sql)?;
-        let groups: Vec<(String, i64, f64, i64, i64, f64, i64, i64)> = stmt
+        let groups: Vec<AggRow> = stmt
             .query_map(params![params.proxy, params.since_ts], |row| {
                 Ok((
                     row.get(0)?,
