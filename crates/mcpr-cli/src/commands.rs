@@ -23,7 +23,6 @@ fn resolve_proxy_name(name: Option<String>) -> Result<String, String> {
         return Ok(n);
     }
 
-    // Auto-detect from PID file.
     #[cfg(unix)]
     if let Some(info) = daemon::read_pid_file() {
         return Ok(info.proxy_name);
@@ -32,8 +31,7 @@ fn resolve_proxy_name(name: Option<String>) -> Result<String, String> {
     Err("proxy name required — pass it as an argument, or start the daemon first".to_string())
 }
 
-/// Resolve the store database path.
-/// Uses platform default for now — will integrate with [store] config later.
+/// Resolve the store database path and open a query engine.
 fn open_query_engine() -> Result<(QueryEngine, std::path::PathBuf), String> {
     let db_path = store::path::resolve_db_path(None)
         .ok_or_else(|| "could not determine store path — is $HOME set?".to_string())?;
@@ -46,7 +44,6 @@ fn open_query_engine() -> Result<(QueryEngine, std::path::PathBuf), String> {
     }
 
     let engine = QueryEngine::open(&db_path).map_err(|e| format!("failed to open store: {e}"))?;
-
     Ok((engine, db_path))
 }
 
@@ -59,7 +56,6 @@ fn parse_since(s: &str) -> Result<i64, String> {
 
 /// Parse a --threshold duration string to milliseconds.
 fn parse_threshold_ms(s: &str) -> Result<i64, String> {
-    // Support "500ms", "1s", "2s" shorthand.
     if let Some(ms_str) = s.strip_suffix("ms") {
         return ms_str
             .trim()
@@ -71,6 +67,8 @@ fn parse_threshold_ms(s: &str) -> Result<i64, String> {
     Ok(dur.as_millis() as i64)
 }
 
+// ── Formatting helpers ─────────────────────────────────────────────────
+
 /// Format a unix ms timestamp as a human-readable local time.
 fn format_ts(ts: i64) -> String {
     chrono::DateTime::from_timestamp_millis(ts)
@@ -79,13 +77,6 @@ fn format_ts(ts: i64) -> String {
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string()
         })
-        .unwrap_or_else(|| "?".to_string())
-}
-
-/// Format a unix ms timestamp as ISO 8601 UTC.
-fn format_ts_utc(ts: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ts)
-        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
         .unwrap_or_else(|| "?".to_string())
 }
 
@@ -108,6 +99,13 @@ fn format_latency(ms: i64) -> String {
         format!("{},{:03}ms", ms / 1000, ms % 1000)
     } else {
         format!("{ms}ms")
+    }
+}
+
+/// Print a serializable struct as a single JSON line.
+fn print_json(value: &impl serde::Serialize) {
+    if let Ok(json) = serde_json::to_string(value) {
+        println!("{json}");
     }
 }
 
@@ -134,7 +132,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
     let since_ts = parse_since(&args.since)?;
 
     let params = LogsParams {
-        proxy: name.clone(),
+        proxy: name,
         since_ts,
         limit: args.tail,
         tool: args.tool.clone(),
@@ -147,21 +145,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
 
     if args.json {
         for row in &rows {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "ts": format_ts_utc(row.ts),
-                    "method": row.method,
-                    "tool": row.tool,
-                    "latency_ms": row.latency_ms,
-                    "status": row.status,
-                    "error_msg": row.error_msg,
-                    "session_id": row.session_id,
-                    "request_id": row.request_id,
-                    "bytes_in": row.bytes_in,
-                    "bytes_out": row.bytes_out,
-                })
-            );
+            print_json(row);
         }
     } else {
         println!(
@@ -198,18 +182,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
                 .map_err(|e| format!("follow query failed: {e}"))?;
             for row in &new_rows {
                 if args.json {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "ts": format_ts_utc(row.ts),
-                            "method": row.method,
-                            "tool": row.tool,
-                            "latency_ms": row.latency_ms,
-                            "status": row.status,
-                            "session_id": row.session_id,
-                            "request_id": row.request_id,
-                        })
-                    );
+                    print_json(row);
                 } else {
                     let tool = row.tool.as_deref().unwrap_or("—");
                     println!(
@@ -235,31 +208,18 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
     let since_ts = parse_since(&args.since)?;
     let threshold_ms = parse_threshold_ms(&args.threshold)?;
 
-    let params = SlowParams {
-        proxy: name.clone(),
-        threshold_ms,
-        since_ts,
-        limit: args.limit,
-    };
-
     let rows = engine
-        .slow(&params)
+        .slow(&SlowParams {
+            proxy: name.clone(),
+            threshold_ms,
+            since_ts,
+            limit: args.limit,
+        })
         .map_err(|e| format!("query failed: {e}"))?;
 
     if args.json {
         for row in &rows {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "ts": format_ts_utc(row.ts),
-                    "tool": row.tool,
-                    "method": row.method,
-                    "latency_ms": row.latency_ms,
-                    "status": row.status,
-                    "session_id": row.session_id,
-                    "request_id": row.request_id,
-                })
-            );
+            print_json(row);
         }
     } else {
         println!(
@@ -309,30 +269,7 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
         .map_err(|e| format!("query failed: {e}"))?;
 
     if args.json {
-        let tools: Vec<serde_json::Value> = result
-            .tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "tool": t.label,
-                    "calls": t.calls,
-                    "avg_ms": (t.avg_ms * 10.0).round() / 10.0,
-                    "p95_ms": t.p95_ms,
-                    "max_ms": t.max_ms,
-                    "error_pct": (t.error_pct * 100.0).round() / 100.0,
-                })
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::json!({
-                "proxy": name,
-                "period": args.since,
-                "total_calls": result.total_calls,
-                "error_pct": (result.error_pct * 100.0).round() / 100.0,
-                "tools": tools,
-            })
-        );
+        print_json(&result);
     } else {
         println!(
             "STATS — {} — last {}   Total: {} calls   Errors: {:.1}%\n",
@@ -383,21 +320,7 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
 
     if args.json {
         for row in &rows {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "session_id": row.session_id,
-                    "client_name": row.client_name,
-                    "client_version": row.client_version,
-                    "client_platform": row.client_platform,
-                    "started_at": format_ts_utc(row.started_at),
-                    "last_seen_at": format_ts_utc(row.last_seen_at),
-                    "ended_at": row.ended_at.map(format_ts_utc),
-                    "is_active": row.is_active,
-                    "total_calls": row.total_calls,
-                    "total_errors": row.total_errors,
-                })
-            );
+            print_json(row);
         }
     } else {
         println!("SESSIONS — {} — last {}\n", name, args.since);
@@ -456,20 +379,7 @@ fn cmd_proxy_clients(args: ProxyClientsArgs) -> Result<(), String> {
 
     if args.json {
         for row in &rows {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "client_name": row.client_name,
-                    "client_version": row.client_version,
-                    "client_platform": row.client_platform,
-                    "sessions": row.sessions,
-                    "total_calls": row.total_calls,
-                    "total_errors": row.total_errors,
-                    "error_pct": (row.error_pct * 100.0).round() / 100.0,
-                    "first_seen": format_ts_utc(row.first_seen),
-                    "last_seen": format_ts_utc(row.last_seen),
-                })
-            );
+            print_json(row);
         }
     } else {
         println!("CLIENTS — {} — last {}\n", name, args.since);
@@ -571,4 +481,79 @@ fn cmd_store_vacuum(args: StoreVacuumArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_since_valid() {
+        let ts = parse_since("1h").unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        // Should be roughly 1 hour ago (within 1 second tolerance)
+        assert!((now - ts - 3_600_000).abs() < 1000);
+    }
+
+    #[test]
+    fn parse_since_invalid() {
+        assert!(parse_since("bad").is_err());
+        assert!(parse_since("").is_err());
+    }
+
+    #[test]
+    fn parse_threshold_ms_millis() {
+        assert_eq!(parse_threshold_ms("500ms").unwrap(), 500);
+        assert_eq!(parse_threshold_ms("100ms").unwrap(), 100);
+    }
+
+    #[test]
+    fn parse_threshold_ms_seconds() {
+        assert_eq!(parse_threshold_ms("1s").unwrap(), 1000);
+        assert_eq!(parse_threshold_ms("2s").unwrap(), 2000);
+    }
+
+    #[test]
+    fn parse_threshold_ms_invalid() {
+        assert!(parse_threshold_ms("bad").is_err());
+        assert!(parse_threshold_ms("ms").is_err());
+    }
+
+    #[test]
+    fn format_latency_under_1s() {
+        assert_eq!(format_latency(142), "142ms");
+        assert_eq!(format_latency(0), "0ms");
+        assert_eq!(format_latency(999), "999ms");
+    }
+
+    #[test]
+    fn format_latency_over_1s() {
+        assert_eq!(format_latency(1000), "1,000ms");
+        assert_eq!(format_latency(4201), "4,201ms");
+        assert_eq!(format_latency(12345), "12,345ms");
+    }
+
+    #[test]
+    fn format_bytes_units() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn format_ts_valid() {
+        let ts = 1712345678000_i64; // 2024-04-05T18:34:38Z
+        let result = format_ts(ts);
+        // Should be a valid date string (not "?")
+        assert_ne!(result, "?");
+        assert!(result.contains("2024"));
+    }
+
+    #[test]
+    fn format_ts_zero() {
+        let result = format_ts(0);
+        assert_ne!(result, "?"); // epoch is valid
+    }
 }

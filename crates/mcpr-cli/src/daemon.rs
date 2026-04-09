@@ -268,7 +268,9 @@ pub fn signal_ready(write_fd: std::os::unix::io::RawFd) {
     use std::os::unix::io::FromRawFd;
 
     let mut pipe_write = unsafe { std::fs::File::from_raw_fd(write_fd) };
-    let _ = pipe_write.write_all(b"1");
+    if let Err(e) = pipe_write.write_all(b"1") {
+        eprintln!("warning: failed to signal daemon readiness: {e}");
+    }
     // File is dropped here, closing the pipe.
 }
 
@@ -394,5 +396,66 @@ pub fn ensure_not_running() {
             remove_pid_file();
         }
         DaemonStatus::NotRunning => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_file_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_path = dir.path().join("test.pid");
+
+        let pid = std::process::id();
+        let ts = chrono::Utc::now().timestamp();
+        let content = format!("{pid}\n{ts}\n8080\ntest-proxy\n");
+        std::fs::write(&pid_path, &content).unwrap();
+
+        // Parse it the same way read_pid_file does.
+        let read = std::fs::read_to_string(&pid_path).unwrap();
+        let mut lines = read.lines();
+        let read_pid: u32 = lines.next().unwrap().parse().unwrap();
+        let read_ts: i64 = lines.next().unwrap().parse().unwrap();
+        let read_port: u16 = lines.next().unwrap().parse().unwrap();
+        let read_name = lines.next().unwrap_or("unknown");
+
+        assert_eq!(read_pid, pid);
+        assert_eq!(read_ts, ts);
+        assert_eq!(read_port, 8080);
+        assert_eq!(read_name, "test-proxy");
+    }
+
+    #[test]
+    fn pid_file_missing_name_defaults_to_unknown() {
+        // Old 3-line format without proxy name.
+        let content = "12345\n1700000000\n3000\n";
+        let mut lines = content.lines();
+        let _pid: u32 = lines.next().unwrap().parse().unwrap();
+        let _ts: i64 = lines.next().unwrap().parse().unwrap();
+        let _port: u16 = lines.next().unwrap().parse().unwrap();
+        let name = lines.next().unwrap_or("unknown");
+        assert_eq!(name, "unknown");
+    }
+
+    #[test]
+    fn pid_file_malformed_parse_fails() {
+        let content = "not-a-number\ngarbage\n";
+        let mut lines = content.lines();
+        let result = lines.next().and_then(|s| s.parse::<u32>().ok());
+        assert!(result.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_alive_self() {
+        assert!(is_process_alive(std::process::id()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_alive_nonexistent() {
+        assert!(!is_process_alive(99_999_999));
     }
 }

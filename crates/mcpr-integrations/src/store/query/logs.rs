@@ -1,6 +1,7 @@
 //! Query: `mcpr proxy logs <proxy>` — recent request log with filtering.
 
-use rusqlite::params;
+use rusqlite::{Row, params};
+use serde::Serialize;
 
 use super::QueryEngine;
 
@@ -18,8 +19,8 @@ pub struct LogsParams {
     pub status: Option<String>,
 }
 
-/// A single row from the logs query.
-#[derive(Debug, Clone)]
+/// A single row from the logs/slow query.
+#[derive(Debug, Clone, Serialize)]
 pub struct LogRow {
     pub request_id: String,
     pub ts: i64,
@@ -33,24 +34,42 @@ pub struct LogRow {
     pub bytes_out: Option<i64>,
 }
 
+/// Shared row mapper — used by logs, logs_since, slow, slow_since to avoid
+/// duplicating the 10-column mapping closure.
+pub(crate) fn map_log_row(row: &Row<'_>) -> rusqlite::Result<LogRow> {
+    Ok(LogRow {
+        request_id: row.get(0)?,
+        ts: row.get(1)?,
+        method: row.get(2)?,
+        tool: row.get(3)?,
+        latency_ms: row.get(4)?,
+        status: row.get(5)?,
+        error_msg: row.get(6)?,
+        session_id: row.get(7)?,
+        bytes_in: row.get(8)?,
+        bytes_out: row.get(9)?,
+    })
+}
+
+/// The 10 columns selected in all log/slow queries.
+pub(crate) const LOG_COLUMNS: &str =
+    "request_id, ts, method, tool, latency_ms, status, error_msg, session_id, bytes_in, bytes_out";
+
 impl QueryEngine {
     /// Fetch recent request logs, newest first.
-    ///
-    /// Used by `mcpr proxy logs <proxy>` — the primary observability command.
     pub fn logs(&self, params: &LogsParams) -> Result<Vec<LogRow>, rusqlite::Error> {
-        let sql = "
-            SELECT request_id, ts, method, tool, latency_ms, status,
-                   error_msg, session_id, bytes_in, bytes_out
+        let sql = format!(
+            "SELECT {LOG_COLUMNS}
             FROM requests
             WHERE proxy = ?1
               AND (?2 IS NULL OR tool = ?2)
               AND (?3 IS NULL OR status = ?3)
               AND ts >= ?4
             ORDER BY ts DESC
-            LIMIT ?5
-        ";
+            LIMIT ?5"
+        );
 
-        let mut stmt = self.conn().prepare(sql)?;
+        let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map(
             params![
                 params.proxy,
@@ -59,20 +78,7 @@ impl QueryEngine {
                 params.since_ts,
                 params.limit,
             ],
-            |row| {
-                Ok(LogRow {
-                    request_id: row.get(0)?,
-                    ts: row.get(1)?,
-                    method: row.get(2)?,
-                    tool: row.get(3)?,
-                    latency_ms: row.get(4)?,
-                    status: row.get(5)?,
-                    error_msg: row.get(6)?,
-                    session_id: row.get(7)?,
-                    bytes_in: row.get(8)?,
-                    bytes_out: row.get(9)?,
-                })
-            },
+            map_log_row,
         )?;
 
         rows.collect()
@@ -86,34 +92,20 @@ impl QueryEngine {
         params: &LogsParams,
         after_ts: i64,
     ) -> Result<Vec<LogRow>, rusqlite::Error> {
-        let sql = "
-            SELECT request_id, ts, method, tool, latency_ms, status,
-                   error_msg, session_id, bytes_in, bytes_out
+        let sql = format!(
+            "SELECT {LOG_COLUMNS}
             FROM requests
             WHERE proxy = ?1
               AND (?2 IS NULL OR tool = ?2)
               AND (?3 IS NULL OR status = ?3)
               AND ts > ?4
-            ORDER BY ts ASC
-        ";
+            ORDER BY ts ASC"
+        );
 
-        let mut stmt = self.conn().prepare(sql)?;
+        let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map(
             params![params.proxy, params.tool, params.status, after_ts],
-            |row| {
-                Ok(LogRow {
-                    request_id: row.get(0)?,
-                    ts: row.get(1)?,
-                    method: row.get(2)?,
-                    tool: row.get(3)?,
-                    latency_ms: row.get(4)?,
-                    status: row.get(5)?,
-                    error_msg: row.get(6)?,
-                    session_id: row.get(7)?,
-                    bytes_in: row.get(8)?,
-                    bytes_out: row.get(9)?,
-                })
-            },
+            map_log_row,
         )?;
 
         rows.collect()

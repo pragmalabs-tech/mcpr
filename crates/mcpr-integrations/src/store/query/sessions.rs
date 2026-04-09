@@ -1,8 +1,13 @@
 //! Query: `mcpr proxy sessions <proxy>` — list MCP sessions with client info.
 
 use rusqlite::params;
+use serde::Serialize;
 
 use super::QueryEngine;
+
+/// How long since last activity before a session is considered inactive.
+/// Used by the `--active` filter and the `is_active` field.
+const ACTIVE_SESSION_THRESHOLD_MS: i64 = 5 * 60 * 1000; // 5 minutes
 
 /// Filter parameters for the sessions query.
 pub struct SessionsParams {
@@ -12,14 +17,14 @@ pub struct SessionsParams {
     pub since_ts: i64,
     /// Maximum number of rows to return.
     pub limit: i64,
-    /// Only show active sessions (seen in last 5 minutes, not ended).
+    /// Only show active sessions (seen within the active threshold).
     pub active_only: bool,
     /// Filter by client name (e.g., "claude-desktop").
     pub client: Option<String>,
 }
 
 /// A single session row.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SessionRow {
     pub session_id: String,
     pub client_name: Option<String>,
@@ -30,7 +35,6 @@ pub struct SessionRow {
     pub ended_at: Option<i64>,
     pub total_calls: i64,
     pub total_errors: i64,
-    /// Whether this session is considered active (heuristic: seen in last 5 minutes).
     pub is_active: bool,
 }
 
@@ -38,19 +42,12 @@ impl QueryEngine {
     /// List sessions for a proxy, most recently seen first.
     pub fn sessions(&self, params: &SessionsParams) -> Result<Vec<SessionRow>, rusqlite::Error> {
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let active_threshold = now_ms - 5 * 60 * 1000; // 5 minutes
+        let active_threshold = now_ms - ACTIVE_SESSION_THRESHOLD_MS;
 
         let sql = "
             SELECT
-                session_id,
-                client_name,
-                client_version,
-                client_platform,
-                started_at,
-                last_seen_at,
-                ended_at,
-                total_calls,
-                total_errors,
+                session_id, client_name, client_version, client_platform,
+                started_at, last_seen_at, ended_at, total_calls, total_errors,
                 (ended_at IS NULL AND last_seen_at > ?1) AS is_active
             FROM sessions
             WHERE proxy = ?2

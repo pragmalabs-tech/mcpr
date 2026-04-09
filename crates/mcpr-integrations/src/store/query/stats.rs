@@ -1,6 +1,7 @@
 //! Query: `mcpr proxy stats <proxy>` — per-tool aggregated metrics.
 
 use rusqlite::params;
+use serde::Serialize;
 
 use super::QueryEngine;
 
@@ -16,7 +17,7 @@ pub struct StatsParams {
 }
 
 /// Aggregated stats for one tool (or method).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ToolStats {
     /// Tool name, or `<method>` for non-tool-call methods.
     pub label: String,
@@ -39,7 +40,7 @@ pub struct ToolStats {
 }
 
 /// Aggregated result for the stats command.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct StatsResult {
     /// Per-tool/method breakdown, sorted by call count descending.
     pub tools: Vec<ToolStats>,
