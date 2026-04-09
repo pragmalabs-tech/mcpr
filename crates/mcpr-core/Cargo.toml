@@ -1,0 +1,10 @@
+[package]
+name = "mcpr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core types, traits, and shared foundations for mcpr crates"
+
+[dependencies]
+serde = { workspace = true }

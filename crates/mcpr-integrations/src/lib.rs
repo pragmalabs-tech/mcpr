@@ -46,6 +46,7 @@
 //! 5. Wire it up in CLI startup
 
 pub mod emitter;
+pub mod store;
 
 // Re-export emitter types at crate root for ergonomic access.
 pub use emitter::*;
