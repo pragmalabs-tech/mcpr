@@ -16,6 +16,14 @@ pub enum Mode {
 /// Result of parsing CLI args — either a subcommand action or the run mode.
 pub enum CliAction {
     Run(Mode),
+    /// Start proxy as a background daemon (detached from terminal).
+    Start(Mode),
+    /// Stop the running daemon via SIGTERM.
+    Stop,
+    /// Stop + start the daemon.
+    Restart(Mode),
+    /// Show daemon status (PID, port, uptime).
+    Status,
     Validate(ValidateArgs),
     Version,
     /// Read-only query against the store — no server needed.
@@ -148,6 +156,14 @@ struct Cli {
 enum Commands {
     /// Start proxy in foreground (default if no subcommand given)
     Run,
+    /// Start proxy as a background daemon
+    Start,
+    /// Stop the running daemon
+    Stop,
+    /// Restart the daemon (stop + start)
+    Restart,
+    /// Show daemon status (PID, port, uptime)
+    Status,
     /// Validate config file and exit
     Validate(ValidateArgs),
     /// Print version information and exit
@@ -746,10 +762,17 @@ pub fn load() -> CliAction {
         Some(Commands::Version) => return CliAction::Version,
         Some(Commands::Proxy(args)) => return CliAction::Proxy(args.command),
         Some(Commands::Store(args)) => return CliAction::Store(args.command),
-        Some(Commands::Run) | None => {
-            // Continue to load config and determine run mode
+        Some(Commands::Stop) => return CliAction::Stop,
+        Some(Commands::Status) => return CliAction::Status,
+        Some(Commands::Run) | None | Some(Commands::Start) | Some(Commands::Restart) => {
+            // Continue to load config and determine run mode.
+            // Start/Restart need the same config resolution as Run.
         }
     }
+
+    // Remember if this is a start/restart for after config resolution.
+    let is_start = matches!(cli.command, Some(Commands::Start));
+    let is_restart = matches!(cli.command, Some(Commands::Restart));
 
     let (file, config_path) = FileConfig::load();
 
@@ -785,7 +808,13 @@ pub fn load() -> CliAction {
         load_gateway(cli, file, config_path, runtime)
     };
 
-    CliAction::Run(mode)
+    if is_start {
+        CliAction::Start(mode)
+    } else if is_restart {
+        CliAction::Restart(mode)
+    } else {
+        CliAction::Run(mode)
+    }
 }
 
 /// Validate a config file and return a list of (severity, message) tuples.

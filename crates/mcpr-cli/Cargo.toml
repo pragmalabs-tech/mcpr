@@ -37,5 +37,12 @@ mcpr-tunnel = { workspace = true }
 mcpr-integrations = { workspace = true }
 mcpr-proxy = { workspace = true }
 
+# Platform-specific default paths for PID file and daemon log.
+dirs = "6"
+
+# UNIX process management: fork, setsid, signal (for daemon mode).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process", "fs"] }
+
 [dev-dependencies]
 tempfile = "3"

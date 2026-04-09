@@ -55,6 +55,8 @@
 mod admin;
 mod commands;
 mod config;
+#[cfg(unix)]
+mod daemon;
 mod display;
 pub mod logger;
 mod mcp_handler;
@@ -154,9 +156,70 @@ async fn main() {
                 mcpr_tunnel::relay::start_relay(cfg).await;
             }
             Mode::Gateway(cfg) => {
-                run_gateway(*cfg).await;
+                run_gateway(*cfg, None).await;
             }
         },
+        #[cfg(unix)]
+        CliAction::Start(mode) => match mode {
+            Mode::Relay(_) => {
+                eprintln!("error: relay mode does not support daemon mode yet");
+                std::process::exit(1);
+            }
+            Mode::Gateway(cfg) => {
+                daemon::ensure_not_running();
+                let ready_fd = daemon::daemonize(Duration::from_secs(10))
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    });
+                run_gateway(*cfg, Some(ready_fd)).await;
+            }
+        },
+        #[cfg(not(unix))]
+        CliAction::Start(_) => {
+            eprintln!("error: daemon mode is not supported on this platform");
+            eprintln!("  Use `mcpr run` for foreground mode, or a service manager (nssm, sc).");
+            std::process::exit(1);
+        }
+        CliAction::Stop => {
+            #[cfg(unix)]
+            daemon::stop_daemon();
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: daemon management not supported on this platform");
+                std::process::exit(1);
+            }
+        }
+        #[cfg(unix)]
+        CliAction::Restart(mode) => match mode {
+            Mode::Relay(_) => {
+                eprintln!("error: relay mode does not support daemon mode yet");
+                std::process::exit(1);
+            }
+            Mode::Gateway(cfg) => {
+                daemon::stop_daemon_if_running();
+                let ready_fd = daemon::daemonize(Duration::from_secs(10))
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    });
+                run_gateway(*cfg, Some(ready_fd)).await;
+            }
+        },
+        #[cfg(not(unix))]
+        CliAction::Restart(_) => {
+            eprintln!("error: daemon management not supported on this platform");
+            std::process::exit(1);
+        }
+        CliAction::Status => {
+            #[cfg(unix)]
+            daemon::print_status();
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: daemon management not supported on this platform");
+                std::process::exit(1);
+            }
+        }
         CliAction::Validate(args) => {
             let issues = config::validate_config(args.config.as_deref());
             let mut has_error = false;
@@ -194,7 +257,10 @@ async fn main() {
     }
 }
 
-async fn run_gateway(cfg: GatewayConfig) {
+/// Run the gateway proxy. If `ready_fd` is Some, we're in daemon mode —
+/// signal readiness after binding and write the PID file.
+#[allow(unused_variables)]
+async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     let tui_state = tui::new_shared_state();
 
     let mcp = cfg.mcp.expect("mcp is required in mcpr.toml or --mcp");
@@ -220,6 +286,16 @@ async fn run_gateway(cfg: GatewayConfig) {
         .await
         .expect("Failed to bind");
     let actual_port = listener.local_addr().unwrap().port();
+
+    // If daemon mode, write PID file and signal readiness to the parent.
+    #[cfg(unix)]
+    if let Some(fd) = ready_fd {
+        if let Err(e) = daemon::write_pid_file(actual_port) {
+            eprintln!("error: failed to write PID file: {e}");
+            std::process::exit(1);
+        }
+        daemon::signal_ready(fd);
+    }
 
     // Determine public URL
     let public_url = if cfg.no_tunnel {
@@ -596,6 +672,13 @@ async fn run_gateway(cfg: GatewayConfig) {
 
     // Gracefully flush log sinks
     log_handle.shutdown().await;
+
+    // Clean up PID file if we're running as a daemon.
+    #[cfg(unix)]
+    if ready_fd.is_some() {
+        daemon::remove_pid_file();
+    }
+
     eprintln!("[mcpr] Shutdown complete.");
 }
 
