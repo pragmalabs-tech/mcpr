@@ -11,12 +11,34 @@ use crate::AppState;
 use crate::logger::LogEntry;
 use crate::proxy::forward_request;
 use crate::widgets::fetch_widget_html;
+use mcpr_integrations::store::{RequestEvent, RequestStatus, SessionEvent, StoreEvent};
 use mcpr_integrations::{EventStatus, EventType, McprEvent};
 use mcpr_protocol::session::{self as session, SessionState, SessionStore};
 use mcpr_protocol::{self as jsonrpc, McpMethod};
 use mcpr_proxy::forwarding::{build_response, read_body_capped};
 use mcpr_proxy::rewrite_response;
 use mcpr_proxy::sse::{extract_json_from_sse, wrap_as_sse};
+
+/// Normalize a client name to a platform identifier.
+///
+/// Maps known MCP client names to their platform category. Used when
+/// recording sessions in the store for aggregation by `mcpr proxy clients`.
+fn normalize_platform(client_name: &str) -> &'static str {
+    let lower = client_name.to_lowercase();
+    if lower.contains("claude") {
+        "claude"
+    } else if lower.contains("cursor") {
+        "cursor"
+    } else if lower.contains("chatgpt") || lower.contains("openai") {
+        "chatgpt"
+    } else if lower.contains("copilot") || lower.contains("vscode") || lower.contains("vs-code") {
+        "vscode"
+    } else if lower.contains("windsurf") {
+        "windsurf"
+    } else {
+        "unknown"
+    }
+}
 
 /// Map an MCP method to the corresponding event type.
 fn event_type_for(method: &McpMethod) -> EventType {
@@ -118,6 +140,30 @@ pub async fn handle_mcp_post(
                 evt = evt.tool(d);
             }
             state.events.emit(evt);
+
+            // Record failed request in store.
+            if let Some(ref store) = state.store {
+                let tool = if mcp_method == McpMethod::ToolsCall {
+                    call_detail.clone()
+                } else {
+                    None
+                };
+                store.record(StoreEvent::Request(RequestEvent {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    proxy: state.proxy_name.clone(),
+                    session_id: req_session_id.clone(),
+                    method: method_str.to_string(),
+                    tool,
+                    latency_ms: start.elapsed().as_millis() as i64,
+                    status: RequestStatus::Error,
+                    error_code: None,
+                    error_msg: Some(format!("{e}").chars().take(512).collect()),
+                    bytes_in: Some(raw_body_len as i64),
+                    bytes_out: None,
+                }));
+            }
+
             return (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response();
         }
     };
@@ -153,7 +199,30 @@ pub async fn handle_mcp_post(
                 None => info.name.clone(),
             };
             session_log = session_log.client_name(&label);
+
+            // Record session in the store (before consuming client_info).
+            if let Some(ref store) = state.store {
+                store.record(StoreEvent::Session(SessionEvent {
+                    session_id: sid.clone(),
+                    proxy: state.proxy_name.clone(),
+                    started_at: chrono::Utc::now().timestamp_millis(),
+                    client_name: Some(info.name.clone()),
+                    client_version: info.version.clone(),
+                    client_platform: Some(normalize_platform(&info.name).to_string()),
+                }));
+            }
+
             state.sessions.set_client_info(sid, info).await;
+        } else if let Some(ref store) = state.store {
+            // No client info — still record the session.
+            store.record(StoreEvent::Session(SessionEvent {
+                session_id: sid.clone(),
+                proxy: state.proxy_name.clone(),
+                started_at: chrono::Utc::now().timestamp_millis(),
+                client_name: None,
+                client_version: None,
+                client_platform: None,
+            }));
         }
         state.logger.emit(session_log);
     }
@@ -234,6 +303,34 @@ pub async fn handle_mcp_post(
         }
         state.events.emit(evt);
 
+        // Record request in store.
+        if let Some(ref store) = state.store {
+            let store_status = if rpc_error.is_some() {
+                RequestStatus::Error
+            } else {
+                RequestStatus::Ok
+            };
+            let tool = if mcp_method == McpMethod::ToolsCall {
+                call_detail.clone()
+            } else {
+                None
+            };
+            store.record(StoreEvent::Request(RequestEvent {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                ts: chrono::Utc::now().timestamp_millis(),
+                proxy: state.proxy_name.clone(),
+                session_id: log_session_id.clone(),
+                method: method_str.to_string(),
+                tool,
+                latency_ms: start.elapsed().as_millis() as i64,
+                status: store_status,
+                error_code: rpc_error.as_ref().map(|(code, _)| code.to_string()),
+                error_msg: rpc_error.map(|(_, msg)| msg.chars().take(512).collect()),
+                bytes_in: Some(raw_body_len as i64),
+                bytes_out: Some(body.len() as i64),
+            }));
+        }
+
         build_response(status, &resp_headers, Body::from(body))
     } else {
         state.logger.emit(
@@ -256,6 +353,25 @@ pub async fn handle_mcp_post(
                 .request_size(raw_body_len as u64)
                 .response_size(resp_bytes.len() as u64),
         );
+
+        // Record passthrough request in store.
+        if let Some(ref store) = state.store {
+            store.record(StoreEvent::Request(RequestEvent {
+                request_id: uuid::Uuid::new_v4().to_string(),
+                ts: chrono::Utc::now().timestamp_millis(),
+                proxy: state.proxy_name.clone(),
+                session_id: log_session_id.clone(),
+                method: method_str.to_string(),
+                tool: None,
+                latency_ms: start.elapsed().as_millis() as i64,
+                status: RequestStatus::Ok,
+                error_code: None,
+                error_msg: None,
+                bytes_in: Some(raw_body_len as i64),
+                bytes_out: Some(resp_bytes.len() as i64),
+            }));
+        }
+
         build_response(status, &resp_headers, Body::from(resp_bytes))
     }
 }

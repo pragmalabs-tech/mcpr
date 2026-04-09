@@ -53,6 +53,7 @@
 //! ```
 
 mod admin;
+mod commands;
 mod config;
 mod display;
 pub mod logger;
@@ -124,6 +125,10 @@ pub struct AppState {
     pub sessions: MemorySessionStore,
     pub max_request_body: usize,
     pub max_response_body: usize,
+    /// SQLite request storage for observability. None if storage is disabled.
+    pub store: Option<Arc<mcpr_integrations::store::Store>>,
+    /// Proxy name used to tag store records. Derived from upstream URL or config.
+    pub proxy_name: String,
 }
 
 /// Adapter to bridge mcpr-tunnel's TunnelStatusCallback to TUI state.
@@ -179,6 +184,12 @@ async fn main() {
                     "target": option_env!("TARGET").unwrap_or("unknown"),
                 })
             );
+        }
+        CliAction::Proxy(cmd) => {
+            commands::handle_proxy_command(cmd);
+        }
+        CliAction::Store(cmd) => {
+            commands::handle_store_command(cmd);
         }
     }
 }
@@ -426,6 +437,42 @@ async fn run_gateway(cfg: GatewayConfig) {
         Arc::new(mcpr_integrations::NoopEmitter)
     };
 
+    // Derive proxy name from upstream URL (e.g., "localhost-9000") for store tagging.
+    let proxy_name = prefix_from_upstream(&mcp);
+
+    // Open the request storage database.
+    let store = match mcpr_integrations::store::path::resolve_db_path(None) {
+        Some(db_path) => {
+            match mcpr_integrations::store::Store::open(mcpr_integrations::store::StoreConfig {
+                db_path: db_path.clone(),
+                mcpr_version: env!("CARGO_PKG_VERSION").to_string(),
+            }) {
+                Ok(s) => {
+                    eprintln!(
+                        "  {} storage: {}",
+                        colored::Colorize::dimmed("store"),
+                        db_path.display()
+                    );
+                    Some(Arc::new(s))
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {}: failed to open store: {e}",
+                        colored::Colorize::yellow("warn"),
+                    );
+                    None
+                }
+            }
+        }
+        None => {
+            eprintln!(
+                "  {}: could not determine store path — storage disabled",
+                colored::Colorize::yellow("warn"),
+            );
+            None
+        }
+    };
+
     let state = AppState {
         mcp_upstream: mcp.clone(),
         widget_source,
@@ -441,6 +488,8 @@ async fn run_gateway(cfg: GatewayConfig) {
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
+        store: store.clone(),
+        proxy_name,
     };
 
     // Initial connectivity probe — warn early if the MCP URL seems wrong
@@ -536,6 +585,14 @@ async fn run_gateway(cfg: GatewayConfig) {
     // Graceful drain: wait for in-flight requests
     eprintln!("[mcpr] Waiting up to {drain_timeout}s for in-flight requests...");
     tokio::time::sleep(Duration::from_secs(drain_timeout.min(5))).await;
+
+    // Flush storage before logs — store events are emitted from the same code paths.
+    if let Some(store) = store {
+        if let Some(s) = Arc::into_inner(store) {
+            let mut s = s;
+            s.shutdown();
+        }
+    }
 
     // Gracefully flush log sinks
     log_handle.shutdown().await;

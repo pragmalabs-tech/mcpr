@@ -82,6 +82,15 @@ async fn handle_request(
                 state
                     .events
                     .emit(McprEvent::new(EventType::SessionEnd).session(sid));
+
+                // Record session close in store.
+                if let Some(ref store) = state.store {
+                    store.record(mcpr_integrations::store::StoreEvent::SessionClosed {
+                        session_id: sid.to_string(),
+                        ended_at: chrono::Utc::now().timestamp_millis(),
+                    });
+                }
+
                 state.sessions.remove(sid).await;
             }
 
@@ -132,6 +141,8 @@ mod tests {
             sessions: mcpr_protocol::session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
+            store: None,
+            proxy_name: "test".to_string(),
         }
     }
 
