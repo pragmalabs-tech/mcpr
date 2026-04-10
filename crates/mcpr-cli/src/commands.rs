@@ -118,6 +118,8 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         ProxyCommand::Stats(args) => cmd_proxy_stats(args),
         ProxyCommand::Sessions(args) => cmd_proxy_sessions(args),
         ProxyCommand::Clients(args) => cmd_proxy_clients(args),
+        ProxyCommand::Status(args) => cmd_proxy_status(args),
+        ProxyCommand::Session(args) => cmd_proxy_session(args),
     };
 
     if let Err(e) = result {
@@ -325,7 +327,7 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
     } else {
         println!("SESSIONS — {} — last {}\n", name, args.since);
         println!(
-            "  {:<16} {:<24} {:<17} {:>12} {:>6} {:>6}",
+            "  {:<38} {:<24} {:<17} {:>12} {:>6} {:>6}",
             "SESSION", "CLIENT", "STARTED", "LAST SEEN", "CALLS", "ERRS"
         );
         for row in &rows {
@@ -335,14 +337,9 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
                 _ => "unknown".to_string(),
             };
             let status_icon = if row.is_active { "●" } else { "○" };
-            let sid = if row.session_id.len() > 14 {
-                format!("{}…", &row.session_id[..14])
-            } else {
-                row.session_id.clone()
-            };
             println!(
-                "  {:<16} {:<24} {:<17} {:>12} {:>6} {:>6}",
-                sid,
+                "  {:<38} {:<24} {:<17} {:>12} {:>6} {:>6}",
+                &row.session_id,
                 format!("{client} {status_icon}"),
                 format_ts(row.started_at),
                 if row.is_active {
@@ -406,6 +403,148 @@ fn cmd_proxy_clients(args: ProxyClientsArgs) -> Result<(), String> {
                 rows.len(),
                 rows.iter().map(|r| r.sessions).sum::<i64>()
             );
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_proxy_status(args: ProxyStatusArgs) -> Result<(), String> {
+    let (engine, _) = open_query_engine()?;
+    let name = resolve_proxy_name(args.name)?;
+    let since_ts = parse_since(&args.since)?;
+
+    let stats = engine
+        .stats(&StatsParams {
+            proxy: name.clone(),
+            since_ts,
+        })
+        .map_err(|e| format!("query failed: {e}"))?;
+
+    let sessions = engine
+        .sessions(&SessionsParams {
+            proxy: name.clone(),
+            since_ts,
+            limit: 1000,
+            active_only: false,
+            client: None,
+        })
+        .map_err(|e| format!("query failed: {e}"))?;
+
+    let active_sessions = sessions.iter().filter(|s| s.is_active).count();
+
+    if args.json {
+        let snapshot = serde_json::json!({
+            "proxy": name,
+            "since": args.since,
+            "total_requests": stats.total_calls,
+            "error_pct": stats.error_pct,
+            "active_sessions": active_sessions,
+            "total_sessions": sessions.len(),
+            "tools": stats.tools,
+        });
+        println!("{}", serde_json::to_string(&snapshot).unwrap_or_default());
+    } else {
+        println!("STATUS — {} — last {}\n", name, args.since);
+        println!("  Total requests:    {}", stats.total_calls);
+        println!("  Error rate:        {:.1}%", stats.error_pct);
+        println!(
+            "  Sessions:          {} total   {} active",
+            sessions.len(),
+            active_sessions
+        );
+
+        if !stats.tools.is_empty() {
+            println!(
+                "\n  {:<24} {:>8} {:>10} {:>10} {:>10} {:>8}",
+                "TOOL", "CALLS", "AVG", "P95", "MAX", "ERR%"
+            );
+            for t in &stats.tools {
+                println!(
+                    "  {:<24} {:>8} {:>10} {:>10} {:>10} {:>7.1}%",
+                    t.label,
+                    t.calls,
+                    format_latency(t.avg_ms as i64),
+                    format_latency(t.p95_ms),
+                    format_latency(t.max_ms),
+                    t.error_pct,
+                );
+            }
+        }
+
+        if active_sessions > 0 {
+            println!("\n  ACTIVE SESSIONS:");
+            for s in sessions.iter().filter(|s| s.is_active) {
+                let client = match (&s.client_name, &s.client_version) {
+                    (Some(n), Some(v)) => format!("{n} {v}"),
+                    (Some(n), None) => n.clone(),
+                    _ => "unknown".to_string(),
+                };
+                println!(
+                    "    {} — {} — {} calls",
+                    s.session_id, client, s.total_calls
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_proxy_session(args: ProxySessionArgs) -> Result<(), String> {
+    let (engine, _) = open_query_engine()?;
+
+    let detail = engine
+        .session_detail(&args.session_id)
+        .map_err(|e| format!("query failed: {e}"))?
+        .ok_or_else(|| format!("session not found: {}", args.session_id))?;
+
+    if args.json {
+        print_json(&detail);
+    } else {
+        let client = match (&detail.client_name, &detail.client_version) {
+            (Some(n), Some(v)) => format!("{n} {v}"),
+            (Some(n), None) => n.clone(),
+            _ => "unknown".to_string(),
+        };
+        let platform = detail.client_platform.as_deref().unwrap_or("unknown");
+        let status = if detail.ended_at.is_some() {
+            "closed"
+        } else {
+            "active"
+        };
+
+        println!("SESSION — {}\n", detail.session_id);
+        println!("  Client:      {} ({})", client, platform);
+        println!("  Status:      {}", status);
+        println!("  Started:     {}", format_ts(detail.started_at));
+        if let Some(ended) = detail.ended_at {
+            println!("  Ended:       {}", format_ts(ended));
+        } else {
+            println!("  Last seen:   {}", format_ts(detail.last_seen_at));
+        }
+        println!(
+            "  Calls: {}   Errors: {}",
+            detail.total_calls, detail.total_errors
+        );
+
+        if !detail.requests.is_empty() {
+            println!(
+                "\n  {:<20} {:<16} {:<16} {:>10} {:>8}",
+                "TIME", "METHOD", "TOOL", "LATENCY", "STATUS"
+            );
+            for r in &detail.requests {
+                println!(
+                    "  {:<20} {:<16} {:<16} {:>10} {:>8}",
+                    format_ts(r.ts),
+                    r.method,
+                    r.tool.as_deref().unwrap_or("—"),
+                    format_latency(r.latency_ms),
+                    r.status,
+                );
+            }
+        } else {
+            println!("\n  (no requests recorded)");
         }
     }
 

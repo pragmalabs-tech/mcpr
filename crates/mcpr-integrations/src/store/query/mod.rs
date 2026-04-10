@@ -9,6 +9,7 @@
 
 pub mod clients;
 pub mod logs;
+pub mod session_detail;
 pub mod sessions;
 pub mod slow;
 pub mod stats;
@@ -364,6 +365,68 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].client_name.as_deref(), Some("cursor"));
+    }
+
+    // ── session_detail ──────────────────────────────────────────────────
+
+    #[test]
+    fn session_detail_returns_session_with_requests() {
+        let engine = seeded_engine();
+        let detail = engine.session_detail("s1").unwrap().unwrap();
+        assert_eq!(detail.session_id, "s1");
+        assert_eq!(detail.client_name.as_deref(), Some("claude-desktop"));
+        assert_eq!(detail.client_version.as_deref(), Some("1.2.0"));
+        assert_eq!(detail.client_platform.as_deref(), Some("claude"));
+        assert_eq!(detail.total_calls, 3);
+        assert_eq!(detail.total_errors, 1);
+        // 3 requests belong to s1 (r1, r2, r3), oldest first
+        assert_eq!(detail.requests.len(), 3);
+        assert_eq!(detail.requests[0].request_id, "r1");
+        assert_eq!(detail.requests[1].request_id, "r2");
+        assert_eq!(detail.requests[2].request_id, "r3");
+    }
+
+    #[test]
+    fn session_detail_closed_session() {
+        let engine = seeded_engine();
+        let detail = engine.session_detail("s2").unwrap().unwrap();
+        assert_eq!(detail.session_id, "s2");
+        assert_eq!(detail.client_name.as_deref(), Some("cursor"));
+        assert_eq!(detail.ended_at, Some(3500));
+        // 2 requests belong to s2 (r4, r5), oldest first
+        assert_eq!(detail.requests.len(), 2);
+        assert_eq!(detail.requests[0].request_id, "r4");
+        assert_eq!(detail.requests[1].request_id, "r5");
+    }
+
+    #[test]
+    fn session_detail_nonexistent_returns_none() {
+        let engine = seeded_engine();
+        let result = engine.session_detail("no-such-session").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn session_detail_requests_ordered_oldest_first() {
+        let engine = seeded_engine();
+        let detail = engine.session_detail("s1").unwrap().unwrap();
+        for pair in detail.requests.windows(2) {
+            assert!(
+                pair[0].ts <= pair[1].ts,
+                "requests should be ordered by ts ASC"
+            );
+        }
+    }
+
+    #[test]
+    fn session_detail_serializes_to_json() {
+        let engine = seeded_engine();
+        let detail = engine.session_detail("s1").unwrap().unwrap();
+        let json = serde_json::to_string(&detail).unwrap();
+        assert!(json.contains("session_id"));
+        assert!(json.contains("client_name"));
+        assert!(json.contains("requests"));
+        assert!(json.contains("r1"));
     }
 
     // ── store_ops ───────────────────────────────────────────────────────

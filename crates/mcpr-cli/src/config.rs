@@ -200,6 +200,10 @@ pub enum ProxyCommand {
     Sessions(ProxySessionsArgs),
     /// Show client (AI model) breakdown
     Clients(ProxyClientsArgs),
+    /// Show proxy status overview (activity summary, active sessions, error rate)
+    Status(ProxyStatusArgs),
+    /// Drill into a single session — show session info and all its requests
+    Session(ProxySessionArgs),
 }
 
 /// Arguments for `mcpr proxy logs [name]`.
@@ -310,6 +314,32 @@ pub struct ProxyClientsArgs {
     pub since: String,
 
     /// Output as newline-delimited JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `mcpr proxy status [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxyStatusArgs {
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
+
+    /// Lookback window for activity summary (e.g., 1h, 24h)
+    #[arg(long, default_value = "1h")]
+    pub since: String,
+
+    /// Output as JSON snapshot
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `mcpr proxy session <session_id>`.
+#[derive(Parser, Clone)]
+pub struct ProxySessionArgs {
+    /// Session ID to look up
+    pub session_id: String,
+
+    /// Output as JSON
     #[arg(long)]
     pub json: bool,
 }
