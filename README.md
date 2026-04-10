@@ -133,7 +133,9 @@ mcpr status                    Show PID, port, uptime, proxy name
 mcpr proxy logs [name]         Request logs (--follow, --json, --tool, --status)
 mcpr proxy slow [name]         Slow calls above threshold
 mcpr proxy stats [name]        Per-tool metrics (calls, avg, p95, errors)
+mcpr proxy status [name]       Proxy overview (requests, errors, active sessions)
 mcpr proxy sessions [name]     MCP sessions with client info
+mcpr proxy session <id>        Drill into a session (metadata + all requests)
 mcpr proxy clients [name]      AI client breakdown
 
 mcpr store stats               Database size and row counts

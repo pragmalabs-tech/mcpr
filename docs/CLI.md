@@ -128,6 +128,68 @@ mcpr proxy sessions --json
 | `--limit N` | 50 | Maximum rows |
 | `--json` | false | NDJSON output |
 
+#### `mcpr proxy status [name]`
+
+Show a proxy status overview: request count, error rate, active sessions, and per-tool breakdown.
+
+```bash
+mcpr proxy status                        # auto-detect proxy name
+mcpr proxy status --since 24h            # last 24 hours
+mcpr proxy status --json
+```
+
+Output:
+```
+STATUS — localhost-9000 — last 1h
+
+  Total requests:    1,847
+  Error rate:        1.2%
+  Sessions:          5 total   2 active
+
+  TOOL                        CALLS        AVG        P95        MAX     ERR%
+  search_products               847       142ms      312ms      891ms     0.2%
+  create_order                  289       341ms    1,200ms    4,201ms     6.2%
+
+  ACTIVE SESSIONS:
+    a1b2c3d4-... — claude-desktop 1.2.0 — 42 calls
+    e5f6a7b8-... — cursor 0.44.1 — 8 calls
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--since DURATION` | 1h | Activity window |
+| `--json` | false | JSON output |
+
+#### `mcpr proxy session <session_id>`
+
+Drill into a single session — show session metadata and all its request logs.
+
+```bash
+mcpr proxy session a1b2c3d4-e5f6-7890-abcd-1234567890ab
+mcpr proxy session a1b2c3d4-e5f6-7890-abcd-1234567890ab --json
+```
+
+Output:
+```
+SESSION — a1b2c3d4-e5f6-7890-abcd-1234567890ab
+
+  Client:      claude-desktop 1.2.0 (claude)
+  Status:      active
+  Started:     2026-04-10 16:14:04
+  Last seen:   2026-04-10 16:28:33
+  Calls: 42   Errors: 1
+
+  TIME                 METHOD           TOOL               LATENCY   STATUS
+  2026-04-10 16:14:04  initialize       —                    23ms       ok
+  2026-04-10 16:14:05  tools/list       —                    12ms       ok
+  2026-04-10 16:14:10  tools/call       search_products     142ms       ok
+  2026-04-10 16:14:15  tools/call       create_order        891ms    error
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | false | JSON output (includes full session + all requests) |
+
 #### `mcpr proxy clients [name]`
 
 Show AI client breakdown across sessions.
