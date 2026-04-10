@@ -1,21 +1,28 @@
 //! # mcpr (CLI binary)
 //!
-//! The main mcpr binary: an open-source reverse proxy for MCP applications.
-//! This crate orchestrates all library crates into a runnable gateway or
-//! relay server.
+//! The main mcpr binary: a daemon-style reverse proxy for MCP applications.
+//! Runs as a background daemon by default (`mcpr start`), with CLI commands
+//! for observability (`mcpr proxy logs/stats/slow/sessions/clients`) and
+//! lifecycle management (`mcpr stop/restart/status`).
 //!
 //! ## Responsibilities
 //!
 //! - **Configuration** (`config`): CLI argument parsing (clap), TOML config
-//!   file loading, and config validation. Resolves the run mode (gateway vs
-//!   relay) and merges CLI args with file-based config.
+//!   file loading, and config validation.
+//!
+//! - **Daemon management** (`daemon`): Background process lifecycle — fork,
+//!   PID file, readiness signaling, graceful stop via SIGTERM.
 //!
 //! - **Proxy orchestration** (`proxy`): Catch-all HTTP handler that dispatches
 //!   classified requests to the appropriate handler (MCP, widgets, passthrough).
 //!
 //! - **MCP request handling** (`mcp_handler`): Processes MCP JSON-RPC POST and
 //!   SSE requests — forwards to upstream, rewrites responses, tracks sessions,
-//!   and emits structured events.
+//!   and records events to SQLite store.
+//!
+//! - **CLI commands** (`commands`): Handlers for `mcpr proxy logs/slow/stats/
+//!   sessions/clients` and `mcpr store stats/vacuum`. Read-only queries
+//!   against the SQLite store — work without a running daemon.
 //!
 //! - **Widget serving** (`widgets`): Serves widget HTML pages, static assets,
 //!   and widget list endpoints from local filesystem or upstream proxy.
@@ -23,44 +30,46 @@
 //! - **Passthrough** (`passthrough`): Forwards non-MCP requests (OAuth, .well-known,
 //!   etc.) to upstream with URL rewriting.
 //!
-//! - **Terminal UI** (`tui`): Real-time dashboard showing connection status,
-//!   request log, sessions, and cloud sync status. Built with ratatui.
-//!
-//! - **Logging** (`logger`): Multi-sink structured logging with support for
-//!   stderr, TUI, and file sinks (daily/size rotation).
+//! - **Event bus** (`event_bus`): Routes `ProxyEvent`s to registered sinks
+//!   (stderr, SQLite, cloud). Single pipeline replaces the old logger + emitter.
 //!
 //! - **Admin endpoints** (`admin`): Health check and readiness probe endpoints
 //!   on a separate port for orchestration (k8s, docker, etc.).
 //!
 //! - **Onboarding** (`onboarding`): Interactive tunnel setup flow for first-time
-//!   users connecting to tunnel.mcpr.app.
+//!   users connecting to tunnel.mcpr.app (when `--tunnel` is enabled).
 //!
 //! ## Module Structure
 //!
 //! ```text
 //! mcpr-cli/src/
-//! +-- main.rs         # Entry point, gateway startup, signal handling
-//! +-- config.rs       # CLI args, TOML config, validation
+//! +-- main.rs         # Entry point, daemon dispatch, gateway startup
+//! +-- config.rs       # CLI args, TOML config, subcommands
+//! +-- daemon.rs       # Daemon lifecycle (fork, PID file, signals)
+//! +-- commands.rs     # CLI query command handlers
 //! +-- proxy.rs        # Request dispatcher (classify -> handle)
-//! +-- mcp_handler.rs  # MCP POST/SSE handling, session tracking, events
+//! +-- mcp_handler.rs  # MCP POST/SSE handling, session tracking, store events
 //! +-- widgets.rs      # Widget HTML serving, asset proxying
 //! +-- passthrough.rs  # Non-MCP request forwarding
 //! +-- admin.rs        # Health/readiness admin server
 //! +-- onboarding.rs   # Interactive tunnel claim flow
-//! +-- display.rs      # Startup banner and formatting
-//! +-- logger/         # LogRouter, FileSink, StderrSink, TuiSink
-//! +-- tui/            # Terminal UI (app loop, rendering, state)
+//! +-- display.rs      # Startup info formatting
+//! +-- event_bus.rs    # EventBus — routes ProxyEvents to sinks
+//! +-- stderr_sink.rs  # StderrSink — console output
 //! ```
 
 mod admin;
+mod commands;
 mod config;
+#[cfg(unix)]
+mod daemon;
 mod display;
-pub mod logger;
+mod event_bus;
 mod mcp_handler;
 mod onboarding;
 mod passthrough;
 mod proxy;
-mod tui;
+mod stderr_sink;
 mod widgets;
 
 use std::sync::Arc;
@@ -68,7 +77,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use mcpr_integrations::EventEmitter;
 use mcpr_proxy::forwarding::UpstreamClient;
 
 use axum::Router;
@@ -77,14 +85,10 @@ use tower_http::cors::{Any, CorsLayer};
 
 use config::{CliAction, GatewayConfig, Mode};
 use display::log_startup;
-use logger::{
-    DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, StderrSink, TuiSink,
-    prefix_from_upstream,
-};
 use mcpr_protocol::session::MemorySessionStore;
 use mcpr_proxy::RewriteConfig;
+use mcpr_proxy::state::{self as proxy_state, SharedProxyState};
 use proxy::proxy_routes;
-use tui::SharedTuiState;
 use widgets::WidgetSource;
 
 /// Global drain flag — set to true when graceful shutdown begins.
@@ -118,40 +122,109 @@ pub struct AppState {
     pub widget_source: Option<WidgetSource>,
     pub rewrite_config: Arc<RwLock<RewriteConfig>>,
     pub upstream: UpstreamClient,
-    pub tui_state: SharedTuiState,
-    pub logger: LogRouter,
-    pub events: Arc<dyn EventEmitter>,
+    pub proxy_state_ref: SharedProxyState,
+    /// Single event pipeline — replaces logger + events + store.
+    pub event_bus: event_bus::EventBus,
     pub sessions: MemorySessionStore,
     pub max_request_body: usize,
     pub max_response_body: usize,
+    /// Proxy name used to tag events. Derived from upstream URL or config.
+    pub proxy_name: String,
 }
 
-/// Adapter to bridge mcpr-tunnel's TunnelStatusCallback to TUI state.
-struct TuiTunnelStatus(SharedTuiState);
+/// Adapter to bridge mcpr-tunnel's TunnelStatusCallback to proxy state.
+struct TunnelStatusAdapter(SharedProxyState);
 
-impl mcpr_tunnel::TunnelStatusCallback for TuiTunnelStatus {
+impl mcpr_tunnel::TunnelStatusCallback for TunnelStatusAdapter {
     fn on_connected(&self, _url: &str) {
-        self.0.lock().unwrap().tunnel_status = tui::ConnectionStatus::Connected;
+        proxy_state::lock_state(&self.0).tunnel_status = proxy_state::ConnectionStatus::Connected;
     }
     fn on_disconnected(&self) {
-        self.0.lock().unwrap().tunnel_status = tui::ConnectionStatus::Disconnected;
+        proxy_state::lock_state(&self.0).tunnel_status =
+            proxy_state::ConnectionStatus::Disconnected;
     }
     fn on_evicted(&self) {
-        self.0.lock().unwrap().tunnel_status = tui::ConnectionStatus::Evicted;
+        proxy_state::lock_state(&self.0).tunnel_status = proxy_state::ConnectionStatus::Evicted;
     }
 }
 
 #[tokio::main]
 async fn main() {
     match config::load() {
-        CliAction::Run(mode) => match mode {
+        CliAction::Start { mode, foreground } => match mode {
             Mode::Relay(cfg) => {
+                if !foreground {
+                    eprintln!("error: relay mode requires --foreground");
+                    std::process::exit(1);
+                }
                 mcpr_tunnel::relay::start_relay(cfg).await;
             }
             Mode::Gateway(cfg) => {
-                run_gateway(*cfg).await;
+                if foreground {
+                    // Foreground mode: no daemon, attach to terminal.
+                    run_gateway(*cfg, None).await;
+                } else {
+                    // Daemon mode (default).
+                    #[cfg(unix)]
+                    {
+                        daemon::ensure_not_running();
+                        let ready_fd =
+                            daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
+                                eprintln!("error: {e}");
+                                std::process::exit(1);
+                            });
+                        run_gateway(*cfg, Some(ready_fd)).await;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        eprintln!("error: daemon mode is not supported on this platform");
+                        eprintln!("  Use `mcpr start --foreground` or a service manager.");
+                        std::process::exit(1);
+                    }
+                }
             }
         },
+        CliAction::Stop => {
+            #[cfg(unix)]
+            daemon::stop_daemon();
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: daemon management not supported on this platform");
+                std::process::exit(1);
+            }
+        }
+        CliAction::Restart(mode) => match mode {
+            Mode::Relay(_) => {
+                eprintln!("error: relay mode does not support daemon mode");
+                std::process::exit(1);
+            }
+            Mode::Gateway(cfg) => {
+                #[cfg(unix)]
+                {
+                    daemon::stop_daemon_if_running();
+                    let ready_fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    });
+                    run_gateway(*cfg, Some(ready_fd)).await;
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = cfg;
+                    eprintln!("error: daemon management not supported on this platform");
+                    std::process::exit(1);
+                }
+            }
+        },
+        CliAction::Status => {
+            #[cfg(unix)]
+            daemon::print_status();
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: daemon management not supported on this platform");
+                std::process::exit(1);
+            }
+        }
         CliAction::Validate(args) => {
             let issues = config::validate_config(args.config.as_deref());
             let mut has_error = false;
@@ -180,16 +253,43 @@ async fn main() {
                 })
             );
         }
+        CliAction::Proxy(cmd) => {
+            commands::handle_proxy_command(cmd);
+        }
+        CliAction::Store(cmd) => {
+            commands::handle_store_command(cmd);
+        }
     }
 }
 
-async fn run_gateway(cfg: GatewayConfig) {
-    let tui_state = tui::new_shared_state();
+/// Run the gateway proxy. If `ready_fd` is Some, we're in daemon mode —
+/// signal readiness after binding and write the PID file.
+#[allow(unused_variables)]
+async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
+    let proxy_state_ref = proxy_state::new_shared_state();
 
     let mcp = cfg.mcp.expect("mcp is required in mcpr.toml or --mcp");
 
     // Validate MCP URL format
     validate_mcp_url(&mcp);
+
+    // Derive proxy name from upstream URL (e.g., "http://localhost:9000" → "localhost-9000").
+    let proxy_name = {
+        let stripped = mcp
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        let host_port = stripped.split('/').next().unwrap_or(stripped);
+        host_port
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+    };
 
     let widget_source = cfg.widgets.as_ref().map(|w| {
         if w.starts_with("http://") || w.starts_with("https://") {
@@ -199,21 +299,30 @@ async fn run_gateway(cfg: GatewayConfig) {
         }
     });
 
-    // Bind listener first — in tunnel mode with no explicit port, use port 0 (random)
-    let bind_port = if !cfg.no_tunnel && cfg.port.is_none() {
-        0
-    } else {
-        cfg.port.expect("port is required in mcpr.toml or --port")
-    };
+    // Bind listener — in tunnel mode with no explicit port, use port 0 (OS picks random).
+    // In proxy-only mode (no tunnel), default to 3000 if not specified.
+    // Default port: 3000 for proxy-only mode, 0 (OS picks) for tunnel mode.
+    let bind_port = cfg.port.unwrap_or(if cfg.tunnel { 0 } else { 3000 });
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{bind_port}"))
         .await
         .expect("Failed to bind");
     let actual_port = listener.local_addr().unwrap().port();
 
+    // If daemon mode, write PID file and signal readiness to the parent.
+    #[cfg(unix)]
+    if let Some(fd) = ready_fd {
+        if let Err(e) = daemon::write_pid_file(actual_port, &proxy_name) {
+            eprintln!("error: failed to write PID file: {e}");
+            std::process::exit(1);
+        }
+        daemon::signal_ready(fd);
+    }
+
     // Determine public URL
-    let public_url = if cfg.no_tunnel {
+    let public_url = if !cfg.tunnel {
         // No tunnel — mark as connected (local-only)
-        tui_state.lock().unwrap().tunnel_status = tui::ConnectionStatus::Connected;
+        proxy_state::lock_state(&proxy_state_ref).tunnel_status =
+            proxy_state::ConnectionStatus::Connected;
         format!("http://localhost:{actual_port}")
     } else {
         let relay_url = cfg.relay_url.as_deref().unwrap();
@@ -243,7 +352,7 @@ async fn run_gateway(cfg: GatewayConfig) {
                     );
                     if result.anonymous {
                         eprintln!(
-                            "\n  {} This is a temporary tunnel (1 week). To keep a custom subdomain, re-run with --no-tunnel and reconfigure.",
+                            "\n  {} This is a temporary tunnel (1 week). To claim a permanent subdomain, re-run `mcpr start --tunnel`.",
                             colored::Colorize::yellow("!"),
                         );
                     } else {
@@ -260,7 +369,7 @@ async fn run_gateway(cfg: GatewayConfig) {
                     let anonymous = result.anonymous;
                     let pair = (result.token, Some(result.subdomain));
                     if anonymous {
-                        tui_state.lock().unwrap().tunnel_anonymous = true;
+                        proxy_state::lock_state(&proxy_state_ref).tunnel_anonymous = true;
                     }
                     pair
                 }
@@ -284,8 +393,8 @@ async fn run_gateway(cfg: GatewayConfig) {
         };
 
         {
-            let mut state = tui_state.lock().unwrap();
-            state.tunnel_status = tui::ConnectionStatus::Connecting;
+            let mut state = proxy_state::lock_state(&proxy_state_ref);
+            state.tunnel_status = proxy_state::ConnectionStatus::Connecting;
             if cfg.tunnel_anonymous {
                 state.tunnel_anonymous = true;
             }
@@ -296,7 +405,7 @@ async fn run_gateway(cfg: GatewayConfig) {
             relay_url,
             &token,
             desired_subdomain.as_deref(),
-            TuiTunnelStatus(tui_state.clone()),
+            TunnelStatusAdapter(proxy_state_ref.clone()),
         )
         .await
         {
@@ -307,7 +416,9 @@ async fn run_gateway(cfg: GatewayConfig) {
                     colored::Colorize::red("error"),
                     e
                 );
-                eprintln!("Use --no-tunnel for local-only mode");
+                eprintln!(
+                    "Remove --tunnel flag or `tunnel = true` from config to use proxy-only mode"
+                );
                 std::process::exit(1);
             }
         }
@@ -332,51 +443,6 @@ async fn run_gateway(cfg: GatewayConfig) {
     let request_timeout =
         Duration::from_secs(cfg.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS));
 
-    // Determine TUI mode
-    let use_tui = match (cfg.runtime.tui, cfg.runtime.no_tui) {
-        (true, _) => true,
-        (_, true) => false,
-        _ => std::io::IsTerminal::is_terminal(&std::io::stdout()),
-    };
-
-    // Build log sinks
-    let mut sinks: Vec<Box<dyn LogSink>> = Vec::new();
-    if use_tui {
-        sinks.push(Box::new(TuiSink::new(tui_state.clone())));
-    } else {
-        sinks.push(Box::new(StderrSink::new(cfg.runtime.log_format)));
-    }
-
-    if cfg.log_file {
-        let rotation = match cfg.log_rotation.as_deref() {
-            Some(s) if s.starts_with("size:") => {
-                let size_str = s.trim_start_matches("size:");
-                let bytes = parse_size(size_str).unwrap_or(50 * 1024 * 1024);
-                Rotation::Size(bytes)
-            }
-            _ => Rotation::Daily,
-        };
-        let dir = cfg.log_dir.unwrap_or_else(|| "./logs".to_string());
-        match FileSink::new(FileSinkConfig {
-            dir: std::path::PathBuf::from(&dir),
-            rotation,
-            max_files: DEFAULT_MAX_FILES,
-            prefix: prefix_from_upstream(&mcp),
-        }) {
-            Ok(sink) => {
-                sinks.push(Box::new(sink));
-            }
-            Err(e) => {
-                eprintln!(
-                    "{}: failed to init file logger: {e}",
-                    colored::Colorize::red("error"),
-                );
-            }
-        }
-    }
-
-    let log_handle = LogRouter::start(sinks);
-
     let upstream = UpstreamClient {
         http_client: reqwest::Client::builder()
             .connect_timeout(connect_timeout)
@@ -391,49 +457,76 @@ async fn run_gateway(cfg: GatewayConfig) {
         request_timeout,
     };
 
-    // Pick event emitter: cloud sync if token is set, otherwise noop.
-    // (TUI owns stdout, so StdoutEmitter can't run here. CloudEmitter uses HTTP.)
-    let events: Arc<dyn EventEmitter> = if let Some(ref token) = cfg.cloud_token {
+    // Build event sinks — one pipeline, multiple destinations.
+    let mut sinks: Vec<Box<dyn mcpr_core::event::EventSink>> = Vec::new();
+
+    // 1. Stderr sink — real-time console output.
+    sinks.push(Box::new(stderr_sink::StderrSink::new(
+        cfg.runtime.log_format,
+    )));
+
+    // 2. SQLite sink — local storage for CLI queries.
+    if let Some(db_path) = mcpr_integrations::store::path::resolve_db_path(None) {
+        match mcpr_integrations::store::Store::open(mcpr_integrations::store::StoreConfig {
+            db_path: db_path.clone(),
+            mcpr_version: env!("CARGO_PKG_VERSION").to_string(),
+        }) {
+            Ok(store) => {
+                eprintln!(
+                    "  {} storage: {}",
+                    colored::Colorize::dimmed("store"),
+                    db_path.display()
+                );
+                sinks.push(Box::new(mcpr_integrations::store::SqliteSink::new(store)));
+            }
+            Err(e) => {
+                eprintln!(
+                    "  {}: failed to open store: {e}",
+                    colored::Colorize::yellow("warn"),
+                );
+            }
+        }
+    }
+
+    // 3. Cloud sink — dashboard at cloud.mcpr.app.
+    if let Some(ref token) = cfg.cloud_token {
         let endpoint = cfg
             .cloud_endpoint
             .clone()
             .unwrap_or_else(|| "https://api.mcpr.app".to_string());
         let cloud_endpoint = format!("{}/api/ingest-events", endpoint.trim_end_matches('/'));
-        tui_state.lock().unwrap().cloud_endpoint = Some(cloud_endpoint.clone());
-        let tui_for_cloud = tui_state.clone();
-        Arc::new(mcpr_integrations::CloudEmitter::new(
-            mcpr_integrations::CloudEmitterConfig {
+        proxy_state::lock_state(&proxy_state_ref).cloud_endpoint = Some(cloud_endpoint.clone());
+        let cloud_state = proxy_state_ref.clone();
+        sinks.push(Box::new(mcpr_integrations::CloudSink::new(
+            mcpr_integrations::CloudSinkConfig {
                 endpoint: cloud_endpoint,
                 token: token.clone(),
                 server: cfg.cloud_server.clone(),
                 batch_size: cfg.cloud_batch_size.unwrap_or(100),
                 flush_interval: Duration::from_millis(cfg.cloud_flush_interval_ms.unwrap_or(5000)),
                 on_flush: Some(std::sync::Arc::new(move |status| {
-                    if let Ok(mut state) = tui_for_cloud.lock() {
-                        state.cloud_sync = Some(match status {
-                            mcpr_integrations::SyncStatus::Ok { count } => {
-                                tui::state::CloudSyncStatus::Ok { count }
-                            }
-                            mcpr_integrations::SyncStatus::Failed { message } => {
-                                tui::state::CloudSyncStatus::Failed { message }
-                            }
-                        });
-                    }
+                    use mcpr_integrations::emitter::cloud_sink::SyncStatus;
+                    let mut state = proxy_state::lock_state(&cloud_state);
+                    state.cloud_sync = Some(match status {
+                        SyncStatus::Ok { count } => proxy_state::CloudSyncStatus::Ok { count },
+                        SyncStatus::Failed { message } => {
+                            proxy_state::CloudSyncStatus::Failed { message }
+                        }
+                    });
                 })),
             },
-        ))
-    } else {
-        Arc::new(mcpr_integrations::NoopEmitter)
-    };
+        )));
+    }
+
+    let event_bus_handle = event_bus::EventBus::start(sinks);
 
     let state = AppState {
         mcp_upstream: mcp.clone(),
         widget_source,
         rewrite_config: Arc::new(RwLock::new(rewrite_config)),
         upstream: upstream.clone(),
-        tui_state: tui_state.clone(),
-        logger: log_handle.router.clone(),
-        events,
+        proxy_state_ref: proxy_state_ref.clone(),
+        event_bus: event_bus_handle.bus.clone(),
         sessions: MemorySessionStore::new(),
         max_request_body: cfg
             .max_request_body_size
@@ -441,18 +534,18 @@ async fn run_gateway(cfg: GatewayConfig) {
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
+        proxy_name,
     };
 
     // Initial connectivity probe — warn early if the MCP URL seems wrong
-    probe_mcp_upstream(&mcp, &upstream.http_client, &tui_state).await;
+    probe_mcp_upstream(&mcp, &upstream.http_client, &proxy_state_ref).await;
 
     let health_state = state.clone();
-    let tui_sessions = state.sessions.clone();
 
     let app = build_app(state);
 
     log_startup(
-        &tui_state,
+        &proxy_state_ref,
         actual_port,
         &public_url,
         &mcp,
@@ -479,10 +572,10 @@ async fn run_gateway(cfg: GatewayConfig) {
 
     // Spawn admin server (health + readiness endpoints)
     if admin_bind != "none" {
-        let admin_tui_state = tui_state.clone();
+        let admin_proxy_state_ref = proxy_state_ref.clone();
         let admin_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            admin::start_admin_server(&admin_bind, admin_tui_state, admin_shutdown).await;
+            admin::start_admin_server(&admin_bind, admin_proxy_state_ref, admin_shutdown).await;
         });
     }
 
@@ -516,45 +609,24 @@ async fn run_gateway(cfg: GatewayConfig) {
         let _ = shutdown_trigger.send(true);
     });
 
-    if use_tui {
-        // Run the TUI on a blocking thread (it reads stdin).
-        let tui_shutdown = shutdown_tx.subscribe();
-        let tui_handle = tokio::task::spawn_blocking(move || {
-            tui::run(tui_state, tui_sessions, tui_shutdown).expect("TUI failed");
-        });
-        tui_handle.await.unwrap();
-        // TUI exited (user pressed q or signal received) — trigger shutdown
-        let _ = shutdown_tx.send(true);
-    } else {
-        if !cfg.runtime.no_tui {
-            eprintln!("[mcpr] No terminal detected — TUI disabled. Running in headless mode.");
-        }
-        // Wait for shutdown signal
-        let _ = shutdown_rx.changed().await;
-    }
+    // Wait for shutdown signal (SIGTERM/SIGINT).
+    // TUI is not started here — it will be available via `mcpr proxy view`.
+    let _ = shutdown_rx.changed().await;
 
     // Graceful drain: wait for in-flight requests
     eprintln!("[mcpr] Waiting up to {drain_timeout}s for in-flight requests...");
     tokio::time::sleep(Duration::from_secs(drain_timeout.min(5))).await;
 
-    // Gracefully flush log sinks
-    log_handle.shutdown().await;
-    eprintln!("[mcpr] Shutdown complete.");
-}
+    // Flush all event sinks (stderr, sqlite, cloud).
+    event_bus_handle.shutdown().await;
 
-/// Parse a human-readable size string like "50MB", "100KB", "1GB" into bytes.
-fn parse_size(s: &str) -> Option<u64> {
-    let s = s.trim();
-    let (num_str, multiplier) = if let Some(n) = s.strip_suffix("GB") {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix("MB") {
-        (n, 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix("KB") {
-        (n, 1024)
-    } else {
-        (s, 1)
-    };
-    num_str.trim().parse::<u64>().ok().map(|n| n * multiplier)
+    // Clean up PID file if we're running as a daemon.
+    #[cfg(unix)]
+    if ready_fd.is_some() {
+        daemon::remove_pid_file();
+    }
+
+    eprintln!("[mcpr] Shutdown complete.");
 }
 
 /// Validate MCP URL format at startup. Exits with an error for clearly invalid URLs,
@@ -613,9 +685,13 @@ fn validate_mcp_url(url: &str) {
 
 /// Probe the MCP upstream at startup by sending an `initialize` JSON-RPC request.
 /// This validates both connectivity and that the endpoint speaks MCP protocol.
-async fn probe_mcp_upstream(url: &str, client: &reqwest::Client, tui_state: &SharedTuiState) {
+async fn probe_mcp_upstream(
+    url: &str,
+    client: &reqwest::Client,
+    proxy_state_ref: &SharedProxyState,
+) {
     let (status, warning) = check_mcp_endpoint(url, client).await;
-    let mut s = tui_state.lock().unwrap();
+    let mut s = proxy_state::lock_state(proxy_state_ref);
     s.mcp_status = status;
     s.mcp_warning = warning;
 }
@@ -625,7 +701,7 @@ async fn probe_mcp_upstream(url: &str, client: &reqwest::Client, tui_state: &Sha
 async fn check_mcp_endpoint(
     url: &str,
     client: &reqwest::Client,
-) -> (tui::ConnectionStatus, Option<String>) {
+) -> (proxy_state::ConnectionStatus, Option<String>) {
     let init_body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 0,
@@ -658,7 +734,10 @@ async fn check_mcp_endpoint(
             } else {
                 "Cannot reach server. Check the URL."
             };
-            return (tui::ConnectionStatus::Disconnected, Some(hint.to_string()));
+            return (
+                proxy_state::ConnectionStatus::Disconnected,
+                Some(hint.to_string()),
+            );
         }
     };
 
@@ -669,7 +748,7 @@ async fn check_mcp_endpoint(
     // initialize will confirm status.
     if status_code == 401 || status_code == 403 {
         return (
-            tui::ConnectionStatus::Connected,
+            proxy_state::ConnectionStatus::Connected,
             Some(
                 "Server requires authentication. Status will update on first client connection."
                     .to_string(),
@@ -682,7 +761,7 @@ async fn check_mcp_endpoint(
         Ok(b) => b,
         Err(_) => {
             return (
-                tui::ConnectionStatus::Connected,
+                proxy_state::ConnectionStatus::Connected,
                 Some("Server reachable but response unreadable".to_string()),
             );
         }
@@ -718,14 +797,17 @@ async fn check_mcp_endpoint(
             } else {
                 "Did not return JSON-RPC. Not an MCP endpoint?"
             };
-            return (tui::ConnectionStatus::NotMcp, Some(hint.to_string()));
+            return (
+                proxy_state::ConnectionStatus::NotMcp,
+                Some(hint.to_string()),
+            );
         }
     };
 
     // Check if it's a JSON-RPC 2.0 response
     if parsed.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
         return (
-            tui::ConnectionStatus::NotMcp,
+            proxy_state::ConnectionStatus::NotMcp,
             Some("Response is JSON but not JSON-RPC 2.0.".to_string()),
         );
     }
@@ -740,12 +822,12 @@ async fn check_mcp_endpoint(
         // Method not found means it's JSON-RPC but doesn't support MCP
         if code == -32601 {
             return (
-                tui::ConnectionStatus::NotMcp,
+                proxy_state::ConnectionStatus::NotMcp,
                 Some("JSON-RPC server but 'initialize' method not found.".to_string()),
             );
         }
         return (
-            tui::ConnectionStatus::Connected,
+            proxy_state::ConnectionStatus::Connected,
             Some(format!("MCP init error: {msg}")),
         );
     }
@@ -754,17 +836,17 @@ async fn check_mcp_endpoint(
     if let Some(result) = parsed.get("result") {
         if result.get("serverInfo").is_some() || result.get("capabilities").is_some() {
             // Valid MCP server
-            return (tui::ConnectionStatus::Connected, None);
+            return (proxy_state::ConnectionStatus::Connected, None);
         }
         // Has a result but no serverInfo — might be MCP-ish but unexpected
         return (
-            tui::ConnectionStatus::Connected,
+            proxy_state::ConnectionStatus::Connected,
             Some("Server responded but missing serverInfo in initialize result.".to_string()),
         );
     }
 
     // Fallback — got JSON-RPC but couldn't classify
-    (tui::ConnectionStatus::Connected, None)
+    (proxy_state::ConnectionStatus::Connected, None)
 }
 
 /// Periodically check MCP upstream and widget source connectivity.
@@ -781,11 +863,11 @@ async fn health_check_loop(app_state: AppState) {
         // Discover widgets (reuses shared logic from widgets.rs)
         let names = widgets::discover_widget_names(&app_state).await;
         let widgets_status = if app_state.widget_source.is_none() {
-            tui::ConnectionStatus::Unknown
+            proxy_state::ConnectionStatus::Unknown
         } else if names.is_empty() {
-            tui::ConnectionStatus::Disconnected
+            proxy_state::ConnectionStatus::Disconnected
         } else {
-            tui::ConnectionStatus::Connected
+            proxy_state::ConnectionStatus::Connected
         };
         let widget_count = if names.is_empty() {
             None
@@ -794,7 +876,7 @@ async fn health_check_loop(app_state: AppState) {
         };
 
         {
-            let mut s = app_state.tui_state.lock().unwrap();
+            let mut s = proxy_state::lock_state(&app_state.proxy_state_ref);
             s.mcp_status = mcp_status;
             s.mcp_warning = mcp_warning;
             s.widgets_status = widgets_status;
@@ -802,23 +884,22 @@ async fn health_check_loop(app_state: AppState) {
             s.widget_names = names;
         }
 
-        // Emit heartbeat event to cloud (carries current proxy status)
+        // Emit heartbeat event via the event bus.
         {
-            let s = app_state.tui_state.lock().unwrap();
-            let heartbeat_meta = serde_json::json!({
-                "mcp_status": s.mcp_status.label(),
-                "tunnel_status": s.tunnel_status.label(),
-                "widgets_status": s.widgets_status.label(),
-                "uptime_secs": s.started_at.elapsed().as_secs(),
-                "request_count": s.request_count,
-            });
-            drop(s);
-
-            app_state.events.emit(
-                mcpr_integrations::McprEvent::new(mcpr_integrations::EventType::Heartbeat)
-                    .status(mcpr_integrations::EventStatus::Ok)
-                    .meta(heartbeat_meta),
-            );
+            let s = proxy_state::lock_state(&app_state.proxy_state_ref);
+            app_state
+                .event_bus
+                .emit(mcpr_core::event::ProxyEvent::Heartbeat(
+                    mcpr_core::event::HeartbeatEvent {
+                        ts: chrono::Utc::now().timestamp_millis(),
+                        proxy: app_state.proxy_name.clone(),
+                        mcp_status: s.mcp_status.label().to_string(),
+                        tunnel_status: s.tunnel_status.label().to_string(),
+                        widgets_status: s.widgets_status.label().to_string(),
+                        uptime_secs: s.started_at.elapsed().as_secs(),
+                        request_count: s.request_count,
+                    },
+                ));
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

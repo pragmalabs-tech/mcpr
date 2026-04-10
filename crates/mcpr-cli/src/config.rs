@@ -15,9 +15,23 @@ pub enum Mode {
 
 /// Result of parsing CLI args — either a subcommand action or the run mode.
 pub enum CliAction {
-    Run(Mode),
+    /// Start the proxy (daemon by default, foreground with --foreground).
+    Start {
+        mode: Mode,
+        foreground: bool,
+    },
+    /// Stop the running daemon via SIGTERM.
+    Stop,
+    /// Stop + start the daemon.
+    Restart(Mode),
+    /// Show daemon status (PID, port, uptime, proxy name).
+    Status,
     Validate(ValidateArgs),
     Version,
+    /// Read-only query against the store — no server needed.
+    Proxy(ProxyCommand),
+    /// Store maintenance commands.
+    Store(StoreCommand),
 }
 
 // ── Log format ──────────────────────────────────────────────────────────
@@ -103,13 +117,9 @@ struct Cli {
     #[arg(long, env = "MCPR_RELAY_URL", global = true)]
     relay_url: Option<String>,
 
-    /// Don't start any tunnel (local-only mode)
+    /// Enable tunnel for public URL (default: off, proxy-only mode)
     #[arg(long, global = true)]
-    no_tunnel: bool,
-
-    /// Emit structured JSON events to stdout
-    #[arg(long, global = true)]
-    events: bool,
+    tunnel: bool,
 
     /// Cloud sync token (from cloud.mcpr.app project settings)
     #[arg(long, env = "MCPR_CLOUD_TOKEN", global = true)]
@@ -142,12 +152,199 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start proxy in foreground (default if no subcommand given)
-    Run,
+    /// Start the proxy (daemon by default, --foreground for attached mode)
+    Start(StartArgs),
+    /// Stop the running daemon
+    Stop,
+    /// Restart the daemon (stop + start)
+    Restart,
+    /// Show daemon status (PID, port, uptime, proxy name)
+    Status,
     /// Validate config file and exit
     Validate(ValidateArgs),
     /// Print version information and exit
     Version,
+    /// Query proxy observability data (logs, slow calls, stats, sessions, clients)
+    Proxy(ProxyArgs),
+    /// Storage maintenance (stats, vacuum)
+    Store(StoreArgs),
+}
+
+/// Arguments for `mcpr start`.
+#[derive(Parser, Clone)]
+pub struct StartArgs {
+    /// Run in foreground instead of daemonizing (for Docker, systemd, debugging)
+    #[arg(long)]
+    pub foreground: bool,
+}
+
+// ── Proxy query subcommands ────────────────────────────────────────────
+
+#[derive(Parser)]
+pub struct ProxyArgs {
+    #[command(subcommand)]
+    pub command: ProxyCommand,
+}
+
+/// Observability commands — read-only queries against the SQLite store.
+/// These work without a running proxy (they open the DB file directly).
+#[derive(Subcommand, Clone)]
+pub enum ProxyCommand {
+    /// Show recent request logs
+    Logs(ProxyLogsArgs),
+    /// Show slowest requests above a latency threshold
+    Slow(ProxySlowArgs),
+    /// Show per-tool aggregated metrics
+    Stats(ProxyStatsArgs),
+    /// List MCP sessions with client info
+    Sessions(ProxySessionsArgs),
+    /// Show client (AI model) breakdown
+    Clients(ProxyClientsArgs),
+}
+
+/// Arguments for `mcpr proxy logs [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxyLogsArgs {
+    /// Proxy name to query. Optional when only one proxy is running —
+    /// auto-detected from the running daemon's config.
+    pub name: Option<String>,
+
+    /// Number of recent rows to show
+    #[arg(long, default_value = "50")]
+    pub tail: i64,
+
+    /// Time window: only rows newer than this duration (e.g., 1h, 30m, 7d)
+    #[arg(long, default_value = "1h")]
+    pub since: String,
+
+    /// Filter to a specific tool name
+    #[arg(long)]
+    pub tool: Option<String>,
+
+    /// Filter by status: ok, error, timeout
+    #[arg(long)]
+    pub status: Option<String>,
+
+    /// Output as newline-delimited JSON (one object per line)
+    #[arg(long)]
+    pub json: bool,
+
+    /// Poll for new rows every 500ms (like tail -f)
+    #[arg(short, long)]
+    pub follow: bool,
+}
+
+/// Arguments for `mcpr proxy slow [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxySlowArgs {
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
+
+    /// Minimum latency to include (e.g., 500ms, 1s, 2s). Default: 500ms
+    #[arg(long, default_value = "500ms")]
+    pub threshold: String,
+
+    /// Time window (e.g., 1h, 24h)
+    #[arg(long, default_value = "1h")]
+    pub since: String,
+
+    /// Maximum rows to return
+    #[arg(long, default_value = "20")]
+    pub limit: i64,
+
+    /// Output as newline-delimited JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `mcpr proxy stats [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxyStatsArgs {
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
+
+    /// Aggregation window (e.g., 1h, 24h)
+    #[arg(long, default_value = "1h")]
+    pub since: String,
+
+    /// Output as JSON snapshot (no table)
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `mcpr proxy sessions [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxySessionsArgs {
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
+
+    /// Only show active sessions (seen in last 5 minutes)
+    #[arg(long)]
+    pub active: bool,
+
+    /// Filter by client name (e.g., claude-desktop)
+    #[arg(long)]
+    pub client: Option<String>,
+
+    /// Time window for session start (e.g., 1h, 24h)
+    #[arg(long, default_value = "1h")]
+    pub since: String,
+
+    /// Maximum rows to return
+    #[arg(long, default_value = "50")]
+    pub limit: i64,
+
+    /// Output as newline-delimited JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `mcpr proxy clients [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxyClientsArgs {
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
+
+    /// Lookback window (default longer: clients change slowly)
+    #[arg(long, default_value = "7d")]
+    pub since: String,
+
+    /// Output as newline-delimited JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+// ── Store subcommands ──────────────────────────────────────────────────
+
+#[derive(Parser)]
+pub struct StoreArgs {
+    #[command(subcommand)]
+    pub command: StoreCommand,
+}
+
+/// Storage maintenance commands.
+#[derive(Subcommand, Clone)]
+pub enum StoreCommand {
+    /// Show database size, row counts, and age of records
+    Stats,
+    /// Delete old records and reclaim disk space
+    Vacuum(StoreVacuumArgs),
+}
+
+/// Arguments for `mcpr store vacuum`.
+#[derive(Parser, Clone)]
+pub struct StoreVacuumArgs {
+    /// Delete records older than this duration or date (e.g., 7d, 30d)
+    #[arg(long)]
+    pub before: String,
+
+    /// Only vacuum records for one proxy
+    #[arg(long)]
+    pub proxy: Option<String>,
+
+    /// Show what would be deleted without actually deleting
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for the `validate` subcommand.
@@ -163,8 +360,6 @@ pub struct ValidateArgs {
 
 /// Runtime options extracted from CLI args (used by main.rs).
 pub struct RuntimeOptions {
-    pub tui: bool,
-    pub no_tui: bool,
     pub drain_timeout: u64,
     pub log_format: LogFormat,
     pub admin_bind: String,
@@ -201,6 +396,8 @@ struct FileRelayConfig {
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct FileTunnelConfig {
+    /// Enable tunnel for a public URL. Default: false (proxy-only mode).
+    enabled: bool,
     relay_url: Option<String>,
     token: Option<String>,
     subdomain: Option<String>,
@@ -208,12 +405,6 @@ struct FileTunnelConfig {
 }
 
 /// `[events]` table in config file
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct FileEventsConfig {
-    enabled: bool,
-}
-
 /// `[cloud]` table in config file
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -248,7 +439,6 @@ struct FileConfig {
     // -- Gateway --
     mcp: Option<String>,
     widgets: Option<String>,
-    no_tunnel: bool,
     csp: FileCspConfig,
 
     // -- Relay --
@@ -256,9 +446,6 @@ struct FileConfig {
 
     // -- Tunnel client --
     tunnel: FileTunnelConfig,
-
-    // -- Events --
-    events: FileEventsConfig,
 
     // -- Cloud sync --
     cloud: FileCloudConfig,
@@ -363,7 +550,8 @@ pub struct GatewayConfig {
     pub tunnel_token: Option<String>,
     pub tunnel_subdomain: Option<String>,
     pub tunnel_anonymous: bool,
-    pub no_tunnel: bool,
+    /// Whether tunnel is enabled. Default: false (proxy-only mode).
+    pub tunnel: bool,
     pub config_path: Option<std::path::PathBuf>,
     pub max_request_body_size: Option<usize>,
     pub max_response_body_size: Option<usize>,
@@ -373,7 +561,6 @@ pub struct GatewayConfig {
     pub log_file: bool,
     pub log_dir: Option<String>,
     pub log_rotation: Option<String>,
-    pub events: bool,
     pub cloud_token: Option<String>,
     pub cloud_server: Option<String>,
     pub cloud_endpoint: Option<String>,
@@ -568,17 +755,23 @@ pub fn load() -> CliAction {
     match cli.command {
         Some(Commands::Validate(args)) => return CliAction::Validate(args),
         Some(Commands::Version) => return CliAction::Version,
-        Some(Commands::Run) | None => {
-            // Continue to load config and determine run mode
+        Some(Commands::Proxy(args)) => return CliAction::Proxy(args.command),
+        Some(Commands::Store(args)) => return CliAction::Store(args.command),
+        Some(Commands::Stop) => return CliAction::Stop,
+        Some(Commands::Status) => return CliAction::Status,
+        Some(Commands::Start(_)) | None | Some(Commands::Restart) => {
+            // Continue to load config and determine run mode.
         }
     }
 
+    // Extract flags from the start command.
+    let foreground = matches!(&cli.command, Some(Commands::Start(args)) if args.foreground);
+    let is_restart = matches!(cli.command, Some(Commands::Restart));
+
     let (file, config_path) = FileConfig::load();
 
-    // Merge TUI/runtime settings: CLI flags override file config
+    // Merge runtime settings: CLI flags override file config
     let runtime = RuntimeOptions {
-        tui: cli.tui,
-        no_tui: cli.no_tui || file.no_tui,
         drain_timeout: if cli.drain_timeout != 30 {
             cli.drain_timeout
         } else {
@@ -607,7 +800,11 @@ pub fn load() -> CliAction {
         load_gateway(cli, file, config_path, runtime)
     };
 
-    CliAction::Run(mode)
+    if is_restart {
+        CliAction::Restart(mode)
+    } else {
+        CliAction::Start { mode, foreground }
+    }
 }
 
 /// Validate a config file and return a list of (severity, message) tuples.
@@ -868,7 +1065,7 @@ fn load_gateway(
         tunnel_token,
         tunnel_subdomain,
         tunnel_anonymous,
-        no_tunnel: cli.no_tunnel || file.no_tunnel,
+        tunnel: cli.tunnel || file.tunnel.enabled,
         config_path,
         max_request_body_size: file.max_request_body_size,
         max_response_body_size: file.max_response_body_size,
@@ -878,7 +1075,6 @@ fn load_gateway(
         log_file: file.logging.file,
         log_dir: file.logging.dir,
         log_rotation: file.logging.rotation,
-        events: cli.events || file.events.enabled,
         cloud_token: cli.cloud_token.or(file.cloud.token),
         cloud_server: cli.cloud_server.or(file.cloud.server),
         cloud_endpoint: file.cloud.endpoint,

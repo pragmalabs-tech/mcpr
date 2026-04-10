@@ -231,8 +231,8 @@ app.listen(PORT, () => {
   console.log(`Weather MCP server running on http://localhost:${PORT}`);
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   console.log("");
-  console.log("Next: run mcpr to proxy it:");
-  console.log(`  mcpr --mcp http://localhost:${PORT}/mcp`);
+  console.log("Next: start mcpr to proxy it:");
+  console.log(`  mcpr start --mcp http://localhost:${PORT}/mcp`);
 });
 
 // Graceful shutdown — close all active transports

@@ -12,9 +12,9 @@ npm install
 npm start
 # → MCP server running on http://localhost:9000
 
-# 3. In another terminal, run mcpr
-mcpr --mcp http://localhost:9001/mcp --events
-# → https://abc123.tunnel.mcpr.app
+# 3. In another terminal, start mcpr
+mcpr start --mcp http://localhost:9001/mcp
+# → mcpr daemon started (PID: ..., port: ...)
 ```
 
 Paste the tunnel URL into ChatGPT or Claude as an MCP server. Ask it to "get the weather in Tokyo".
@@ -66,6 +66,6 @@ Use `npm run dev` for auto-reload on server changes. The widget is plain HTML �
 # Terminal 1: MCP server with auto-reload
 npm run dev
 
-# Terminal 2: mcpr in local mode (no tunnel)
-mcpr --mcp http://localhost:9001/mcp --events
+# Terminal 2: mcpr in foreground for dev
+mcpr start --foreground --mcp http://localhost:9001/mcp
 ```

@@ -20,8 +20,6 @@ serde_json = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }
 colored = "3"
 chrono = { workspace = true }
-ratatui = "0.29"
-crossterm = "0.28"
 tokio-tungstenite = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
@@ -31,11 +29,19 @@ http-body-util = "0.1"
 toml = "0.8"
 dashmap = { workspace = true }
 url = { workspace = true }
+mcpr-core = { workspace = true }
 mcpr-protocol = { workspace = true }
 
 mcpr-tunnel = { workspace = true }
 mcpr-integrations = { workspace = true }
 mcpr-proxy = { workspace = true }
+
+# Platform-specific default paths for PID file and daemon log.
+dirs = "6"
+
+# UNIX process management: fork, setsid, signal (for daemon mode).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["signal", "process", "fs"] }
 
 [dev-dependencies]
 tempfile = "3"

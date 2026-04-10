@@ -25,6 +25,10 @@
 //!   Supports both OpenAI and Claude widget metadata formats, with `Extend` and
 //!   `Override` CSP modes.
 //!
+//! - **Proxy state** (`state`): Shared runtime state tracking MCP upstream
+//!   health, tunnel status, widget discovery, cloud sync, and request counters.
+//!   Used by the admin API, health checks, and future `mcpr proxy view` TUI.
+//!
 //! ## Module Structure
 //!
 //! ```text
@@ -35,17 +39,16 @@
 //! +-- sse.rs          # SSE extract/wrap helpers, split_upstream()
 //! +-- csp.rs          # CspMode enum, parse_csp_mode()
 //! +-- rewrite.rs      # RewriteConfig, rewrite_response() for widget metadata
+//! +-- state.rs        # ProxyState, ConnectionStatus, SharedProxyState
 //! ```
-//!
-//! ## Dependencies
-//!
-//! `mcpr-protocol` (for JSON-RPC types), `axum`, `reqwest`, `tokio`, `futures-util`.
 
 pub mod csp;
 pub mod forwarding;
 pub mod rewrite;
 pub mod router;
 pub mod sse;
+pub mod state;
 
 pub use csp::{CspMode, parse_csp_mode};
 pub use rewrite::{RewriteConfig, rewrite_response};
+pub use state::{ConnectionStatus, ProxyState, SharedProxyState, lock_state, new_shared_state};

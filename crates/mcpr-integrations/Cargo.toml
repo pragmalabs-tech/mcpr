@@ -7,12 +7,26 @@ repository.workspace = true
 description = "External integrations for mcpr: event emitters, metrics, feature flags, and analytics"
 
 [dependencies]
+mcpr-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+uuid = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
+
+# SQLite with bundled feature — compiles SQLite from C source into the binary.
+# Zero system dependencies: no libsqlite3 required on the host.
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+# Platform-specific default paths (XDG on Linux, ~/Library on macOS, %APPDATA% on Windows).
+dirs = "6"
+
+# Structured logging for the background storage writer.
+tracing = "0.1"
 
 [dev-dependencies]
 wiremock = "0.6"
 tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"
+toml = "0.8"

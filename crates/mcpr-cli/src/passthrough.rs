@@ -7,16 +7,12 @@ use axum::{
 };
 
 use crate::AppState;
-use crate::logger::LogEntry;
 use crate::proxy::forward_request;
+use mcpr_core::event::{ProxyEvent, RequestEvent};
 use mcpr_proxy::forwarding::{build_response, read_body_capped};
 use mcpr_proxy::sse::split_upstream;
 
 /// Serve the OAuth callback relay page.
-///
-/// When the MCP server's OAuth flow redirects back to this proxy with an
-/// authorization code, this page forwards the code/state to the cloud Studio's
-/// own `/studio/oauth/callback` endpoint, which handles the token exchange.
 pub async fn serve_oauth_callback_relay() -> Response {
     let html = r#"<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Authorization</title></head>
@@ -84,45 +80,62 @@ pub async fn forward_and_passthrough(
                 .map(|ct| ct.contains("json"))
                 .unwrap_or(false);
 
-            if is_json {
+            let (response_body, note) = if is_json {
                 let config = state.rewrite_config.read().await;
                 let (upstream_base, _) = split_upstream(&config.mcp_upstream);
                 let body_str = String::from_utf8_lossy(&bytes);
-                let rewritten = body_str.replace(
-                    upstream_base.trim_end_matches('/'),
-                    config.proxy_url.trim_end_matches('/'),
-                );
-                drop(config);
-                let rewritten_bytes = rewritten.into_bytes();
-                state.logger.emit(
-                    LogEntry::new(method.as_str(), log_path, status, "rewritten")
-                        .upstream(url)
-                        .req_size(body.len())
-                        .size(rewritten_bytes.len())
-                        .upstream_duration(upstream_ms)
-                        .duration(start),
-                );
-                build_response(status, &resp_headers, Body::from(rewritten_bytes))
+                let rewritten = body_str
+                    .replace(
+                        upstream_base.trim_end_matches('/'),
+                        config.proxy_url.trim_end_matches('/'),
+                    )
+                    .into_bytes();
+                (rewritten, "rewritten")
             } else {
-                state.logger.emit(
-                    LogEntry::new(method.as_str(), log_path, status, "passthrough")
-                        .upstream(url)
-                        .req_size(body.len())
-                        .size(bytes.len())
-                        .upstream_duration(upstream_ms)
-                        .duration(start),
-                );
-                build_response(status, &resp_headers, Body::from(bytes))
-            }
+                (bytes.to_vec(), "passthrough")
+            };
+
+            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: chrono::Utc::now().timestamp_millis(),
+                proxy: state.proxy_name.clone(),
+                session_id: None,
+                method: method.to_string(),
+                path: log_path.to_string(),
+                mcp_method: None,
+                tool: None,
+                status,
+                latency_ms: start.elapsed().as_millis() as u64,
+                upstream_ms: Some(upstream_ms),
+                request_size: Some(body.len() as u64),
+                response_size: Some(response_body.len() as u64),
+                error_code: None,
+                error_msg: None,
+                note: note.to_string(),
+            }));
+
+            build_response(status, &resp_headers, Body::from(response_body))
         }
         Err(e) => {
             let upstream_ms = upstream_start.elapsed().as_millis() as u64;
-            state.logger.emit(
-                LogEntry::new(method.as_str(), log_path, 502, "upstream error")
-                    .upstream(url)
-                    .upstream_duration(upstream_ms)
-                    .duration(start),
-            );
+            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: chrono::Utc::now().timestamp_millis(),
+                proxy: state.proxy_name.clone(),
+                session_id: None,
+                method: method.to_string(),
+                path: log_path.to_string(),
+                mcp_method: None,
+                tool: None,
+                status: 502,
+                latency_ms: start.elapsed().as_millis() as u64,
+                upstream_ms: Some(upstream_ms),
+                request_size: Some(body.len() as u64),
+                response_size: None,
+                error_code: None,
+                error_msg: Some(format!("{e}").chars().take(512).collect()),
+                note: "upstream error".to_string(),
+            }));
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }
     }

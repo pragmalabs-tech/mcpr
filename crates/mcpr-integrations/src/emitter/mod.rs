@@ -1,9 +1,3 @@
-pub mod cloud;
-pub mod event;
-pub mod stdout;
-pub mod traits;
+pub mod cloud_sink;
 
-pub use cloud::{CloudEmitter, CloudEmitterConfig, SyncCallback, SyncStatus};
-pub use event::{EventStatus, EventType, McprEvent};
-pub use stdout::StdoutEmitter;
-pub use traits::{EventEmitter, NoopEmitter};
+pub use cloud_sink::{CloudSink, CloudSinkConfig, SyncCallback, SyncStatus};

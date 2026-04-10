@@ -166,10 +166,10 @@ The relay itself has no database -- it delegates all auth decisions to your prov
 
 ```bash
 # With mcpr.toml in current directory:
-mcpr --relay
+mcpr start --foreground --relay
 
 # Or with CLI flags (no config file needed):
-mcpr --relay --port 8080 --relay-domain tunnel.yourdomain.com
+mcpr start --foreground --relay --port 8080 --relay-domain tunnel.yourdomain.com
 ```
 
 ### With Docker
@@ -233,7 +233,7 @@ curl -s https://tunnel.yourdomain.com/_tunnel/register
 # Expected: "missing token" (400) -- means relay is running
 
 # Full test: start mcpr client
-mcpr --mcp http://localhost:9000 --relay-url https://tunnel.yourdomain.com
+mcpr start --mcp http://localhost:9000 --relay-url https://tunnel.yourdomain.com
 ```
 
 ## Troubleshooting

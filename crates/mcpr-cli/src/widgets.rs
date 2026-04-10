@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::AppState;
-use crate::logger::LogEntry;
 
 // ── Types ───────────────────────────────────────────────
 
@@ -43,17 +42,9 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
                     let status_code =
                         StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY);
                     let bytes = resp.bytes().await.unwrap_or_default();
-                    state.logger.emit(
-                        LogEntry::new("GET", path, status, "widget")
-                            .upstream(&url)
-                            .size(bytes.len()),
-                    );
                     (status_code, headers, bytes).into_response()
                 }
                 Err(e) => {
-                    state
-                        .logger
-                        .emit(LogEntry::new("GET", path, 502, "widget error").upstream(&url));
                     (StatusCode::BAD_GATEWAY, format!("Widget proxy error: {e}")).into_response()
                 }
             }
@@ -62,31 +53,16 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
             let file_path = PathBuf::from(dir).join(path.trim_start_matches('/'));
             match tokio::fs::read(&file_path).await {
                 Ok(bytes) => {
-                    state.logger.emit(
-                        LogEntry::new("GET", path, 200, "widget")
-                            .upstream(file_path.to_str().unwrap_or(path))
-                            .size(bytes.len()),
-                    );
                     let mime = mime_from_path(&file_path);
                     let mut headers = HeaderMap::new();
                     headers.insert(header::CONTENT_TYPE, mime.parse().unwrap());
                     headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
                     (StatusCode::OK, headers, bytes).into_response()
                 }
-                Err(_) => {
-                    state
-                        .logger
-                        .emit(LogEntry::new("GET", path, 404, "not found"));
-                    StatusCode::NOT_FOUND.into_response()
-                }
+                Err(_) => StatusCode::NOT_FOUND.into_response(),
             }
         }
-        None => {
-            state
-                .logger
-                .emit(LogEntry::new("GET", path, 404, "no widget source"));
-            StatusCode::NOT_FOUND.into_response()
-        }
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -131,18 +107,9 @@ pub async fn fetch_widget_html(state: &AppState, widget_name: &str) -> Option<St
 /// Serve raw widget HTML at `/widgets/{name}.html`.
 pub async fn serve_widget_html(state: &AppState, name: &str) -> Response {
     let Some(html) = fetch_widget_html(state, name).await else {
-        state.logger.emit(LogEntry::new(
-            "GET",
-            &format!("/widgets/{name}.html"),
-            404,
-            "not found",
-        ));
         return (StatusCode::NOT_FOUND, format!("Widget '{name}' not found")).into_response();
     };
 
-    state.logger.emit(
-        LogEntry::new("GET", &format!("/widgets/{name}.html"), 200, "widget raw").size(html.len()),
-    );
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -165,12 +132,6 @@ pub async fn list_widgets(state: &AppState) -> Response {
             })
         }).collect::<Vec<_>>(),
     });
-    state.logger.emit(LogEntry::new(
-        "GET",
-        "/widgets",
-        200,
-        &format!("{} widgets", names.len()),
-    ));
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
     (
