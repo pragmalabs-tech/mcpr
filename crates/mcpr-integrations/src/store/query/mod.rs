@@ -9,6 +9,7 @@
 
 pub mod clients;
 pub mod logs;
+pub mod session_detail;
 pub mod sessions;
 pub mod slow;
 pub mod stats;
