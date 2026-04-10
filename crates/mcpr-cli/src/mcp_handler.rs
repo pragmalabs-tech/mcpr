@@ -8,11 +8,9 @@ use axum::{
 use serde_json::Value;
 
 use crate::AppState;
-use crate::logger::LogEntry;
 use crate::proxy::forward_request;
 use crate::widgets::fetch_widget_html;
-use mcpr_integrations::store::{RequestEvent, RequestStatus, SessionEvent, StoreEvent};
-use mcpr_integrations::{EventStatus, EventType, McprEvent};
+use mcpr_core::event::{ProxyEvent, RequestEvent, SessionStartEvent};
 use mcpr_protocol::session::{self as session, SessionState, SessionStore};
 use mcpr_protocol::{self as jsonrpc, McpMethod};
 use mcpr_proxy::forwarding::{build_response, read_body_capped};
@@ -20,9 +18,6 @@ use mcpr_proxy::rewrite_response;
 use mcpr_proxy::sse::{extract_json_from_sse, wrap_as_sse};
 
 /// Normalize a client name to a platform identifier.
-///
-/// Maps known MCP client names to their platform category. Used when
-/// recording sessions in the store for aggregation by `mcpr proxy clients`.
 fn normalize_platform(client_name: &str) -> &'static str {
     let lower = client_name.to_lowercase();
     if lower.contains("claude") {
@@ -40,18 +35,50 @@ fn normalize_platform(client_name: &str) -> &'static str {
     }
 }
 
-/// Map an MCP method to the corresponding event type.
-fn event_type_for(method: &McpMethod) -> EventType {
-    match method {
-        McpMethod::ToolsCall => EventType::ToolCall,
-        McpMethod::ToolsList => EventType::ToolList,
-        McpMethod::Initialize => EventType::SessionStart,
-        _ => EventType::Request,
-    }
+/// Build a `ProxyEvent::Request` from the request/response data.
+#[allow(clippy::too_many_arguments)]
+fn make_request_event(
+    proxy: &str,
+    path: &str,
+    method_str: &str,
+    mcp_method: &McpMethod,
+    call_detail: &Option<String>,
+    session_id: Option<&str>,
+    status: u16,
+    start: Instant,
+    upstream_ms: Option<u64>,
+    request_size: usize,
+    response_size: Option<usize>,
+    rpc_error: Option<&(i64, String)>,
+    note: &str,
+) -> ProxyEvent {
+    let tool = if *mcp_method == McpMethod::ToolsCall {
+        call_detail.clone()
+    } else {
+        None
+    };
+
+    ProxyEvent::Request(RequestEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts: chrono::Utc::now().timestamp_millis(),
+        proxy: proxy.to_string(),
+        session_id: session_id.map(String::from),
+        method: "POST".to_string(),
+        path: path.to_string(),
+        mcp_method: Some(method_str.to_string()),
+        tool,
+        status,
+        latency_ms: start.elapsed().as_millis() as u64,
+        upstream_ms,
+        request_size: Some(request_size as u64),
+        response_size: response_size.map(|s| s as u64),
+        error_code: rpc_error.map(|(code, _)| code.to_string()),
+        error_msg: rpc_error.map(|(_, msg)| msg.chars().take(512).collect()),
+        note: note.to_string(),
+    })
 }
 
 /// Handle MCP JSON-RPC POST — intercept resources/read, forward, rewrite response.
-/// The body has already been validated as JSON-RPC 2.0 by `classify`.
 pub async fn handle_mcp_post(
     state: &AppState,
     path: &str,
@@ -81,11 +108,6 @@ pub async fn handle_mcp_post(
         state.sessions.touch(sid).await;
         if mcp_method == McpMethod::Initialized {
             state.sessions.update_state(sid, SessionState::Active).await;
-            state.logger.emit(
-                LogEntry::new("POST", path, 0, "session:active")
-                    .session_id(sid)
-                    .mcp_method(method_str),
-            );
         }
     }
 
@@ -107,62 +129,23 @@ pub async fn handle_mcp_post(
         Ok(r) => r,
         Err(e) => {
             let upstream_ms = upstream_start.elapsed().as_millis() as u64;
-            state.logger.emit(
-                LogEntry::new("POST", path, 502, "upstream error")
-                    .mcp_method(method_str)
-                    .maybe_detail(call_detail.as_deref())
-                    .maybe_session_id(req_session_id.as_deref())
-                    .upstream(&upstream_url)
-                    .req_size(body.len())
-                    .upstream_duration(upstream_ms)
-                    .duration(start),
-            );
-            let mut evt = McprEvent::new(event_type_for(&mcp_method))
-                .method(method_str)
-                .upstream(&upstream_url)
-                .latency(start.elapsed().as_millis() as u64)
-                .upstream_ms(upstream_ms)
-                .status(EventStatus::Error)
-                .request_size(raw_body_len as u64)
-                .error_detail(format!("{e}"));
-            if let Some(ref sid) = req_session_id {
-                evt = evt.session(sid);
-                if let Some(info) = state.sessions.get(sid).await.and_then(|s| s.client_info) {
-                    evt = evt.client_name(&info.name);
-                    if let Some(ref v) = info.version {
-                        evt = evt.client_version(v);
-                    }
-                }
-            }
-            if let Some(ref d) = call_detail
-                && mcp_method == McpMethod::ToolsCall
-            {
-                evt = evt.tool(d);
-            }
-            state.events.emit(evt);
 
-            // Record failed request in store.
-            if let Some(ref store) = state.store {
-                let tool = if mcp_method == McpMethod::ToolsCall {
-                    call_detail.clone()
-                } else {
-                    None
-                };
-                store.record(StoreEvent::Request(RequestEvent {
-                    request_id: uuid::Uuid::new_v4().to_string(),
-                    ts: chrono::Utc::now().timestamp_millis(),
-                    proxy: state.proxy_name.clone(),
-                    session_id: req_session_id.clone(),
-                    method: method_str.to_string(),
-                    tool,
-                    latency_ms: start.elapsed().as_millis() as i64,
-                    status: RequestStatus::Error,
-                    error_code: None,
-                    error_msg: Some(format!("{e}").chars().take(512).collect()),
-                    bytes_in: Some(raw_body_len as i64),
-                    bytes_out: None,
-                }));
-            }
+            // Single emit — all sinks (stderr, sqlite, cloud) receive this.
+            state.event_bus.emit(make_request_event(
+                &state.proxy_name,
+                path,
+                method_str,
+                &mcp_method,
+                &call_detail,
+                req_session_id.as_deref(),
+                502,
+                start,
+                Some(upstream_ms),
+                raw_body_len,
+                None,
+                None,
+                "upstream error",
+            ));
 
             return (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response();
         }
@@ -171,16 +154,17 @@ pub async fn handle_mcp_post(
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
 
-    // Track session from upstream response — for initialize, the session ID is in the response
+    // Track session from upstream response
     let resp_session_id = resp_headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    // On successful initialize, confirm MCP connectivity.
+
     if mcp_method == McpMethod::Initialize && status < 400 {
         mcpr_proxy::lock_state(&state.proxy_state_ref).confirm_mcp_connected();
     }
 
+    // On successful initialize, emit SessionStart event
     if mcp_method == McpMethod::Initialize
         && status < 400
         && let Some(ref sid) = resp_session_id
@@ -190,43 +174,27 @@ pub async fn handle_mcp_post(
             .sessions
             .update_state(sid, SessionState::Initialized)
             .await;
-        let mut session_log = LogEntry::new("POST", path, 0, "session:created")
-            .session_id(sid)
-            .mcp_method(method_str);
-        if let Some(info) = client_info {
-            let label = match &info.version {
-                Some(v) => format!("{} {v}", info.name),
-                None => info.name.clone(),
-            };
-            session_log = session_log.client_name(&label);
 
-            // Record session in the store (before consuming client_info).
-            if let Some(ref store) = state.store {
-                store.record(StoreEvent::Session(SessionEvent {
-                    session_id: sid.clone(),
-                    proxy: state.proxy_name.clone(),
-                    started_at: chrono::Utc::now().timestamp_millis(),
-                    client_name: Some(info.name.clone()),
-                    client_version: info.version.clone(),
-                    client_platform: Some(normalize_platform(&info.name).to_string()),
-                }));
-            }
-
+        let (client_name, client_version, client_platform) = if let Some(info) = client_info {
+            let platform = normalize_platform(&info.name).to_string();
+            let name = info.name.clone();
+            let version = info.version.clone();
             state.sessions.set_client_info(sid, info).await;
-        } else if let Some(ref store) = state.store {
-            // No client info — still record the session.
-            store.record(StoreEvent::Session(SessionEvent {
-                session_id: sid.clone(),
-                proxy: state.proxy_name.clone(),
-                started_at: chrono::Utc::now().timestamp_millis(),
-                client_name: None,
-                client_version: None,
-                client_platform: None,
-            }));
-        }
-        state.logger.emit(session_log);
+            (Some(name), version, Some(platform))
+        } else {
+            (None, None, None)
+        };
+
+        state.event_bus.emit(ProxyEvent::SessionStart(SessionStartEvent {
+            session_id: sid.clone(),
+            proxy: state.proxy_name.clone(),
+            ts: chrono::Utc::now().timestamp_millis(),
+            client_name,
+            client_version,
+            client_platform,
+        }));
     }
-    // Use response session ID (for initialize) or request session ID (for everything else)
+
     let log_session_id = resp_session_id.or(req_session_id);
 
     // Collect full body for rewriting (POST SSE is finite), capped to prevent OOM
@@ -244,7 +212,6 @@ pub async fn handle_mcp_post(
     };
 
     if let Ok(mut json_body) = serde_json::from_slice::<Value>(&json_bytes) {
-        // Check for JSON-RPC error in response body (extract before mutable rewrite)
         let rpc_error =
             jsonrpc::extract_error_code(&json_body).map(|(code, msg)| (code, msg.to_string()));
 
@@ -256,121 +223,42 @@ pub async fn handle_mcp_post(
             rewritten
         };
         let note = if is_sse { "rewritten+sse" } else { "rewritten" };
-        let mut entry = LogEntry::new("POST", path, status, note)
-            .mcp_method(method_str)
-            .maybe_detail(call_detail.as_deref())
-            .maybe_session_id(log_session_id.as_deref())
-            .upstream(&upstream_url)
-            .req_size(raw_body_len)
-            .size(body.len())
-            .upstream_duration(upstream_ms)
-            .duration(start);
-        if let Some((code, ref msg)) = rpc_error {
-            entry = entry.jsonrpc_error(code, msg);
-        }
-        state.logger.emit(entry);
 
-        // Emit structured event
-        let evt_status = if rpc_error.is_some() {
-            EventStatus::Error
-        } else {
-            EventStatus::Ok
-        };
-        let mut evt = McprEvent::new(event_type_for(&mcp_method))
-            .method(method_str)
-            .upstream(&upstream_url)
-            .latency(start.elapsed().as_millis() as u64)
-            .upstream_ms(upstream_ms)
-            .status(evt_status)
-            .request_size(raw_body_len as u64)
-            .response_size(body.len() as u64);
-        if let Some((_, ref msg)) = rpc_error {
-            evt = evt.error_detail(msg);
-        }
-        if let Some(ref sid) = log_session_id {
-            evt = evt.session(sid);
-            if let Some(info) = state.sessions.get(sid).await.and_then(|s| s.client_info) {
-                evt = evt.client_name(&info.name);
-                if let Some(ref v) = info.version {
-                    evt = evt.client_version(v);
-                }
-            }
-        }
-        if let Some(ref d) = call_detail
-            && mcp_method == McpMethod::ToolsCall
-        {
-            evt = evt.tool(d);
-        }
-        state.events.emit(evt);
-
-        // Record request in store.
-        if let Some(ref store) = state.store {
-            let store_status = if rpc_error.is_some() {
-                RequestStatus::Error
-            } else {
-                RequestStatus::Ok
-            };
-            let tool = if mcp_method == McpMethod::ToolsCall {
-                call_detail.clone()
-            } else {
-                None
-            };
-            store.record(StoreEvent::Request(RequestEvent {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                session_id: log_session_id.clone(),
-                method: method_str.to_string(),
-                tool,
-                latency_ms: start.elapsed().as_millis() as i64,
-                status: store_status,
-                error_code: rpc_error.as_ref().map(|(code, _)| code.to_string()),
-                error_msg: rpc_error.map(|(_, msg)| msg.chars().take(512).collect()),
-                bytes_in: Some(raw_body_len as i64),
-                bytes_out: Some(body.len() as i64),
-            }));
-        }
+        // Single emit — replaces logger.emit + events.emit + store.record
+        state.event_bus.emit(make_request_event(
+            &state.proxy_name,
+            path,
+            method_str,
+            &mcp_method,
+            &call_detail,
+            log_session_id.as_deref(),
+            status,
+            start,
+            Some(upstream_ms),
+            raw_body_len,
+            Some(body.len()),
+            rpc_error.as_ref(),
+            note,
+        ));
 
         build_response(status, &resp_headers, Body::from(body))
     } else {
-        state.logger.emit(
-            LogEntry::new("POST", path, status, "passthrough")
-                .mcp_method(method_str)
-                .maybe_detail(call_detail.as_deref())
-                .maybe_session_id(log_session_id.as_deref())
-                .upstream(&upstream_url)
-                .req_size(raw_body_len)
-                .size(resp_bytes.len())
-                .upstream_duration(upstream_ms)
-                .duration(start),
-        );
-        state.events.emit(
-            McprEvent::new(EventType::Request)
-                .method(method_str)
-                .upstream(&upstream_url)
-                .latency(start.elapsed().as_millis() as u64)
-                .upstream_ms(upstream_ms)
-                .request_size(raw_body_len as u64)
-                .response_size(resp_bytes.len() as u64),
-        );
-
-        // Record passthrough request in store.
-        if let Some(ref store) = state.store {
-            store.record(StoreEvent::Request(RequestEvent {
-                request_id: uuid::Uuid::new_v4().to_string(),
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                session_id: log_session_id.clone(),
-                method: method_str.to_string(),
-                tool: None,
-                latency_ms: start.elapsed().as_millis() as i64,
-                status: RequestStatus::Ok,
-                error_code: None,
-                error_msg: None,
-                bytes_in: Some(raw_body_len as i64),
-                bytes_out: Some(resp_bytes.len() as i64),
-            }));
-        }
+        // Non-JSON response — passthrough
+        state.event_bus.emit(make_request_event(
+            &state.proxy_name,
+            path,
+            method_str,
+            &mcp_method,
+            &call_detail,
+            log_session_id.as_deref(),
+            status,
+            start,
+            Some(upstream_ms),
+            raw_body_len,
+            Some(resp_bytes.len()),
+            None,
+            "passthrough",
+        ));
 
         build_response(status, &resp_headers, Body::from(resp_bytes))
     }
@@ -391,20 +279,33 @@ pub async fn handle_mcp_sse(
         Method::GET,
         headers,
         &Bytes::new(),
-        true, // SSE streaming — no request timeout
+        true,
     )
     .await
     {
         Ok(resp) => {
-            let upstream_ms = upstream_start.elapsed().as_millis() as u64;
             let status = resp.status().as_u16();
             let resp_headers = resp.headers().clone();
-            state.logger.emit(
-                LogEntry::new("GET", path, status, "sse")
-                    .upstream(&upstream_url)
-                    .upstream_duration(upstream_ms)
-                    .duration(start),
-            );
+
+            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: chrono::Utc::now().timestamp_millis(),
+                proxy: state.proxy_name.clone(),
+                session_id: None,
+                method: "GET".to_string(),
+                path: path.to_string(),
+                mcp_method: Some("SSE".to_string()),
+                tool: None,
+                status,
+                latency_ms: start.elapsed().as_millis() as u64,
+                upstream_ms: Some(upstream_start.elapsed().as_millis() as u64),
+                request_size: None,
+                response_size: None,
+                error_code: None,
+                error_msg: None,
+                note: "sse".to_string(),
+            }));
+
             build_response(
                 status,
                 &resp_headers,
@@ -412,22 +313,25 @@ pub async fn handle_mcp_sse(
             )
         }
         Err(e) => {
-            let upstream_ms = upstream_start.elapsed().as_millis() as u64;
-            state.logger.emit(
-                LogEntry::new("GET", path, 502, "upstream error")
-                    .upstream(&upstream_url)
-                    .upstream_duration(upstream_ms)
-                    .duration(start),
-            );
-            state.events.emit(
-                McprEvent::new(EventType::Request)
-                    .method("SSE")
-                    .upstream(&upstream_url)
-                    .latency(start.elapsed().as_millis() as u64)
-                    .upstream_ms(upstream_ms)
-                    .status(EventStatus::Error)
-                    .error_detail(format!("{e}")),
-            );
+            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                ts: chrono::Utc::now().timestamp_millis(),
+                proxy: state.proxy_name.clone(),
+                session_id: None,
+                method: "GET".to_string(),
+                path: path.to_string(),
+                mcp_method: Some("SSE".to_string()),
+                tool: None,
+                status: 502,
+                latency_ms: start.elapsed().as_millis() as u64,
+                upstream_ms: Some(upstream_start.elapsed().as_millis() as u64),
+                request_size: None,
+                response_size: None,
+                error_code: None,
+                error_msg: Some(format!("{e}").chars().take(512).collect()),
+                note: "upstream error".to_string(),
+            }));
+
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }
     }
@@ -451,7 +355,6 @@ async fn handle_resources_read(
 
     let html = fetch_widget_html(state, widget_name).await?;
 
-    // Forward to upstream to get the metadata
     let upstream_url = state.mcp_upstream.trim_end_matches('/').to_string();
     let upstream_start = Instant::now();
     let upstream_resp =
@@ -467,7 +370,6 @@ async fn handle_resources_read(
         extract_json_from_sse(&upstream_bytes).unwrap_or_else(|| upstream_bytes.to_vec());
     let mut json_body: Value = serde_json::from_slice(&json_bytes).ok()?;
 
-    // Replace the HTML text with our local version
     if let Some(contents) = json_body
         .get_mut("result")
         .and_then(|r| r.get_mut("contents"))
@@ -485,22 +387,26 @@ async fn handle_resources_read(
     drop(config);
 
     let body = serde_json::to_vec(&json_body).unwrap_or_default();
-    state.logger.emit(
-        LogEntry::new("POST", "/*", 200, "intercepted")
-            .mcp_method(jsonrpc::RESOURCES_READ)
-            .req_size(raw_body.len())
-            .size(body.len())
-            .upstream_duration(upstream_ms)
-            .duration(start),
-    );
-    state.events.emit(
-        McprEvent::new(EventType::WidgetServe)
-            .method(jsonrpc::RESOURCES_READ)
-            .latency(start.elapsed().as_millis() as u64)
-            .upstream_ms(upstream_ms)
-            .request_size(raw_body.len() as u64)
-            .response_size(body.len() as u64),
-    );
+
+    state.event_bus.emit(ProxyEvent::Request(RequestEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        ts: chrono::Utc::now().timestamp_millis(),
+        proxy: state.proxy_name.clone(),
+        session_id: None,
+        method: "POST".to_string(),
+        path: "/*".to_string(),
+        mcp_method: Some(jsonrpc::RESOURCES_READ.to_string()),
+        tool: None,
+        status: 200,
+        latency_ms: start.elapsed().as_millis() as u64,
+        upstream_ms: Some(upstream_ms),
+        request_size: Some(raw_body.len() as u64),
+        response_size: Some(body.len() as u64),
+        error_code: None,
+        error_msg: None,
+        note: "intercepted".to_string(),
+    }));
+
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
     Some(build_response(200, &resp_headers, Body::from(body)))

@@ -51,5 +51,4 @@
 pub mod emitter;
 pub mod store;
 
-// Re-export emitter types at crate root for ergonomic access.
-pub use emitter::*;
+pub use emitter::{CloudSink, CloudSinkConfig, SyncCallback, SyncStatus};

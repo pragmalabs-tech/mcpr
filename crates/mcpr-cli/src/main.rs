@@ -30,8 +30,8 @@
 //! - **Passthrough** (`passthrough`): Forwards non-MCP requests (OAuth, .well-known,
 //!   etc.) to upstream with URL rewriting.
 //!
-//! - **Logging** (`logger`): Multi-sink structured logging with stderr and
-//!   file sinks (daily/size rotation).
+//! - **Event bus** (`event_bus`): Routes `ProxyEvent`s to registered sinks
+//!   (stderr, SQLite, cloud). Single pipeline replaces the old logger + emitter.
 //!
 //! - **Admin endpoints** (`admin`): Health check and readiness probe endpoints
 //!   on a separate port for orchestration (k8s, docker, etc.).
@@ -54,7 +54,8 @@
 //! +-- admin.rs        # Health/readiness admin server
 //! +-- onboarding.rs   # Interactive tunnel claim flow
 //! +-- display.rs      # Startup info formatting
-//! +-- logger/         # LogRouter, FileSink, StderrSink
+//! +-- event_bus.rs    # EventBus — routes ProxyEvents to sinks
+//! +-- stderr_sink.rs  # StderrSink — console output
 //! ```
 
 mod admin;
@@ -63,7 +64,8 @@ mod config;
 #[cfg(unix)]
 mod daemon;
 mod display;
-pub mod logger;
+mod event_bus;
+mod stderr_sink;
 mod mcp_handler;
 mod onboarding;
 mod passthrough;
@@ -75,7 +77,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use mcpr_integrations::EventEmitter;
 use mcpr_proxy::forwarding::UpstreamClient;
 
 use axum::Router;
@@ -84,10 +85,6 @@ use tower_http::cors::{Any, CorsLayer};
 
 use config::{CliAction, GatewayConfig, Mode};
 use display::log_startup;
-use logger::{
-    DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, StderrSink,
-    prefix_from_upstream,
-};
 use mcpr_protocol::session::MemorySessionStore;
 use mcpr_proxy::RewriteConfig;
 use mcpr_proxy::state::{self as proxy_state, SharedProxyState};
@@ -126,14 +123,12 @@ pub struct AppState {
     pub rewrite_config: Arc<RwLock<RewriteConfig>>,
     pub upstream: UpstreamClient,
     pub proxy_state_ref: SharedProxyState,
-    pub logger: LogRouter,
-    pub events: Arc<dyn EventEmitter>,
+    /// Single event pipeline — replaces logger + events + store.
+    pub event_bus: event_bus::EventBus,
     pub sessions: MemorySessionStore,
     pub max_request_body: usize,
     pub max_response_body: usize,
-    /// SQLite request storage for observability. None if storage is disabled.
-    pub store: Option<Arc<mcpr_integrations::store::Store>>,
-    /// Proxy name used to tag store records. Derived from upstream URL or config.
+    /// Proxy name used to tag events. Derived from upstream URL or config.
     pub proxy_name: String,
 }
 
@@ -278,8 +273,17 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     // Validate MCP URL format
     validate_mcp_url(&mcp);
 
-    // Derive proxy name early — needed for PID file and store tagging.
-    let proxy_name = prefix_from_upstream(&mcp);
+    // Derive proxy name from upstream URL (e.g., "http://localhost:9000" → "localhost-9000").
+    let proxy_name = {
+        let stripped = mcp
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        let host_port = stripped.split('/').next().unwrap_or(stripped);
+        host_port
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+            .collect::<String>()
+    };
 
     let widget_source = cfg.widgets.as_ref().map(|w| {
         if w.starts_with("http://") || w.starts_with("https://") {
@@ -432,41 +436,6 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     let request_timeout =
         Duration::from_secs(cfg.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS));
 
-    // Build log sinks — TUI is disabled in `mcpr start`.
-    // TUI will be available via `mcpr proxy view` in a future release.
-    let mut sinks: Vec<Box<dyn LogSink>> = Vec::new();
-    sinks.push(Box::new(StderrSink::new(cfg.runtime.log_format)));
-
-    if cfg.log_file {
-        let rotation = match cfg.log_rotation.as_deref() {
-            Some(s) if s.starts_with("size:") => {
-                let size_str = s.trim_start_matches("size:");
-                let bytes = parse_size(size_str).unwrap_or(50 * 1024 * 1024);
-                Rotation::Size(bytes)
-            }
-            _ => Rotation::Daily,
-        };
-        let dir = cfg.log_dir.unwrap_or_else(|| "./logs".to_string());
-        match FileSink::new(FileSinkConfig {
-            dir: std::path::PathBuf::from(&dir),
-            rotation,
-            max_files: DEFAULT_MAX_FILES,
-            prefix: prefix_from_upstream(&mcp),
-        }) {
-            Ok(sink) => {
-                sinks.push(Box::new(sink));
-            }
-            Err(e) => {
-                eprintln!(
-                    "{}: failed to init file logger: {e}",
-                    colored::Colorize::red("error"),
-                );
-            }
-        }
-    }
-
-    let log_handle = LogRouter::start(sinks);
-
     let upstream = UpstreamClient {
         http_client: reqwest::Client::builder()
             .connect_timeout(connect_timeout)
@@ -481,9 +450,37 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         request_timeout,
     };
 
-    // Pick event emitter: cloud sync if token is set, otherwise noop.
-    // (TUI owns stdout, so StdoutEmitter can't run here. CloudEmitter uses HTTP.)
-    let events: Arc<dyn EventEmitter> = if let Some(ref token) = cfg.cloud_token {
+    // Build event sinks — one pipeline, multiple destinations.
+    let mut sinks: Vec<Box<dyn mcpr_core::event::EventSink>> = Vec::new();
+
+    // 1. Stderr sink — real-time console output.
+    sinks.push(Box::new(stderr_sink::StderrSink::new(cfg.runtime.log_format)));
+
+    // 2. SQLite sink — local storage for CLI queries.
+    if let Some(db_path) = mcpr_integrations::store::path::resolve_db_path(None) {
+        match mcpr_integrations::store::Store::open(mcpr_integrations::store::StoreConfig {
+            db_path: db_path.clone(),
+            mcpr_version: env!("CARGO_PKG_VERSION").to_string(),
+        }) {
+            Ok(store) => {
+                eprintln!(
+                    "  {} storage: {}",
+                    colored::Colorize::dimmed("store"),
+                    db_path.display()
+                );
+                sinks.push(Box::new(mcpr_integrations::store::SqliteSink::new(store)));
+            }
+            Err(e) => {
+                eprintln!(
+                    "  {}: failed to open store: {e}",
+                    colored::Colorize::yellow("warn"),
+                );
+            }
+        }
+    }
+
+    // 3. Cloud sink — dashboard at cloud.mcpr.app.
+    if let Some(ref token) = cfg.cloud_token {
         let endpoint = cfg
             .cloud_endpoint
             .clone()
@@ -491,62 +488,28 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         let cloud_endpoint = format!("{}/api/ingest-events", endpoint.trim_end_matches('/'));
         proxy_state::lock_state(&proxy_state_ref).cloud_endpoint = Some(cloud_endpoint.clone());
         let cloud_state = proxy_state_ref.clone();
-        Arc::new(mcpr_integrations::CloudEmitter::new(
-            mcpr_integrations::CloudEmitterConfig {
+        sinks.push(Box::new(mcpr_integrations::CloudSink::new(
+            mcpr_integrations::CloudSinkConfig {
                 endpoint: cloud_endpoint,
                 token: token.clone(),
                 server: cfg.cloud_server.clone(),
                 batch_size: cfg.cloud_batch_size.unwrap_or(100),
                 flush_interval: Duration::from_millis(cfg.cloud_flush_interval_ms.unwrap_or(5000)),
                 on_flush: Some(std::sync::Arc::new(move |status| {
+                    use mcpr_integrations::emitter::cloud_sink::SyncStatus;
                     let mut state = proxy_state::lock_state(&cloud_state);
                     state.cloud_sync = Some(match status {
-                        mcpr_integrations::SyncStatus::Ok { count } => {
-                            proxy_state::CloudSyncStatus::Ok { count }
-                        }
-                        mcpr_integrations::SyncStatus::Failed { message } => {
+                        SyncStatus::Ok { count } => proxy_state::CloudSyncStatus::Ok { count },
+                        SyncStatus::Failed { message } => {
                             proxy_state::CloudSyncStatus::Failed { message }
                         }
                     });
                 })),
             },
-        ))
-    } else {
-        Arc::new(mcpr_integrations::NoopEmitter)
-    };
+        )));
+    }
 
-    // Open the request storage database.
-    let store = match mcpr_integrations::store::path::resolve_db_path(None) {
-        Some(db_path) => {
-            match mcpr_integrations::store::Store::open(mcpr_integrations::store::StoreConfig {
-                db_path: db_path.clone(),
-                mcpr_version: env!("CARGO_PKG_VERSION").to_string(),
-            }) {
-                Ok(s) => {
-                    eprintln!(
-                        "  {} storage: {}",
-                        colored::Colorize::dimmed("store"),
-                        db_path.display()
-                    );
-                    Some(Arc::new(s))
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  {}: failed to open store: {e}",
-                        colored::Colorize::yellow("warn"),
-                    );
-                    None
-                }
-            }
-        }
-        None => {
-            eprintln!(
-                "  {}: could not determine store path — storage disabled",
-                colored::Colorize::yellow("warn"),
-            );
-            None
-        }
-    };
+    let event_bus_handle = event_bus::EventBus::start(sinks);
 
     let state = AppState {
         mcp_upstream: mcp.clone(),
@@ -554,8 +517,7 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         rewrite_config: Arc::new(RwLock::new(rewrite_config)),
         upstream: upstream.clone(),
         proxy_state_ref: proxy_state_ref.clone(),
-        logger: log_handle.router.clone(),
-        events,
+        event_bus: event_bus_handle.bus.clone(),
         sessions: MemorySessionStore::new(),
         max_request_body: cfg
             .max_request_body_size
@@ -563,7 +525,6 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
-        store: store.clone(),
         proxy_name,
     };
 
@@ -647,15 +608,8 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     eprintln!("[mcpr] Waiting up to {drain_timeout}s for in-flight requests...");
     tokio::time::sleep(Duration::from_secs(drain_timeout.min(5))).await;
 
-    // Flush storage before logs — store events are emitted from the same code paths.
-    if let Some(store) = store
-        && let Some(mut s) = Arc::into_inner(store)
-    {
-        s.shutdown();
-    }
-
-    // Gracefully flush log sinks
-    log_handle.shutdown().await;
+    // Flush all event sinks (stderr, sqlite, cloud).
+    event_bus_handle.shutdown().await;
 
     // Clean up PID file if we're running as a daemon.
     #[cfg(unix)]
@@ -666,20 +620,6 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     eprintln!("[mcpr] Shutdown complete.");
 }
 
-/// Parse a human-readable size string like "50MB", "100KB", "1GB" into bytes.
-fn parse_size(s: &str) -> Option<u64> {
-    let s = s.trim();
-    let (num_str, multiplier) = if let Some(n) = s.strip_suffix("GB") {
-        (n, 1024 * 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix("MB") {
-        (n, 1024 * 1024)
-    } else if let Some(n) = s.strip_suffix("KB") {
-        (n, 1024)
-    } else {
-        (s, 1)
-    };
-    num_str.trim().parse::<u64>().ok().map(|n| n * multiplier)
-}
 
 /// Validate MCP URL format at startup. Exits with an error for clearly invalid URLs,
 /// warns for suspicious patterns that might indicate a misconfiguration.
@@ -936,23 +876,20 @@ async fn health_check_loop(app_state: AppState) {
             s.widget_names = names;
         }
 
-        // Emit heartbeat event to cloud (carries current proxy status)
+        // Emit heartbeat event via the event bus.
         {
             let s = proxy_state::lock_state(&app_state.proxy_state_ref);
-            let heartbeat_meta = serde_json::json!({
-                "mcp_status": s.mcp_status.label(),
-                "tunnel_status": s.tunnel_status.label(),
-                "widgets_status": s.widgets_status.label(),
-                "uptime_secs": s.started_at.elapsed().as_secs(),
-                "request_count": s.request_count,
-            });
-            drop(s);
-
-            app_state.events.emit(
-                mcpr_integrations::McprEvent::new(mcpr_integrations::EventType::Heartbeat)
-                    .status(mcpr_integrations::EventStatus::Ok)
-                    .meta(heartbeat_meta),
-            );
+            app_state.event_bus.emit(mcpr_core::event::ProxyEvent::Heartbeat(
+                mcpr_core::event::HeartbeatEvent {
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    proxy: app_state.proxy_name.clone(),
+                    mcp_status: s.mcp_status.label().to_string(),
+                    tunnel_status: s.tunnel_status.label().to_string(),
+                    widgets_status: s.widgets_status.label().to_string(),
+                    uptime_secs: s.started_at.elapsed().as_secs(),
+                    request_count: s.request_count,
+                },
+            ));
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

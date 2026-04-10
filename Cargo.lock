@@ -1043,6 +1043,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "http-body-util",
+ "mcpr-core",
  "mcpr-integrations",
  "mcpr-protocol",
  "mcpr-proxy",

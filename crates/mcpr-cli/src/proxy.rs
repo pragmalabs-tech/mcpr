@@ -10,11 +10,10 @@ use axum::{
 };
 
 use crate::AppState;
-use crate::logger::LogEntry;
 use crate::mcp_handler::{handle_mcp_post, handle_mcp_sse};
 use crate::passthrough::{forward_and_passthrough, serve_oauth_callback_relay};
 use crate::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
-use mcpr_integrations::{EventType, McprEvent};
+use mcpr_core::event::{ProxyEvent, SessionEndEvent};
 use mcpr_protocol::session::SessionStore;
 use mcpr_proxy::router::{ClassifiedRequest, classify};
 use mcpr_proxy::sse::split_upstream;
@@ -76,21 +75,10 @@ async fn handle_request(
             if method == Method::DELETE
                 && let Some(sid) = headers.get("mcp-session-id").and_then(|v| v.to_str().ok())
             {
-                state
-                    .logger
-                    .emit(LogEntry::new("DELETE", path, 0, "session:closed").session_id(sid));
-                state
-                    .events
-                    .emit(McprEvent::new(EventType::SessionEnd).session(sid));
-
-                // Record session close in store.
-                if let Some(ref store) = state.store {
-                    store.record(mcpr_integrations::store::StoreEvent::SessionClosed {
-                        session_id: sid.to_string(),
-                        ended_at: chrono::Utc::now().timestamp_millis(),
-                    });
-                }
-
+                state.event_bus.emit(ProxyEvent::SessionEnd(SessionEndEvent {
+                    session_id: sid.to_string(),
+                    ts: chrono::Utc::now().timestamp_millis(),
+                }));
                 state.sessions.remove(sid).await;
             }
 
@@ -136,12 +124,10 @@ mod tests {
                 request_timeout: std::time::Duration::from_secs(30),
             },
             proxy_state_ref: mcpr_proxy::new_shared_state(),
-            logger: crate::logger::LogRouter::start(vec![]).router,
-            events: Arc::new(mcpr_integrations::NoopEmitter),
+            event_bus: crate::event_bus::EventBus::start(vec![]).bus,
             sessions: mcpr_protocol::session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
-            store: None,
             proxy_name: "test".to_string(),
         }
     }

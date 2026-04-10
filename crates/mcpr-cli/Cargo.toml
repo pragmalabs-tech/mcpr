@@ -29,6 +29,7 @@ http-body-util = "0.1"
 toml = "0.8"
 dashmap = { workspace = true }
 url = { workspace = true }
+mcpr-core = { workspace = true }
 mcpr-protocol = { workspace = true }
 
 mcpr-tunnel = { workspace = true }
