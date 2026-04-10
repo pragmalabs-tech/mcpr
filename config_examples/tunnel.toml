@@ -12,6 +12,8 @@ widgets = "http://localhost:4444"
 # port = 3000
 
 [tunnel]
+# Enable tunnel for a public URL (default: false, proxy-only mode)
+enabled = true
 # Relay server to connect to
 relay_url = "https://tunnel.mcpr.app"
 

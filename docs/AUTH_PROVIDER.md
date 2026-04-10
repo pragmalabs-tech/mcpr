@@ -296,12 +296,12 @@ Then test with the actual relay:
 
 ```bash
 # Start relay with auth
-mcpr --relay --port 8081 --relay-domain tunnel.yourdomain.com \
+mcpr start --foreground --relay --port 8081 --relay-domain tunnel.yourdomain.com \
   --auth-provider https://auth.yourdomain.com \
   --auth-provider-secret your-secret
 
 # Connect client (should succeed)
-mcpr --mcp http://localhost:9000 --relay-url https://tunnel.yourdomain.com
+mcpr start --mcp http://localhost:9000 --relay-url https://tunnel.yourdomain.com
 
 # Connect with bad token (should fail)
 # Set tunnel.token = "bad_token" in mcpr.toml

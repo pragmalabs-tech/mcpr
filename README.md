@@ -36,9 +36,9 @@ Single Rust binary. No JVM, no Kubernetes, no database.
 
 | Environment | How |
 |---|---|
-| **Local dev** | `mcpr start --mcp :9000 --no-tunnel` |
-| **Dev + tunnel** | `mcpr start --mcp :9000` (auto-tunnel) |
-| **VPS / VM** | `mcpr start --mcp :9000 --no-tunnel` |
+| **Local dev** | `mcpr start --mcp :9000` |
+| **Dev + tunnel** | `mcpr start --mcp :9000 --tunnel` |
+| **VPS / VM** | `mcpr start --mcp :9000` |
 | **Docker** | `docker run -p 3000:3000 -p 9901:9901 -v ./mcpr.toml:/app/mcpr.toml ghcr.io/cptrodgers/mcpr:latest` |
 | **Kubernetes** | Helm chart (coming soon) |
 
@@ -46,25 +46,16 @@ Single Rust binary. No JVM, no Kubernetes, no database.
 
 ## Observability
 
-Every MCP request emits a structured JSON event:
+Every MCP request is recorded to a local SQLite store. Query anytime:
 
 ```bash
-mcpr start --mcp :9000 --events
+mcpr proxy logs               # recent request log
+mcpr proxy stats              # per-tool metrics (calls, avg, p95, errors)
+mcpr proxy slow --threshold 1s  # find slow calls
+mcpr proxy clients            # who's calling?
 ```
 
-```json
-{
-  "ts": "2026-04-06T10:15:33Z",
-  "type": "tool_call",
-  "method": "tools/call",
-  "tool": "search_products",
-  "latency_ms": 142,
-  "status": "ok",
-  "session": "sess_abc123"
-}
-```
-
-Pipe to any log aggregator — or add one line to stream to [mcpr.app](https://mcpr.app) for a full dashboard:
+Stream to [mcpr.app](https://mcpr.app) for a full cloud dashboard:
 
 ```toml
 [cloud]
@@ -161,8 +152,7 @@ See [docs/CLI.md](docs/CLI.md) for full reference with all flags and examples.
 ### Proxy an MCP server
 
 ```bash
-mcpr start --mcp http://localhost:9000 --port 3000 --no-tunnel
-# → mcpr daemon started (PID: 12345, port: 3000)
+mcpr start --mcp http://localhost:9000 --port 3000 # → mcpr daemon started (PID: 12345, port: 3000)
 
 mcpr status
 # → mcpr daemon is running
@@ -206,7 +196,7 @@ mcpr proxy clients            # who's calling?
 - [x] CSP auto-detection and enrichment
 - [x] Platform adaptation (ChatGPT / Claude / VS Code)
 - [x] Edge config (CSP, domains, OAuth URLs)
-- [x] Structured events (`--events`)
+- [x] Structured event emission (cloud sync)
 - [x] TUI dashboard
 - [x] Cloud dashboard ([mcpr.app](https://mcpr.app))
 - [x] Cloud sync

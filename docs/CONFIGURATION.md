@@ -34,9 +34,11 @@ widgets = "http://localhost:4444"
 port = 3000
 
 # Disable tunnel -- local-only mode (set to true for production)
-# no_tunnel = true
 
 [tunnel]
+# Enable tunnel for a public URL (default: false)
+# enabled = true
+
 # Relay server URL (default: https://tunnel.mcpr.app)
 relay_url = "https://tunnel.mcpr.app"
 
@@ -55,10 +57,6 @@ mode = "extend"
 
 # Additional CSP domains to allow
 domains = ["https://media.mcpr.app", "https://api.example.com"]
-
-[events]
-# Emit structured JSON events to stdout
-enabled = true
 
 [cloud]
 # Cloud sync token (from mcpr.app project settings)
@@ -108,14 +106,13 @@ rotation = "daily"
 | `mcp` | `--mcp` | | Upstream MCP server URL |
 | `widgets` | `--widgets` | | Widget source: URL or file path |
 | `port` | `--port` | | Local proxy port |
-| `no_tunnel` | `--no-tunnel` | | Disable tunnel (local-only mode) |
+| `[tunnel].enabled` | `--tunnel` | | Enable tunnel for public URL (default: false) |
 | `[tunnel].relay_url` | `--relay-url` | `MCPR_RELAY_URL` | Relay server URL |
 | `[tunnel].token` | | | Tunnel authentication token |
 | `[tunnel].subdomain` | | | Fixed subdomain for tunnel |
 | `[tunnel].anonymous` | | | Skip interactive claim flow (bool) |
 | `[csp].mode` | `--csp-mode` | | `"extend"` or `"override"` |
 | `[csp].domains` | `--csp` | | Extra CSP domains (repeatable via CLI) |
-| `[events].enabled` | `--events` | | Emit structured JSON events to stdout |
 | `[cloud].token` | `--cloud-token` | `MCPR_CLOUD_TOKEN` | Cloud sync token from mcpr.app |
 | `[cloud].server` | `--cloud-server` | | Server slug for cloud routing |
 | `[cloud].endpoint` | | | Custom cloud API endpoint |

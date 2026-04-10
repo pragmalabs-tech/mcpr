@@ -35,8 +35,8 @@ mcpr stop
 No subcommand defaults to `start`:
 
 ```bash
-mcpr                    # same as mcpr start
-mcpr --mcp :9000        # same as mcpr start --mcp :9000
+mcpr start              # reads mcpr.toml, starts daemon
+mcpr start --mcp :9000  # override upstream URL
 ```
 
 ### Observability

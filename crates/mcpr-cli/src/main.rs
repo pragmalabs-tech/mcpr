@@ -81,7 +81,7 @@ use tower_http::cors::{Any, CorsLayer};
 use config::{CliAction, GatewayConfig, Mode};
 use display::log_startup;
 use logger::{
-    DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, StderrSink, TuiSink,
+    DEFAULT_MAX_FILES, FileSink, FileSinkConfig, LogRouter, LogSink, Rotation, StderrSink,
     prefix_from_upstream,
 };
 use mcpr_protocol::session::MemorySessionStore;
@@ -284,12 +284,10 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         }
     });
 
-    // Bind listener first — in tunnel mode with no explicit port, use port 0 (random)
-    let bind_port = if !cfg.no_tunnel && cfg.port.is_none() {
-        0
-    } else {
-        cfg.port.expect("port is required in mcpr.toml or --port")
-    };
+    // Bind listener — in tunnel mode with no explicit port, use port 0 (OS picks random).
+    // In proxy-only mode (no tunnel), default to 3000 if not specified.
+    // Default port: 3000 for proxy-only mode, 0 (OS picks) for tunnel mode.
+    let bind_port = cfg.port.unwrap_or(if cfg.tunnel { 0 } else { 3000 });
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{bind_port}"))
         .await
         .expect("Failed to bind");
@@ -306,7 +304,7 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     }
 
     // Determine public URL
-    let public_url = if cfg.no_tunnel {
+    let public_url = if !cfg.tunnel {
         // No tunnel — mark as connected (local-only)
         tui_state.lock().unwrap().tunnel_status = tui::ConnectionStatus::Connected;
         format!("http://localhost:{actual_port}")
@@ -338,7 +336,7 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
                     );
                     if result.anonymous {
                         eprintln!(
-                            "\n  {} This is a temporary tunnel (1 week). To keep a custom subdomain, re-run with --no-tunnel and reconfigure.",
+                            "\n  {} This is a temporary tunnel (1 week). To claim a permanent subdomain, re-run `mcpr start --tunnel`.",
                             colored::Colorize::yellow("!"),
                         );
                     } else {
@@ -402,7 +400,9 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
                     colored::Colorize::red("error"),
                     e
                 );
-                eprintln!("Use --no-tunnel for local-only mode");
+                eprintln!(
+                    "Remove --tunnel flag or `tunnel = true` from config to use proxy-only mode"
+                );
                 std::process::exit(1);
             }
         }
@@ -427,20 +427,10 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     let request_timeout =
         Duration::from_secs(cfg.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS));
 
-    // Determine TUI mode
-    let use_tui = match (cfg.runtime.tui, cfg.runtime.no_tui) {
-        (true, _) => true,
-        (_, true) => false,
-        _ => std::io::IsTerminal::is_terminal(&std::io::stdout()),
-    };
-
-    // Build log sinks
+    // Build log sinks — TUI is disabled in `mcpr start`.
+    // TUI will be available via `mcpr proxy view` in a future release.
     let mut sinks: Vec<Box<dyn LogSink>> = Vec::new();
-    if use_tui {
-        sinks.push(Box::new(TuiSink::new(tui_state.clone())));
-    } else {
-        sinks.push(Box::new(StderrSink::new(cfg.runtime.log_format)));
-    }
+    sinks.push(Box::new(StderrSink::new(cfg.runtime.log_format)));
 
     if cfg.log_file {
         let rotation = match cfg.log_rotation.as_deref() {
@@ -577,7 +567,6 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     probe_mcp_upstream(&mcp, &upstream.http_client, &tui_state).await;
 
     let health_state = state.clone();
-    let tui_sessions = state.sessions.clone();
 
     let app = build_app(state);
 
@@ -646,22 +635,9 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         let _ = shutdown_trigger.send(true);
     });
 
-    if use_tui {
-        // Run the TUI on a blocking thread (it reads stdin).
-        let tui_shutdown = shutdown_tx.subscribe();
-        let tui_handle = tokio::task::spawn_blocking(move || {
-            tui::run(tui_state, tui_sessions, tui_shutdown).expect("TUI failed");
-        });
-        tui_handle.await.unwrap();
-        // TUI exited (user pressed q or signal received) — trigger shutdown
-        let _ = shutdown_tx.send(true);
-    } else {
-        if !cfg.runtime.no_tui {
-            eprintln!("[mcpr] No terminal detected — TUI disabled. Running in headless mode.");
-        }
-        // Wait for shutdown signal
-        let _ = shutdown_rx.changed().await;
-    }
+    // Wait for shutdown signal (SIGTERM/SIGINT).
+    // TUI is not started here — it will be available via `mcpr proxy view`.
+    let _ = shutdown_rx.changed().await;
 
     // Graceful drain: wait for in-flight requests
     eprintln!("[mcpr] Waiting up to {drain_timeout}s for in-flight requests...");

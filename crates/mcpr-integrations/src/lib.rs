@@ -12,7 +12,6 @@
 //!
 //! - **Emitters** (`emitter` module): Structured event emission for MCP
 //!   tool calls, sessions, heartbeats, and errors.
-//!   - `StdoutEmitter` — JSON lines to stdout (default)
 //!   - `CloudEmitter` — batched HTTPS POST to cloud.mcpr.app
 //!   - `NoopEmitter` — disabled events
 //!
@@ -33,7 +32,6 @@
 //!     +-- mod.rs          # Module root, re-exports
 //!     +-- traits.rs       # EventEmitter trait, NoopEmitter
 //!     +-- event.rs        # McprEvent struct, EventType, EventStatus
-//!     +-- stdout.rs       # StdoutEmitter implementation
 //!     +-- cloud.rs        # CloudEmitter (batched HTTP POST)
 //! ```
 //!

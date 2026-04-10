@@ -1,6 +1,6 @@
 # ── Relay Server ─────────────────────────────────────────────────────
 # Run the tunnel relay that developers connect to.
-# Start with: mcpr --relay
+# Start with: mcpr start --foreground --relay
 #
 # This is typically deployed on a VPS with a wildcard domain
 # (e.g. *.tunnel.mcpr.app) behind nginx/Caddy for TLS.

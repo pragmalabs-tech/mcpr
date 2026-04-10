@@ -117,13 +117,9 @@ struct Cli {
     #[arg(long, env = "MCPR_RELAY_URL", global = true)]
     relay_url: Option<String>,
 
-    /// Don't start any tunnel (local-only mode)
+    /// Enable tunnel for public URL (default: off, proxy-only mode)
     #[arg(long, global = true)]
-    no_tunnel: bool,
-
-    /// Emit structured JSON events to stdout
-    #[arg(long, global = true)]
-    events: bool,
+    tunnel: bool,
 
     /// Cloud sync token (from cloud.mcpr.app project settings)
     #[arg(long, env = "MCPR_CLOUD_TOKEN", global = true)]
@@ -364,8 +360,6 @@ pub struct ValidateArgs {
 
 /// Runtime options extracted from CLI args (used by main.rs).
 pub struct RuntimeOptions {
-    pub tui: bool,
-    pub no_tui: bool,
     pub drain_timeout: u64,
     pub log_format: LogFormat,
     pub admin_bind: String,
@@ -402,6 +396,8 @@ struct FileRelayConfig {
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct FileTunnelConfig {
+    /// Enable tunnel for a public URL. Default: false (proxy-only mode).
+    enabled: bool,
     relay_url: Option<String>,
     token: Option<String>,
     subdomain: Option<String>,
@@ -409,12 +405,6 @@ struct FileTunnelConfig {
 }
 
 /// `[events]` table in config file
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct FileEventsConfig {
-    enabled: bool,
-}
-
 /// `[cloud]` table in config file
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -449,7 +439,6 @@ struct FileConfig {
     // -- Gateway --
     mcp: Option<String>,
     widgets: Option<String>,
-    no_tunnel: bool,
     csp: FileCspConfig,
 
     // -- Relay --
@@ -457,9 +446,6 @@ struct FileConfig {
 
     // -- Tunnel client --
     tunnel: FileTunnelConfig,
-
-    // -- Events --
-    events: FileEventsConfig,
 
     // -- Cloud sync --
     cloud: FileCloudConfig,
@@ -564,7 +550,8 @@ pub struct GatewayConfig {
     pub tunnel_token: Option<String>,
     pub tunnel_subdomain: Option<String>,
     pub tunnel_anonymous: bool,
-    pub no_tunnel: bool,
+    /// Whether tunnel is enabled. Default: false (proxy-only mode).
+    pub tunnel: bool,
     pub config_path: Option<std::path::PathBuf>,
     pub max_request_body_size: Option<usize>,
     pub max_response_body_size: Option<usize>,
@@ -574,7 +561,6 @@ pub struct GatewayConfig {
     pub log_file: bool,
     pub log_dir: Option<String>,
     pub log_rotation: Option<String>,
-    pub events: bool,
     pub cloud_token: Option<String>,
     pub cloud_server: Option<String>,
     pub cloud_endpoint: Option<String>,
@@ -784,10 +770,8 @@ pub fn load() -> CliAction {
 
     let (file, config_path) = FileConfig::load();
 
-    // Merge TUI/runtime settings: CLI flags override file config
+    // Merge runtime settings: CLI flags override file config
     let runtime = RuntimeOptions {
-        tui: cli.tui,
-        no_tui: cli.no_tui || file.no_tui,
         drain_timeout: if cli.drain_timeout != 30 {
             cli.drain_timeout
         } else {
@@ -1081,7 +1065,7 @@ fn load_gateway(
         tunnel_token,
         tunnel_subdomain,
         tunnel_anonymous,
-        no_tunnel: cli.no_tunnel || file.no_tunnel,
+        tunnel: cli.tunnel || file.tunnel.enabled,
         config_path,
         max_request_body_size: file.max_request_body_size,
         max_response_body_size: file.max_response_body_size,
@@ -1091,7 +1075,6 @@ fn load_gateway(
         log_file: file.logging.file,
         log_dir: file.logging.dir,
         log_rotation: file.logging.rotation,
-        events: cli.events || file.events.enabled,
         cloud_token: cli.cloud_token.or(file.cloud.token),
         cloud_server: cli.cloud_server.or(file.cloud.server),
         cloud_endpoint: file.cloud.endpoint,
