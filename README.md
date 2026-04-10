@@ -8,7 +8,7 @@
 Route, log, and secure MCP traffic — from dev to production.
 
 ```bash
-mcpr start --mcp http://localhost:9000 --port 3000
+mcpr start --mcp http://localhost:9000/mcp --port 3000
 ```
 
 ![mcpr TUI dashboard showing proxied MCP requests with tool names and latency](docs/mcpr-demo.gif)
