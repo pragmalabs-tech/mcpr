@@ -75,10 +75,12 @@ async fn handle_request(
             if method == Method::DELETE
                 && let Some(sid) = headers.get("mcp-session-id").and_then(|v| v.to_str().ok())
             {
-                state.event_bus.emit(ProxyEvent::SessionEnd(SessionEndEvent {
-                    session_id: sid.to_string(),
-                    ts: chrono::Utc::now().timestamp_millis(),
-                }));
+                state
+                    .event_bus
+                    .emit(ProxyEvent::SessionEnd(SessionEndEvent {
+                        session_id: sid.to_string(),
+                        ts: chrono::Utc::now().timestamp_millis(),
+                    }));
                 state.sessions.remove(sid).await;
             }
 

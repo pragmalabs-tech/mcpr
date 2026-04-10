@@ -8,11 +8,10 @@
 
 use mcpr_core::event::{EventSink, ProxyEvent};
 
-use super::event::{
-    RequestEvent as StoreRequestEvent, RequestStatus, SessionEvent as StoreSessionEvent,
-    StoreEvent,
-};
 use super::engine::Store;
+use super::event::{
+    RequestEvent as StoreRequestEvent, RequestStatus, SessionEvent as StoreSessionEvent, StoreEvent,
+};
 
 /// Event sink that writes to the SQLite store.
 ///
@@ -58,15 +57,14 @@ impl EventSink for SqliteSink {
                 }));
             }
             ProxyEvent::SessionStart(e) => {
-                self.store
-                    .record(StoreEvent::Session(StoreSessionEvent {
-                        session_id: e.session_id.clone(),
-                        proxy: e.proxy.clone(),
-                        started_at: e.ts,
-                        client_name: e.client_name.clone(),
-                        client_version: e.client_version.clone(),
-                        client_platform: e.client_platform.clone(),
-                    }));
+                self.store.record(StoreEvent::Session(StoreSessionEvent {
+                    session_id: e.session_id.clone(),
+                    proxy: e.proxy.clone(),
+                    started_at: e.ts,
+                    client_name: e.client_name.clone(),
+                    client_version: e.client_version.clone(),
+                    client_platform: e.client_platform.clone(),
+                }));
             }
             ProxyEvent::SessionEnd(e) => {
                 self.store.record(StoreEvent::SessionClosed {

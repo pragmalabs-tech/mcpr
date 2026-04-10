@@ -65,11 +65,11 @@ mod config;
 mod daemon;
 mod display;
 mod event_bus;
-mod stderr_sink;
 mod mcp_handler;
 mod onboarding;
 mod passthrough;
 mod proxy;
+mod stderr_sink;
 mod widgets;
 
 use std::sync::Arc;
@@ -281,7 +281,13 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         let host_port = stripped.split('/').next().unwrap_or(stripped);
         host_port
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
             .collect::<String>()
     };
 
@@ -315,7 +321,8 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     // Determine public URL
     let public_url = if !cfg.tunnel {
         // No tunnel — mark as connected (local-only)
-        proxy_state::lock_state(&proxy_state_ref).tunnel_status = proxy_state::ConnectionStatus::Connected;
+        proxy_state::lock_state(&proxy_state_ref).tunnel_status =
+            proxy_state::ConnectionStatus::Connected;
         format!("http://localhost:{actual_port}")
     } else {
         let relay_url = cfg.relay_url.as_deref().unwrap();
@@ -454,7 +461,9 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     let mut sinks: Vec<Box<dyn mcpr_core::event::EventSink>> = Vec::new();
 
     // 1. Stderr sink — real-time console output.
-    sinks.push(Box::new(stderr_sink::StderrSink::new(cfg.runtime.log_format)));
+    sinks.push(Box::new(stderr_sink::StderrSink::new(
+        cfg.runtime.log_format,
+    )));
 
     // 2. SQLite sink — local storage for CLI queries.
     if let Some(db_path) = mcpr_integrations::store::path::resolve_db_path(None) {
@@ -619,7 +628,6 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
 
     eprintln!("[mcpr] Shutdown complete.");
 }
-
 
 /// Validate MCP URL format at startup. Exits with an error for clearly invalid URLs,
 /// warns for suspicious patterns that might indicate a misconfiguration.
@@ -879,17 +887,19 @@ async fn health_check_loop(app_state: AppState) {
         // Emit heartbeat event via the event bus.
         {
             let s = proxy_state::lock_state(&app_state.proxy_state_ref);
-            app_state.event_bus.emit(mcpr_core::event::ProxyEvent::Heartbeat(
-                mcpr_core::event::HeartbeatEvent {
-                    ts: chrono::Utc::now().timestamp_millis(),
-                    proxy: app_state.proxy_name.clone(),
-                    mcp_status: s.mcp_status.label().to_string(),
-                    tunnel_status: s.tunnel_status.label().to_string(),
-                    widgets_status: s.widgets_status.label().to_string(),
-                    uptime_secs: s.started_at.elapsed().as_secs(),
-                    request_count: s.request_count,
-                },
-            ));
+            app_state
+                .event_bus
+                .emit(mcpr_core::event::ProxyEvent::Heartbeat(
+                    mcpr_core::event::HeartbeatEvent {
+                        ts: chrono::Utc::now().timestamp_millis(),
+                        proxy: app_state.proxy_name.clone(),
+                        mcp_status: s.mcp_status.label().to_string(),
+                        tunnel_status: s.tunnel_status.label().to_string(),
+                        widgets_status: s.widgets_status.label().to_string(),
+                        uptime_secs: s.started_at.elapsed().as_secs(),
+                        request_count: s.request_count,
+                    },
+                ));
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

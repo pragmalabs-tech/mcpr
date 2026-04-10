@@ -185,14 +185,16 @@ pub async fn handle_mcp_post(
             (None, None, None)
         };
 
-        state.event_bus.emit(ProxyEvent::SessionStart(SessionStartEvent {
-            session_id: sid.clone(),
-            proxy: state.proxy_name.clone(),
-            ts: chrono::Utc::now().timestamp_millis(),
-            client_name,
-            client_version,
-            client_platform,
-        }));
+        state
+            .event_bus
+            .emit(ProxyEvent::SessionStart(SessionStartEvent {
+                session_id: sid.clone(),
+                proxy: state.proxy_name.clone(),
+                ts: chrono::Utc::now().timestamp_millis(),
+                client_name,
+                client_version,
+                client_platform,
+            }));
     }
 
     let log_session_id = resp_session_id.or(req_session_id);

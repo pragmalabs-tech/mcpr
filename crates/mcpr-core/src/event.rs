@@ -151,5 +151,7 @@ pub struct NoopSink;
 
 impl EventSink for NoopSink {
     fn on_event(&self, _event: &ProxyEvent) {}
-    fn name(&self) -> &'static str { "noop" }
+    fn name(&self) -> &'static str {
+        "noop"
+    }
 }
