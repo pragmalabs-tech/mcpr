@@ -1,12 +1,9 @@
 //! # mcpr-integrations
 //!
-//! External integrations for the mcpr proxy: event emitters, and (future)
-//! metrics sinks, feature flags, and analytics providers.
+//! External integrations and local persistence for the mcpr proxy.
 //!
-//! This crate is the extension point for connecting mcpr to external services.
-//! Each integration category lives in its own module with a shared trait and
-//! one or more implementations. All integrations are runtime-configured via
-//! `mcpr.toml` — no compile-time feature flags needed.
+//! This crate connects mcpr to external services (cloud dashboard) and
+//! provides local request storage (SQLite) for CLI observability commands.
 //!
 //! ## Current Integrations
 //!
@@ -15,13 +12,11 @@
 //!   - `CloudEmitter` — batched HTTPS POST to cloud.mcpr.app
 //!   - `NoopEmitter` — disabled events
 //!
-//! ## Future Integrations (planned)
-//!
-//! - **Metrics** (`metrics` module): `MetricsSink` trait for Prometheus,
-//!   Grafana, Datadog, etc.
-//! - **Feature flags** (`flags` module): `FeatureFlags` trait for Statsig,
-//!   LaunchDarkly, etc.
-//! - **Analytics** (`analytics` module): Usage analytics and reporting.
+//! - **Store** (`store` module): SQLite-based request storage engine and
+//!   query layer powering all CLI observability commands.
+//!   - `Store` — background writer with async mpsc channel
+//!   - `QueryEngine` — read-only queries (logs, slow, stats, sessions, clients)
+//!   - `FileStoreConfig` — `[store]` TOML config with `ModuleConfig` validation
 //!
 //! ## Module Structure
 //!
@@ -29,19 +24,29 @@
 //! mcpr-integrations/src/
 //! +-- lib.rs              # Crate root, re-exports
 //! +-- emitter/
+//! |   +-- mod.rs          # Module root, re-exports
+//! |   +-- traits.rs       # EventEmitter trait, NoopEmitter
+//! |   +-- event.rs        # McprEvent struct, EventType, EventStatus
+//! |   +-- cloud.rs        # CloudEmitter (batched HTTP POST)
+//! +-- store/
 //!     +-- mod.rs          # Module root, re-exports
-//!     +-- traits.rs       # EventEmitter trait, NoopEmitter
-//!     +-- event.rs        # McprEvent struct, EventType, EventStatus
-//!     +-- cloud.rs        # CloudEmitter (batched HTTP POST)
+//!     +-- config.rs       # FileStoreConfig, ModuleConfig impl
+//!     +-- db.rs           # SQLite connection, WAL setup, migrations
+//!     +-- duration.rs     # Human-friendly duration parsing (1h, 7d)
+//!     +-- engine.rs       # Store struct (open, record, shutdown)
+//!     +-- event.rs        # StoreEvent, RequestEvent, SessionEvent
+//!     +-- path.rs         # DB path resolution (config > env > platform)
+//!     +-- schema.rs       # SQL DDL, indexes, prepared statements
+//!     +-- writer.rs       # Background writer thread, batch flush
+//!     +-- query/          # Read-only query engine
+//!         +-- mod.rs      # QueryEngine struct
+//!         +-- logs.rs     # Request log queries
+//!         +-- slow.rs     # Slow call queries
+//!         +-- stats.rs    # Per-tool aggregation with p95
+//!         +-- sessions.rs # Session list with active filter
+//!         +-- clients.rs  # Client aggregation
+//!         +-- store_ops.rs# Store stats and vacuum
 //! ```
-//!
-//! ## Adding a New Integration
-//!
-//! 1. Create a new module (e.g., `src/metrics/`)
-//! 2. Define a trait (e.g., `MetricsSink`)
-//! 3. Implement it for each backend
-//! 4. Add a TOML config section in `mcpr-cli`
-//! 5. Wire it up in CLI startup
 
 pub mod emitter;
 pub mod store;

@@ -135,7 +135,7 @@ mod tests {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(100)),
                 request_timeout: std::time::Duration::from_secs(30),
             },
-            tui_state: crate::tui::new_shared_state(),
+            proxy_state_ref: mcpr_proxy::new_shared_state(),
             logger: crate::logger::LogRouter::start(vec![]).router,
             events: Arc::new(mcpr_integrations::NoopEmitter),
             sessions: mcpr_protocol::session::MemorySessionStore::new(),

@@ -176,9 +176,9 @@ pub async fn handle_mcp_post(
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
         .map(String::from);
-    // On successful initialize, confirm MCP connectivity in the TUI
+    // On successful initialize, confirm MCP connectivity.
     if mcp_method == McpMethod::Initialize && status < 400 {
-        state.tui_state.lock().unwrap().confirm_mcp_connected();
+        mcpr_proxy::lock_state(&state.proxy_state_ref).confirm_mcp_connected();
     }
 
     if mcp_method == McpMethod::Initialize

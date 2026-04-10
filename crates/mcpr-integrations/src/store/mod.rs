@@ -5,7 +5,7 @@
 //! read from here.
 //!
 //! This is a local event sink — the same pattern as [`crate::emitter`], but
-//! writing to SQLite instead of cloud or stdout.
+//! writing to SQLite instead of an external service.
 //!
 //! # Architecture
 //!
