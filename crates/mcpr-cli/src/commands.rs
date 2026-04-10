@@ -151,7 +151,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
         }
     } else {
         println!(
-            "{:<21} {:<14} {:<22} {:>8}  STATUS",
+            "{:<21} {:<28} {:<32} {:>8}  STATUS",
             "TIME", "METHOD", "TOOL", "LATENCY"
         );
         for row in &rows {
@@ -161,7 +161,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
                 s => s.to_string(),
             };
             println!(
-                "{:<21} {:<14} {:<22} {:>8}  {}",
+                "{:<21} {:<28} {:<32} {:>8}  {}",
                 format_ts(row.ts),
                 row.method,
                 tool,
@@ -188,7 +188,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
                 } else {
                     let tool = row.tool.as_deref().unwrap_or("—");
                     println!(
-                        "{:<21} {:<14} {:<22} {:>8}  {}",
+                        "{:<21} {:<28} {:<32} {:>8}  {}",
                         format_ts(row.ts),
                         row.method,
                         tool,
@@ -229,13 +229,13 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
             name, args.since, args.threshold
         );
         println!(
-            "  {:<22} {:>10}   {:<21}  STATUS",
+            "  {:<32} {:>10}   {:<21}  STATUS",
             "TOOL", "LATENCY", "TIME"
         );
         for row in &rows {
             let tool = row.tool.as_deref().unwrap_or(&row.method);
             println!(
-                "  {:<22} {:>10}   {:<21}  {}",
+                "  {:<32} {:>10}   {:<21}  {}",
                 tool,
                 format_latency(row.latency_ms),
                 format_ts(row.ts),
@@ -530,12 +530,12 @@ fn cmd_proxy_session(args: ProxySessionArgs) -> Result<(), String> {
 
         if !detail.requests.is_empty() {
             println!(
-                "\n  {:<20} {:<16} {:<16} {:>10} {:>8}",
+                "\n  {:<20} {:<28} {:<32} {:>10} {:>8}",
                 "TIME", "METHOD", "TOOL", "LATENCY", "STATUS"
             );
             for r in &detail.requests {
                 println!(
-                    "  {:<20} {:<16} {:<16} {:>10} {:>8}",
+                    "  {:<20} {:<28} {:<32} {:>10} {:>8}",
                     format_ts(r.ts),
                     r.method,
                     r.tool.as_deref().unwrap_or("—"),

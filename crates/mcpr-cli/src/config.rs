@@ -28,6 +28,8 @@ pub enum CliAction {
     Status,
     Validate(ValidateArgs),
     Version,
+    /// Update mcpr to the latest version.
+    Update,
     /// Read-only query against the store — no server needed.
     Proxy(ProxyCommand),
     /// Store maintenance commands.
@@ -164,6 +166,8 @@ enum Commands {
     Validate(ValidateArgs),
     /// Print version information and exit
     Version,
+    /// Update mcpr to the latest version
+    Update,
     /// Query proxy observability data (logs, slow calls, stats, sessions, clients)
     Proxy(ProxyArgs),
     /// Storage maintenance (stats, vacuum)
@@ -785,6 +789,7 @@ pub fn load() -> CliAction {
     match cli.command {
         Some(Commands::Validate(args)) => return CliAction::Validate(args),
         Some(Commands::Version) => return CliAction::Version,
+        Some(Commands::Update) => return CliAction::Update,
         Some(Commands::Proxy(args)) => return CliAction::Proxy(args.command),
         Some(Commands::Store(args)) => return CliAction::Store(args.command),
         Some(Commands::Stop) => return CliAction::Stop,

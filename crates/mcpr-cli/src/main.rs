@@ -276,6 +276,20 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 })
             );
         }
+        CliAction::Update => {
+            eprintln!("Updating mcpr to the latest version...");
+            let status = std::process::Command::new("sh")
+                .args(["-c", "curl -fsSL https://mcpr.app/install.sh | sh"])
+                .status();
+            match status {
+                Ok(s) if s.success() => {}
+                Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+                Err(e) => {
+                    eprintln!("update failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         CliAction::Proxy(cmd) => {
             commands::handle_proxy_command(cmd);
         }
