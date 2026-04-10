@@ -148,40 +148,76 @@ impl mcpr_tunnel::TunnelStatusCallback for TunnelStatusAdapter {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    match config::load() {
+/// Entry point — handles daemonization BEFORE starting tokio.
+///
+/// Tokio's IO driver uses epoll/kqueue file descriptors that don't survive
+/// fork(). So we must fork first, then start the async runtime in the child.
+fn main() {
+    let action = config::load();
+
+    // Daemonize before tokio starts (if needed).
+    // Tokio's IO driver uses kqueue/epoll fds that don't survive fork().
+    let ready_fd: Option<i32> = match &action {
+        CliAction::Start {
+            foreground: false,
+            mode: Mode::Gateway(_),
+        } => {
+            #[cfg(unix)]
+            {
+                daemon::ensure_not_running();
+                let fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+                Some(fd)
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: daemon mode is not supported on this platform");
+                eprintln!("  Use `mcpr start --foreground` or a service manager.");
+                std::process::exit(1);
+            }
+        }
+        CliAction::Restart(Mode::Gateway(_)) => {
+            #[cfg(unix)]
+            {
+                daemon::stop_daemon_if_running();
+                let fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+                Some(fd)
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: daemon management not supported on this platform");
+                std::process::exit(1);
+            }
+        }
+        _ => None,
+    };
+
+    // Now start the tokio runtime (in the daemon child or the original process).
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime")
+        .block_on(async_main(action, ready_fd));
+}
+
+async fn async_main(action: CliAction, ready_fd: Option<i32>) {
+    match action {
         CliAction::Start { mode, foreground } => match mode {
             Mode::Relay(cfg) => {
                 if !foreground {
+                    // Daemon mode for relay — already forked above, just run.
                     eprintln!("error: relay mode requires --foreground");
                     std::process::exit(1);
                 }
                 mcpr_tunnel::relay::start_relay(cfg).await;
             }
             Mode::Gateway(cfg) => {
-                if foreground {
-                    // Foreground mode: no daemon, attach to terminal.
-                    run_gateway(*cfg, None).await;
-                } else {
-                    // Daemon mode (default).
-                    #[cfg(unix)]
-                    {
-                        daemon::ensure_not_running();
-                        let ready_fd =
-                            daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
-                                eprintln!("error: {e}");
-                                std::process::exit(1);
-                            });
-                        run_gateway(*cfg, Some(ready_fd)).await;
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        eprintln!("error: daemon mode is not supported on this platform");
-                        eprintln!("  Use `mcpr start --foreground` or a service manager.");
-                        std::process::exit(1);
-                    }
-                }
+                run_gateway(*cfg, ready_fd).await;
             }
         },
         CliAction::Stop => {
@@ -199,21 +235,8 @@ async fn main() {
                 std::process::exit(1);
             }
             Mode::Gateway(cfg) => {
-                #[cfg(unix)]
-                {
-                    daemon::stop_daemon_if_running();
-                    let ready_fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
-                    });
-                    run_gateway(*cfg, Some(ready_fd)).await;
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = cfg;
-                    eprintln!("error: daemon management not supported on this platform");
-                    std::process::exit(1);
-                }
+                // Daemonize already happened in main() before tokio started.
+                run_gateway(*cfg, ready_fd).await;
             }
         },
         CliAction::Status => {
@@ -308,14 +331,17 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         .expect("Failed to bind");
     let actual_port = listener.local_addr().unwrap().port();
 
-    // If daemon mode, write PID file and signal readiness to the parent.
+    // Write PID file so `mcpr status` works in both daemon and foreground mode.
     #[cfg(unix)]
-    if let Some(fd) = ready_fd {
+    {
         if let Err(e) = daemon::write_pid_file(actual_port, &proxy_name) {
             eprintln!("error: failed to write PID file: {e}");
             std::process::exit(1);
         }
-        daemon::signal_ready(fd);
+        // If daemon mode, signal readiness to the parent process.
+        if let Some(fd) = ready_fd {
+            daemon::signal_ready(fd);
+        }
     }
 
     // Determine public URL
@@ -328,9 +354,16 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         let relay_url = cfg.relay_url.as_deref().unwrap();
         let config_path = cfg.config_path.clone();
 
-        // If using tunnel.mcpr.app without a token, run the interactive claim flow
+        // If using tunnel.mcpr.app without a token, run the interactive claim flow.
+        // In daemon mode, stdin is /dev/null — can't do interactive onboarding.
         let is_mcpr_relay = relay_url.contains("tunnel.mcpr.app");
         let (token, desired_subdomain) = if is_mcpr_relay && cfg.tunnel_token.is_none() {
+            if ready_fd.is_some() {
+                eprintln!(
+                    "error: tunnel requires a token in daemon mode. Run `mcpr start --foreground --tunnel` first to complete onboarding, then restart as daemon."
+                );
+                std::process::exit(1);
+            }
             eprintln!(
                 "\n  {} Welcome! Let's set up your tunnel.\n",
                 colored::Colorize::cyan("→"),
@@ -621,10 +654,9 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     event_bus_handle.shutdown().await;
 
     // Clean up PID file if we're running as a daemon.
+    // Clean up PID file (written in both daemon and foreground mode).
     #[cfg(unix)]
-    if ready_fd.is_some() {
-        daemon::remove_pid_file();
-    }
+    daemon::remove_pid_file();
 
     eprintln!("[mcpr] Shutdown complete.");
 }
