@@ -263,6 +263,7 @@ mcpr store vacuum --before 7d --proxy localhost-9000  # scope to one proxy
 
 | Command | Description |
 |---------|-------------|
+| `mcpr update` | Update mcpr to the latest version |
 | `mcpr validate` | Validate `mcpr.toml` and exit |
 | `mcpr validate -c path/to/mcpr.toml` | Validate a specific file |
 | `mcpr version` | Print version as JSON |

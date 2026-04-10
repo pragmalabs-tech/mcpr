@@ -134,6 +134,7 @@ mcpr proxy clients [name]      AI client breakdown
 mcpr store stats               Database size and row counts
 mcpr store vacuum --before 7d  Delete old records, reclaim disk
 
+mcpr update                    Update mcpr to the latest version
 mcpr validate                  Validate mcpr.toml
 mcpr version                   Print version as JSON
 ```
