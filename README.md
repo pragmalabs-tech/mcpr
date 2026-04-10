@@ -11,7 +11,7 @@ Route, log, and secure MCP traffic — from dev to production.
 mcpr start --mcp http://localhost:9000/mcp --port 3000
 ```
 
-![mcpr TUI dashboard showing proxied MCP requests with tool names and latency](docs/mcpr-demo.gif)
+![mcpr TUI dashboard showing information](docs/mcpr-demo.gif)
 
 ---
 
@@ -79,14 +79,7 @@ The cloud dashboard gives you:
 - **Event Log** — live streaming log with search, filters, export
 - **Global Filters** — filter by tools (multi-select), client, status, and custom time ranges
 
-<!-- SCREENSHOT: replace with actual dashboard screenshot -->
 ![mcpr.app dashboard](docs/cloud-dashboard.png)
-
-Answer questions like:
-- "Which tool is slow?" — sort by p95, see the latency bar
-- "Is it my server or the client?" — filter by ChatGPT vs Claude vs VS Code
-- "What happened in this user's session?" — click a session ID, see every event in order
-- "When did errors start?" — error timeline shows exactly when and which tools broke
 
 ## CSP Handling
 

@@ -13,3 +13,5 @@ static/studio/
 studio/
 mcpr.toml
 logs
+
+*.tape
