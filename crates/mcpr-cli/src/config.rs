@@ -77,6 +77,10 @@ impl std::fmt::Display for LogFormat {
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+
+    /// Path to config file (default: ./mcpr.toml)
+    #[arg(long, short, global = true)]
+    config: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -377,18 +381,6 @@ struct FileCloudConfig {
     flush_interval_ms: Option<u64>,
 }
 
-/// `[logging]` table in config file
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct FileLoggingConfig {
-    /// Enable JSONL file logging.
-    file: bool,
-    /// Directory for log files (default: "./logs").
-    dir: Option<String>,
-    /// Rotation strategy: "daily" or "size:50MB" (default: "daily").
-    rotation: Option<String>,
-}
-
 /// Config file format (mcpr.toml)
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -411,11 +403,7 @@ struct FileConfig {
     // -- Cloud sync --
     cloud: FileCloudConfig,
 
-    // -- Logging --
-    logging: FileLoggingConfig,
-
     // -- Runtime --
-    no_tui: bool,
     drain_timeout: Option<u64>,
     log_format: Option<String>,
 
@@ -427,68 +415,60 @@ struct FileConfig {
     max_concurrent_upstream: Option<usize>,
     connect_timeout: Option<u64>,
     request_timeout: Option<u64>,
-
-    // -- Legacy flat fields (backward compat) --
-    relay_domain: Option<String>,
-    relay_url: Option<String>,
-    tunnel_token: Option<String>,
-    tunnel_subdomain: Option<String>,
 }
 
 impl FileConfig {
-    /// Load config from mcpr.toml, searching current dir then parent dirs.
-    fn load() -> (Self, Option<std::path::PathBuf>) {
-        let mut dir = std::env::current_dir().ok();
-        while let Some(d) = dir {
-            let path = d.join(CONFIG_FILE);
-            if path.exists()
-                && let Ok(contents) = std::fs::read_to_string(&path)
-            {
-                match toml::from_str::<FileConfig>(&contents) {
-                    Ok(config) => {
-                        eprintln!(
-                            "  {} loaded {}",
-                            colored::Colorize::dimmed("config"),
-                            path.display()
-                        );
-                        return (config, Some(path));
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "  {}: failed to parse {}: {}",
-                            colored::Colorize::yellow("warn"),
-                            path.display(),
-                            e
-                        );
-                    }
-                }
+    /// Load config from a specific path, or ./mcpr.toml by default.
+    fn load(explicit_path: Option<&str>) -> (Self, Option<std::path::PathBuf>) {
+        let path = match explicit_path {
+            Some(p) => std::path::PathBuf::from(p),
+            None => std::env::current_dir()
+                .unwrap_or_default()
+                .join(CONFIG_FILE),
+        };
+
+        if !path.exists() {
+            if explicit_path.is_some() {
+                eprintln!(
+                    "  {}: config file not found: {}",
+                    colored::Colorize::red("error"),
+                    path.display()
+                );
+                std::process::exit(1);
             }
-            dir = d.parent().map(|p| p.to_path_buf());
+            return (FileConfig::default(), None);
         }
-        (FileConfig::default(), None)
-    }
 
-    /// Resolve relay domain: [relay].domain > relay_domain (legacy)
-    fn relay_domain(&self) -> Option<String> {
-        self.relay.domain.clone().or(self.relay_domain.clone())
-    }
-
-    /// Resolve tunnel relay URL: [tunnel].relay_url > relay_url (legacy)
-    fn tunnel_relay_url(&self) -> Option<String> {
-        self.tunnel.relay_url.clone().or(self.relay_url.clone())
-    }
-
-    /// Resolve tunnel token: [tunnel].token > tunnel_token (legacy)
-    fn tunnel_token(&self) -> Option<String> {
-        self.tunnel.token.clone().or(self.tunnel_token.clone())
-    }
-
-    /// Resolve tunnel subdomain: [tunnel].subdomain > tunnel_subdomain (legacy)
-    fn tunnel_subdomain(&self) -> Option<String> {
-        self.tunnel
-            .subdomain
-            .clone()
-            .or(self.tunnel_subdomain.clone())
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => match toml::from_str::<FileConfig>(&contents) {
+                Ok(config) => {
+                    eprintln!(
+                        "  {} loaded {}",
+                        colored::Colorize::dimmed("config"),
+                        path.display()
+                    );
+                    (config, Some(path))
+                }
+                Err(e) => {
+                    eprintln!(
+                        "  {}: failed to parse {}: {}",
+                        colored::Colorize::red("error"),
+                        path.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!(
+                    "  {}: failed to read {}: {}",
+                    colored::Colorize::red("error"),
+                    path.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        }
     }
 
     /// Is relay mode via config file: mode = "relay"
@@ -500,7 +480,6 @@ impl FileConfig {
 // ── Gateway config ──────────────────────────────────────────────────────
 
 /// Resolved configuration for gateway (proxy) mode.
-#[allow(dead_code)]
 pub struct GatewayConfig {
     pub mcp: Option<String>,
     pub widgets: Option<String>,
@@ -519,9 +498,6 @@ pub struct GatewayConfig {
     pub max_concurrent_upstream: Option<usize>,
     pub connect_timeout: Option<u64>,
     pub request_timeout: Option<u64>,
-    pub log_file: bool,
-    pub log_dir: Option<String>,
-    pub log_rotation: Option<String>,
     pub cloud_token: Option<String>,
     pub cloud_server: Option<String>,
     pub cloud_endpoint: Option<String>,
@@ -545,77 +521,8 @@ impl GatewayConfig {
 
     /// Append tunnel token to the config file so the URL persists across restarts.
     pub fn save_tunnel_token(path: &std::path::Path, token: &str) {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => {
-                // Check for new [tunnel] table format first
-                if contents.contains("[tunnel]") {
-                    if contents.contains("token =") || contents.contains("token=") {
-                        return; // already set
-                    }
-                    // Insert token under [tunnel] section
-                    let new_contents =
-                        contents.replacen("[tunnel]", &format!("[tunnel]\ntoken = \"{token}\""), 1);
-                    if let Err(e) = std::fs::write(path, new_contents) {
-                        eprintln!(
-                            "  {}: failed to save tunnel token to {}: {}",
-                            colored::Colorize::yellow("warn"),
-                            path.display(),
-                            e
-                        );
-                    } else {
-                        eprintln!(
-                            "  {} saved tunnel token to {}",
-                            colored::Colorize::dimmed("config"),
-                            path.display()
-                        );
-                    }
-                    return;
-                }
-
-                // Legacy flat format
-                if contents.contains("# tunnel_token") {
-                    let new_contents = contents.replacen(
-                        &contents
-                            .lines()
-                            .find(|l| l.contains("# tunnel_token"))
-                            .unwrap_or("# tunnel_token = \"\"")
-                            .to_string(),
-                        &format!("tunnel_token = \"{token}\""),
-                        1,
-                    );
-                    if let Err(e) = std::fs::write(path, new_contents) {
-                        eprintln!(
-                            "  {}: failed to save tunnel_token to {}: {}",
-                            colored::Colorize::yellow("warn"),
-                            path.display(),
-                            e
-                        );
-                    } else {
-                        eprintln!(
-                            "  {} saved tunnel_token to {}",
-                            colored::Colorize::dimmed("config"),
-                            path.display()
-                        );
-                    }
-                } else if !contents.contains("tunnel_token") {
-                    let new_contents =
-                        format!("{}\ntunnel_token = \"{token}\"\n", contents.trim_end());
-                    if let Err(e) = std::fs::write(path, new_contents) {
-                        eprintln!(
-                            "  {}: failed to save tunnel_token to {}: {}",
-                            colored::Colorize::yellow("warn"),
-                            path.display(),
-                            e
-                        );
-                    } else {
-                        eprintln!(
-                            "  {} saved tunnel_token to {}",
-                            colored::Colorize::dimmed("config"),
-                            path.display()
-                        );
-                    }
-                }
-            }
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
             Err(e) => {
                 eprintln!(
                     "  {}: failed to read {}: {}",
@@ -623,7 +530,33 @@ impl GatewayConfig {
                     path.display(),
                     e
                 );
+                return;
             }
+        };
+
+        if contents.contains("token =") || contents.contains("token=") {
+            return; // already set
+        }
+
+        let new_contents = if contents.contains("[tunnel]") {
+            contents.replacen("[tunnel]", &format!("[tunnel]\ntoken = \"{token}\""), 1)
+        } else {
+            format!("{}\n\n[tunnel]\ntoken = \"{token}\"\n", contents.trim_end())
+        };
+
+        if let Err(e) = std::fs::write(path, new_contents) {
+            eprintln!(
+                "  {}: failed to save tunnel token to {}: {}",
+                colored::Colorize::yellow("warn"),
+                path.display(),
+                e
+            );
+        } else {
+            eprintln!(
+                "  {} saved tunnel token to {}",
+                colored::Colorize::dimmed("config"),
+                path.display()
+            );
         }
     }
 
@@ -729,7 +662,7 @@ pub fn load() -> CliAction {
     let foreground = matches!(&cli.command, Some(Commands::Start(args)) if args.foreground);
     let is_restart = matches!(cli.command, Some(Commands::Restart));
 
-    let (file, config_path) = FileConfig::load();
+    let (file, config_path) = FileConfig::load(cli.config.as_deref());
 
     let runtime = RuntimeOptions {
         drain_timeout: file.drain_timeout.unwrap_or(30),
@@ -800,7 +733,7 @@ pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
                 if config.port.is_none() {
                     issues.push(("error", "'port' is required for relay mode".to_string()));
                 }
-                if config.relay_domain().is_none() {
+                if config.relay.domain.is_none() {
                     issues.push((
                         "error",
                         "'relay.domain' is required for relay mode".to_string(),
@@ -860,7 +793,8 @@ fn load_relay(file: FileConfig, _runtime: RuntimeOptions) -> Mode {
         .port
         .expect("port is required for relay mode in mcpr.toml");
     let relay_domain = file
-        .relay_domain()
+        .relay
+        .domain
         .expect("relay.domain is required for relay mode in mcpr.toml");
 
     let tokens = file
@@ -891,19 +825,19 @@ fn load_gateway(
         None => CspMode::default(),
     };
 
-    let tunnel_relay_url = file.tunnel_relay_url();
-    let tunnel_token = file.tunnel_token();
-    let tunnel_subdomain = file.tunnel_subdomain();
-
     Mode::Gateway(Box::new(GatewayConfig {
         mcp: file.mcp,
         widgets: file.widgets,
         port: file.port,
         csp_domains: file.csp.domains,
         csp_mode,
-        relay_url: Some(tunnel_relay_url.unwrap_or_else(|| "https://tunnel.mcpr.app".to_string())),
-        tunnel_token,
-        tunnel_subdomain,
+        relay_url: Some(
+            file.tunnel
+                .relay_url
+                .unwrap_or_else(|| "https://tunnel.mcpr.app".to_string()),
+        ),
+        tunnel_token: file.tunnel.token,
+        tunnel_subdomain: file.tunnel.subdomain,
         tunnel_anonymous: file.tunnel.anonymous,
         tunnel: file.tunnel.enabled,
         config_path,
@@ -912,9 +846,6 @@ fn load_gateway(
         max_concurrent_upstream: file.max_concurrent_upstream,
         connect_timeout: file.connect_timeout,
         request_timeout: file.request_timeout,
-        log_file: file.logging.file,
-        log_dir: file.logging.dir,
-        log_rotation: file.logging.rotation,
         cloud_token: file.cloud.token,
         cloud_server: file.cloud.server,
         cloud_endpoint: file.cloud.endpoint,
