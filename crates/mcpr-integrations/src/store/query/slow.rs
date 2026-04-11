@@ -13,6 +13,8 @@ pub struct SlowParams {
     pub threshold_ms: i64,
     /// Only rows newer than this unix ms timestamp.
     pub since_ts: i64,
+    /// Filter to a specific tool name.
+    pub tool: Option<String>,
     /// Maximum number of rows to return.
     pub limit: i64,
 }
@@ -25,9 +27,10 @@ impl QueryEngine {
             FROM requests
             WHERE proxy = ?1
               AND latency_ms >= ?2
-              AND ts >= ?3
+              AND (?3 IS NULL OR tool = ?3)
+              AND ts >= ?4
             ORDER BY latency_ms DESC
-            LIMIT ?4"
+            LIMIT ?5"
         );
 
         let mut stmt = self.conn().prepare(&sql)?;
@@ -35,6 +38,7 @@ impl QueryEngine {
             params![
                 params.proxy,
                 params.threshold_ms,
+                params.tool,
                 params.since_ts,
                 params.limit,
             ],
@@ -55,13 +59,14 @@ impl QueryEngine {
             FROM requests
             WHERE proxy = ?1
               AND latency_ms >= ?2
-              AND ts > ?3
+              AND (?3 IS NULL OR tool = ?3)
+              AND ts > ?4
             ORDER BY ts ASC"
         );
 
         let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map(
-            params![params.proxy, params.threshold_ms, after_ts],
+            params![params.proxy, params.threshold_ms, params.tool, after_ts],
             map_log_row,
         )?;
 

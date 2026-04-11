@@ -177,6 +177,8 @@ mod tests {
                 since_ts: 0,
                 limit: 100,
                 tool: None,
+                method: None,
+                session: None,
                 status: None,
             })
             .unwrap();
@@ -195,6 +197,8 @@ mod tests {
                 since_ts: 0,
                 limit: 100,
                 tool: Some("search".into()),
+                method: None,
+                session: None,
                 status: None,
             })
             .unwrap();
@@ -211,6 +215,8 @@ mod tests {
                 since_ts: 0,
                 limit: 100,
                 tool: None,
+                method: None,
+                session: None,
                 status: Some("error".into()),
             })
             .unwrap();
@@ -227,6 +233,8 @@ mod tests {
             since_ts: 0,
             limit: 100,
             tool: None,
+            method: None,
+            session: None,
             status: None,
         };
         let rows = engine.logs_since(&params, 3000).unwrap();
@@ -245,13 +253,107 @@ mod tests {
                 since_ts: 0,
                 limit: 100,
                 tool: None,
+                method: None,
+                session: None,
                 status: None,
             })
             .unwrap();
         assert!(rows.is_empty());
     }
 
+    #[test]
+    fn logs_filter_by_session() {
+        let engine = seeded_engine();
+        // s1 has r1, r2, r3
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: "api".into(),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: Some("s1".into()),
+                status: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.session_id.as_deref() == Some("s1")));
+    }
+
+    #[test]
+    fn logs_filter_by_session_prefix() {
+        let engine = seeded_engine();
+        // "s" matches both s1 and s2 — all 5 rows
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: "api".into(),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: Some("s".into()),
+                status: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 5);
+    }
+
+    #[test]
+    fn logs_filter_by_method() {
+        let engine = seeded_engine();
+        // resources/read: only r4
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: "api".into(),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: Some("resources/read".into()),
+                session: None,
+                status: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request_id, "r4");
+    }
+
+    #[test]
+    fn logs_filter_combined_session_and_method() {
+        let engine = seeded_engine();
+        // s1 + tools/call = r1, r2, r3
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: "api".into(),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: Some("tools/call".into()),
+                session: Some("s1".into()),
+                status: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
+
     // ── slow ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn slow_filter_by_tool() {
+        let engine = seeded_engine();
+        // search has latencies 42, 891, 156 — only 891 is above 500
+        let rows = engine
+            .slow(&super::slow::SlowParams {
+                proxy: "api".into(),
+                tool: Some("search".into()),
+                threshold_ms: 500,
+                since_ts: 0,
+                limit: 100,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool.as_deref(), Some("search"));
+        assert_eq!(rows[0].latency_ms, 891);
+    }
 
     #[test]
     fn slow_returns_above_threshold() {
@@ -259,6 +361,7 @@ mod tests {
         let rows = engine
             .slow(&super::slow::SlowParams {
                 proxy: "api".into(),
+                tool: None,
                 threshold_ms: 500,
                 since_ts: 0,
                 limit: 100,
@@ -276,6 +379,7 @@ mod tests {
         let rows = engine
             .slow(&super::slow::SlowParams {
                 proxy: "api".into(),
+                tool: None,
                 threshold_ms: 10000,
                 since_ts: 0,
                 limit: 100,
@@ -466,6 +570,8 @@ mod tests {
                 since_ts: 0,
                 limit: 100,
                 tool: None,
+                method: None,
+                session: None,
                 status: None,
             })
             .unwrap();
@@ -483,6 +589,8 @@ mod tests {
                 since_ts: 0,
                 limit: 1,
                 tool: None,
+                method: None,
+                session: None,
                 status: None,
             })
             .unwrap();

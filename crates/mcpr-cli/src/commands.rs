@@ -131,13 +131,21 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
 fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
     let name = resolve_proxy_name(args.name)?;
-    let since_ts = parse_since(&args.since)?;
+
+    // When --session is set and --since is not, show all time (no time filter).
+    let since_ts = match (&args.since, &args.session) {
+        (Some(s), _) => parse_since(s)?,
+        (None, Some(_)) => 0,
+        (None, None) => parse_since("1h")?,
+    };
 
     let params = LogsParams {
         proxy: name,
         since_ts,
         limit: args.tail,
         tool: args.tool.clone(),
+        method: args.method.clone(),
+        session: args.session.clone(),
         status: args.status.clone(),
     };
 
@@ -215,6 +223,7 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
             proxy: name.clone(),
             threshold_ms,
             since_ts,
+            tool: args.tool.clone(),
             limit: args.limit,
         })
         .map_err(|e| format!("query failed: {e}"))?;
@@ -327,7 +336,7 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
     } else {
         println!("SESSIONS — {} — last {}\n", name, args.since);
         println!(
-            "  {:<38} {:<24} {:<17} {:>12} {:>6} {:>6}",
+            "  {:<10} {:<24} {:<17} {:>12} {:>6} {:>6}",
             "SESSION", "CLIENT", "STARTED", "LAST SEEN", "CALLS", "ERRS"
         );
         for row in &rows {
@@ -337,9 +346,10 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
                 _ => "unknown".to_string(),
             };
             let status_icon = if row.is_active { "●" } else { "○" };
+            let short_id = &row.session_id[..row.session_id.len().min(8)];
             println!(
-                "  {:<38} {:<24} {:<17} {:>12} {:>6} {:>6}",
-                &row.session_id,
+                "  {:<10} {:<24} {:<17} {:>12} {:>6} {:>6}",
+                short_id,
                 format!("{client} {status_icon}"),
                 format_ts(row.started_at),
                 if row.is_active {
