@@ -155,6 +155,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
         method: args.method.clone(),
         session: args.session.clone(),
         status: args.status.clone(),
+        error_code: args.error_code.clone(),
     };
 
     let rows = engine
@@ -167,8 +168,8 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
         }
     } else {
         println!(
-            "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  STATUS",
-            "TIME", "METHOD", "TOOL", "LATENCY", "IN", "OUT"
+            "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {:>8}  STATUS",
+            "TIME", "METHOD", "TOOL", "LATENCY", "IN", "OUT", "ERR"
         );
         for row in &rows {
             let tool = row.tool.as_deref().unwrap_or("—");
@@ -178,16 +179,23 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
             };
             let in_str = format_bytes_col(row.bytes_in);
             let out_str = format_bytes_col(row.bytes_out);
-            println!(
-                "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {}",
+            let err_str = row.error_code.as_deref().unwrap_or("");
+            let line = format!(
+                "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {:>8}  {}",
                 format_ts(row.ts),
                 row.method,
                 tool,
                 format_latency(row.latency_ms),
                 in_str,
                 out_str,
+                err_str,
                 status_str,
             );
+            if row.error_code.is_some() {
+                println!("{}", colored::Colorize::red(line.as_str()));
+            } else {
+                println!("{line}");
+            }
         }
         if rows.is_empty() {
             println!("  (no records found)");
@@ -209,16 +217,27 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
                     let tool = row.tool.as_deref().unwrap_or("—");
                     let in_str = format_bytes_col(row.bytes_in);
                     let out_str = format_bytes_col(row.bytes_out);
-                    println!(
-                        "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {}",
+                    let err_str = row.error_code.as_deref().unwrap_or("");
+                    let status_str = match row.status.as_str() {
+                        "error" => format!("error  {:?}", row.error_msg.as_deref().unwrap_or("")),
+                        s => s.to_string(),
+                    };
+                    let line = format!(
+                        "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {:>8}  {}",
                         format_ts(row.ts),
                         row.method,
                         tool,
                         format_latency(row.latency_ms),
                         in_str,
                         out_str,
-                        row.status,
+                        err_str,
+                        status_str,
                     );
+                    if row.error_code.is_some() {
+                        println!("{}", colored::Colorize::red(line.as_str()));
+                    } else {
+                        println!("{line}");
+                    }
                 }
                 last_ts = row.ts;
             }

@@ -180,6 +180,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 5);
@@ -200,6 +201,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 3);
@@ -218,6 +220,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: Some("error".into()),
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -236,6 +239,7 @@ mod tests {
             method: None,
             session: None,
             status: None,
+            error_code: None,
         };
         let rows = engine.logs_since(&params, 3000).unwrap();
         assert_eq!(rows.len(), 2);
@@ -256,6 +260,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert!(rows.is_empty());
@@ -274,6 +279,7 @@ mod tests {
                 method: None,
                 session: Some("s1".into()),
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 3);
@@ -293,6 +299,7 @@ mod tests {
                 method: None,
                 session: Some("s".into()),
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 5);
@@ -311,6 +318,7 @@ mod tests {
                 method: Some("resources/read".into()),
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -330,9 +338,71 @@ mod tests {
                 method: Some("tools/call".into()),
                 session: Some("s1".into()),
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn logs_filter_by_error_code() {
+        let engine = seeded_engine();
+        // r3 has error_code = "-32600"
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: "api".into(),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: None,
+                status: None,
+                error_code: Some("-32600".into()),
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request_id, "r3");
+        assert_eq!(rows[0].error_code.as_deref(), Some("-32600"));
+    }
+
+    #[test]
+    fn logs_filter_by_error_code_no_match() {
+        let engine = seeded_engine();
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: "api".into(),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: None,
+                status: None,
+                error_code: Some("-32601".into()),
+            })
+            .unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn logs_error_code_present_in_row() {
+        let engine = seeded_engine();
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: "api".into(),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: None,
+                status: None,
+                error_code: None,
+            })
+            .unwrap();
+        // r3 (error) should have error_code, others should not
+        let r3 = rows.iter().find(|r| r.request_id == "r3").unwrap();
+        assert_eq!(r3.error_code.as_deref(), Some("-32600"));
+        let r1 = rows.iter().find(|r| r.request_id == "r1").unwrap();
+        assert!(r1.error_code.is_none());
     }
 
     // ── slow ────────────────────────────────────────────────────────────
@@ -573,6 +643,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(remaining.len(), 2);
@@ -592,6 +663,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         let json = serde_json::to_string(&rows[0]).unwrap();
