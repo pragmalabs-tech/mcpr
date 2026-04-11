@@ -173,6 +173,10 @@ pub struct ProxyLogsArgs {
     #[arg(long)]
     pub status: Option<String>,
 
+    /// Filter by JSON-RPC error code (e.g., -32601 for method not found)
+    #[arg(long)]
+    pub error_code: Option<String>,
+
     /// Output as newline-delimited JSON (one object per line)
     #[arg(long)]
     pub json: bool,

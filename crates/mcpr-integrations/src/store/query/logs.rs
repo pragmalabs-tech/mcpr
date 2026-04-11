@@ -21,6 +21,8 @@ pub struct LogsParams {
     pub session: Option<String>,
     /// Filter by status ("ok", "error", "timeout").
     pub status: Option<String>,
+    /// Filter by JSON-RPC error code (e.g., "-32601").
+    pub error_code: Option<String>,
 }
 
 /// A single row from the logs/slow query.
@@ -32,6 +34,7 @@ pub struct LogRow {
     pub tool: Option<String>,
     pub latency_ms: i64,
     pub status: String,
+    pub error_code: Option<String>,
     pub error_msg: Option<String>,
     pub session_id: Option<String>,
     pub bytes_in: Option<i64>,
@@ -39,7 +42,7 @@ pub struct LogRow {
 }
 
 /// Shared row mapper — used by logs, logs_since, slow, slow_since to avoid
-/// duplicating the 10-column mapping closure.
+/// duplicating the 11-column mapping closure.
 pub(crate) fn map_log_row(row: &Row<'_>) -> rusqlite::Result<LogRow> {
     Ok(LogRow {
         request_id: row.get(0)?,
@@ -48,16 +51,16 @@ pub(crate) fn map_log_row(row: &Row<'_>) -> rusqlite::Result<LogRow> {
         tool: row.get(3)?,
         latency_ms: row.get(4)?,
         status: row.get(5)?,
-        error_msg: row.get(6)?,
-        session_id: row.get(7)?,
-        bytes_in: row.get(8)?,
-        bytes_out: row.get(9)?,
+        error_code: row.get(6)?,
+        error_msg: row.get(7)?,
+        session_id: row.get(8)?,
+        bytes_in: row.get(9)?,
+        bytes_out: row.get(10)?,
     })
 }
 
-/// The 10 columns selected in all log/slow queries.
-pub(crate) const LOG_COLUMNS: &str =
-    "request_id, ts, method, tool, latency_ms, status, error_msg, session_id, bytes_in, bytes_out";
+/// The 11 columns selected in all log/slow queries.
+pub(crate) const LOG_COLUMNS: &str = "request_id, ts, method, tool, latency_ms, status, error_code, error_msg, session_id, bytes_in, bytes_out";
 
 impl QueryEngine {
     /// Fetch recent request logs, newest first.
@@ -70,9 +73,10 @@ impl QueryEngine {
               AND (?3 IS NULL OR status = ?3)
               AND (?4 IS NULL OR method = ?4)
               AND (?5 IS NULL OR session_id LIKE ?5 || '%')
-              AND ts >= ?6
+              AND (?6 IS NULL OR error_code = ?6)
+              AND ts >= ?7
             ORDER BY ts DESC
-            LIMIT ?7"
+            LIMIT ?8"
         );
 
         let mut stmt = self.conn().prepare(&sql)?;
@@ -83,6 +87,7 @@ impl QueryEngine {
                 params.status,
                 params.method,
                 params.session,
+                params.error_code,
                 params.since_ts,
                 params.limit,
             ],
@@ -108,7 +113,8 @@ impl QueryEngine {
               AND (?3 IS NULL OR status = ?3)
               AND (?4 IS NULL OR method = ?4)
               AND (?5 IS NULL OR session_id LIKE ?5 || '%')
-              AND ts > ?6
+              AND (?6 IS NULL OR error_code = ?6)
+              AND ts > ?7
             ORDER BY ts ASC"
         );
 
@@ -120,6 +126,7 @@ impl QueryEngine {
                 params.status,
                 params.method,
                 params.session,
+                params.error_code,
                 after_ts
             ],
             map_log_row,

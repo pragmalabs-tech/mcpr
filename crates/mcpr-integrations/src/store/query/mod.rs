@@ -180,6 +180,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 5);
@@ -200,6 +201,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 3);
@@ -218,6 +220,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: Some("error".into()),
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -236,6 +239,7 @@ mod tests {
             method: None,
             session: None,
             status: None,
+            error_code: None,
         };
         let rows = engine.logs_since(&params, 3000).unwrap();
         assert_eq!(rows.len(), 2);
@@ -256,6 +260,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert!(rows.is_empty());
@@ -274,6 +279,7 @@ mod tests {
                 method: None,
                 session: Some("s1".into()),
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 3);
@@ -293,6 +299,7 @@ mod tests {
                 method: None,
                 session: Some("s".into()),
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 5);
@@ -311,6 +318,7 @@ mod tests {
                 method: Some("resources/read".into()),
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
@@ -330,6 +338,7 @@ mod tests {
                 method: Some("tools/call".into()),
                 session: Some("s1".into()),
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(rows.len(), 3);
@@ -573,6 +582,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         assert_eq!(remaining.len(), 2);
@@ -592,6 +602,7 @@ mod tests {
                 method: None,
                 session: None,
                 status: None,
+                error_code: None,
             })
             .unwrap();
         let json = serde_json::to_string(&rows[0]).unwrap();
