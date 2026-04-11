@@ -310,8 +310,8 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
             name, args.since, result.total_calls, result.error_pct
         );
         println!(
-            "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}",
-            "TOOL", "CALLS", "AVG", "P95", "MAX", "ERRORS", "SIZE"
+            "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}  {:>9}  {:>9}",
+            "TOOL", "CALLS", "AVG", "P95", "MAX", "ERRORS", "BYTES IN", "BYTES OUT", "AVG SIZE"
         );
         for t in &result.tools {
             let error_str = if t.error_pct > 0.0 {
@@ -319,21 +319,34 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
             } else {
                 "0%".to_string()
             };
-            let total_bytes = (t.total_bytes_in.max(0) + t.total_bytes_out.max(0)) as u64;
-            let size_str = if total_bytes > 0 {
-                format_bytes(total_bytes)
+            let bytes_in = t.total_bytes_in.max(0) as u64;
+            let bytes_out = t.total_bytes_out.max(0) as u64;
+            let in_str = if bytes_in > 0 {
+                format_bytes(bytes_in)
+            } else {
+                "—".to_string()
+            };
+            let out_str = if bytes_out > 0 {
+                format_bytes(bytes_out)
+            } else {
+                "—".to_string()
+            };
+            let avg_size = if t.calls > 0 {
+                format_bytes((bytes_in + bytes_out) / t.calls as u64)
             } else {
                 "—".to_string()
             };
             println!(
-                "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}",
+                "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}  {:>9}  {:>9}",
                 t.label,
                 t.calls,
                 format_latency(t.avg_ms as i64),
                 format_latency(t.p95_ms),
                 format_latency(t.max_ms),
                 error_str,
-                size_str,
+                in_str,
+                out_str,
+                avg_size,
             );
         }
         if result.tools.is_empty() {
@@ -496,25 +509,38 @@ fn cmd_proxy_status(args: ProxyStatusArgs) -> Result<(), String> {
 
         if !stats.tools.is_empty() {
             println!(
-                "\n  {:<24} {:>8} {:>10} {:>10} {:>10} {:>8} {:>9}",
-                "TOOL", "CALLS", "AVG", "P95", "MAX", "ERR%", "SIZE"
+                "\n  {:<24} {:>8} {:>10} {:>10} {:>10} {:>8} {:>9} {:>9} {:>9}",
+                "TOOL", "CALLS", "AVG", "P95", "MAX", "ERR%", "BYTES IN", "BYTES OUT", "AVG SIZE"
             );
             for t in &stats.tools {
-                let total_bytes = (t.total_bytes_in.max(0) + t.total_bytes_out.max(0)) as u64;
-                let size_str = if total_bytes > 0 {
-                    format_bytes(total_bytes)
+                let bytes_in = t.total_bytes_in.max(0) as u64;
+                let bytes_out = t.total_bytes_out.max(0) as u64;
+                let in_str = if bytes_in > 0 {
+                    format_bytes(bytes_in)
+                } else {
+                    "—".to_string()
+                };
+                let out_str = if bytes_out > 0 {
+                    format_bytes(bytes_out)
+                } else {
+                    "—".to_string()
+                };
+                let avg_size = if t.calls > 0 {
+                    format_bytes((bytes_in + bytes_out) / t.calls as u64)
                 } else {
                     "—".to_string()
                 };
                 println!(
-                    "  {:<24} {:>8} {:>10} {:>10} {:>10} {:>7.1}% {:>9}",
+                    "  {:<24} {:>8} {:>10} {:>10} {:>10} {:>7.1}% {:>9} {:>9} {:>9}",
                     t.label,
                     t.calls,
                     format_latency(t.avg_ms as i64),
                     format_latency(t.p95_ms),
                     format_latency(t.max_ms),
                     t.error_pct,
-                    size_str,
+                    in_str,
+                    out_str,
+                    avg_size,
                 );
             }
         }
