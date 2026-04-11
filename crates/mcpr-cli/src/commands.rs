@@ -93,6 +93,14 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+/// Format an optional byte count for table columns, showing "—" for None/zero.
+fn format_bytes_col(bytes: Option<i64>) -> String {
+    match bytes {
+        Some(b) if b > 0 => format_bytes(b as u64),
+        _ => "—".to_string(),
+    }
+}
+
 /// Format latency with comma separators for readability.
 fn format_latency(ms: i64) -> String {
     if ms >= 1000 {
@@ -159,8 +167,8 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
         }
     } else {
         println!(
-            "{:<21} {:<28} {:<32} {:>8}  STATUS",
-            "TIME", "METHOD", "TOOL", "LATENCY"
+            "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  STATUS",
+            "TIME", "METHOD", "TOOL", "LATENCY", "IN", "OUT"
         );
         for row in &rows {
             let tool = row.tool.as_deref().unwrap_or("—");
@@ -168,12 +176,16 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
                 "error" => format!("error  {:?}", row.error_msg.as_deref().unwrap_or("")),
                 s => s.to_string(),
             };
+            let in_str = format_bytes_col(row.bytes_in);
+            let out_str = format_bytes_col(row.bytes_out);
             println!(
-                "{:<21} {:<28} {:<32} {:>8}  {}",
+                "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {}",
                 format_ts(row.ts),
                 row.method,
                 tool,
                 format_latency(row.latency_ms),
+                in_str,
+                out_str,
                 status_str,
             );
         }
@@ -195,12 +207,16 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
                     print_json(row);
                 } else {
                     let tool = row.tool.as_deref().unwrap_or("—");
+                    let in_str = format_bytes_col(row.bytes_in);
+                    let out_str = format_bytes_col(row.bytes_out);
                     println!(
-                        "{:<21} {:<28} {:<32} {:>8}  {}",
+                        "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {}",
                         format_ts(row.ts),
                         row.method,
                         tool,
                         format_latency(row.latency_ms),
+                        in_str,
+                        out_str,
                         row.status,
                     );
                 }
@@ -238,15 +254,22 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
             name, args.since, args.threshold
         );
         println!(
-            "  {:<32} {:>10}   {:<21}  STATUS",
-            "TOOL", "LATENCY", "TIME"
+            "  {:<32} {:>10}  {:>9}   {:<21}  STATUS",
+            "TOOL", "LATENCY", "SIZE", "TIME"
         );
         for row in &rows {
             let tool = row.tool.as_deref().unwrap_or(&row.method);
+            let bytes_total = row.bytes_in.unwrap_or(0).max(0) + row.bytes_out.unwrap_or(0).max(0);
+            let size_str = if bytes_total > 0 {
+                format_bytes(bytes_total as u64)
+            } else {
+                "—".to_string()
+            };
             println!(
-                "  {:<32} {:>10}   {:<21}  {}",
+                "  {:<32} {:>10}  {:>9}   {:<21}  {}",
                 tool,
                 format_latency(row.latency_ms),
+                size_str,
                 format_ts(row.ts),
                 row.status,
             );
@@ -287,8 +310,8 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
             name, args.since, result.total_calls, result.error_pct
         );
         println!(
-            "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}",
-            "TOOL", "CALLS", "AVG", "P95", "MAX", "ERRORS"
+            "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}",
+            "TOOL", "CALLS", "AVG", "P95", "MAX", "ERRORS", "SIZE"
         );
         for t in &result.tools {
             let error_str = if t.error_pct > 0.0 {
@@ -296,14 +319,21 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
             } else {
                 "0%".to_string()
             };
+            let total_bytes = (t.total_bytes_in.max(0) + t.total_bytes_out.max(0)) as u64;
+            let size_str = if total_bytes > 0 {
+                format_bytes(total_bytes)
+            } else {
+                "—".to_string()
+            };
             println!(
-                "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}",
+                "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}",
                 t.label,
                 t.calls,
                 format_latency(t.avg_ms as i64),
                 format_latency(t.p95_ms),
                 format_latency(t.max_ms),
                 error_str,
+                size_str,
             );
         }
         if result.tools.is_empty() {
@@ -466,18 +496,25 @@ fn cmd_proxy_status(args: ProxyStatusArgs) -> Result<(), String> {
 
         if !stats.tools.is_empty() {
             println!(
-                "\n  {:<24} {:>8} {:>10} {:>10} {:>10} {:>8}",
-                "TOOL", "CALLS", "AVG", "P95", "MAX", "ERR%"
+                "\n  {:<24} {:>8} {:>10} {:>10} {:>10} {:>8} {:>9}",
+                "TOOL", "CALLS", "AVG", "P95", "MAX", "ERR%", "SIZE"
             );
             for t in &stats.tools {
+                let total_bytes = (t.total_bytes_in.max(0) + t.total_bytes_out.max(0)) as u64;
+                let size_str = if total_bytes > 0 {
+                    format_bytes(total_bytes)
+                } else {
+                    "—".to_string()
+                };
                 println!(
-                    "  {:<24} {:>8} {:>10} {:>10} {:>10} {:>7.1}%",
+                    "  {:<24} {:>8} {:>10} {:>10} {:>10} {:>7.1}% {:>9}",
                     t.label,
                     t.calls,
                     format_latency(t.avg_ms as i64),
                     format_latency(t.p95_ms),
                     format_latency(t.max_ms),
                     t.error_pct,
+                    size_str,
                 );
             }
         }
@@ -689,6 +726,28 @@ mod tests {
         assert_eq!(format_bytes(1024), "1.0 KB");
         assert_eq!(format_bytes(1024 * 1024), "1.0 MB");
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GB");
+    }
+
+    #[test]
+    fn format_bytes_col_none() {
+        assert_eq!(format_bytes_col(None), "—");
+    }
+
+    #[test]
+    fn format_bytes_col_zero() {
+        assert_eq!(format_bytes_col(Some(0)), "—");
+    }
+
+    #[test]
+    fn format_bytes_col_negative() {
+        assert_eq!(format_bytes_col(Some(-1)), "—");
+    }
+
+    #[test]
+    fn format_bytes_col_positive() {
+        assert_eq!(format_bytes_col(Some(512)), "512 B");
+        assert_eq!(format_bytes_col(Some(2048)), "2.0 KB");
+        assert_eq!(format_bytes_col(Some(1_500_000)), "1.4 MB");
     }
 
     #[test]
