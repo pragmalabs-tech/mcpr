@@ -7,8 +7,8 @@
 //!
 //! ## Responsibilities
 //!
-//! - **Configuration** (`config`): CLI argument parsing (clap), TOML config
-//!   file loading, and config validation.
+//! - **Configuration** (`config`): TOML config file loading, CLI subcommand
+//!   routing (clap), and config validation.
 //!
 //! - **Daemon management** (`daemon`): Background process lifecycle — fork,
 //!   PID file, readiness signaling, graceful stop via SIGTERM.
@@ -37,7 +37,7 @@
 //!   on a separate port for orchestration (k8s, docker, etc.).
 //!
 //! - **Onboarding** (`onboarding`): Interactive tunnel setup flow for first-time
-//!   users connecting to tunnel.mcpr.app (when `--tunnel` is enabled).
+//!   users connecting to tunnel.mcpr.app (when `tunnel.enabled = true`).
 //!
 //! ## Module Structure
 //!
@@ -305,7 +305,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
 async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     let proxy_state_ref = proxy_state::new_shared_state();
 
-    let mcp = cfg.mcp.expect("mcp is required in mcpr.toml or --mcp");
+    let mcp = cfg.mcp.expect("mcp is required in mcpr.toml");
 
     // Validate MCP URL format
     validate_mcp_url(&mcp);
@@ -374,7 +374,7 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         let (token, desired_subdomain) = if is_mcpr_relay && cfg.tunnel_token.is_none() {
             if ready_fd.is_some() {
                 eprintln!(
-                    "error: tunnel requires a token in daemon mode. Run `mcpr start --foreground --tunnel` first to complete onboarding, then restart as daemon."
+                    "error: tunnel requires a token in daemon mode. Run `mcpr start --foreground` first to complete onboarding, then restart as daemon."
                 );
                 std::process::exit(1);
             }
@@ -399,7 +399,7 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
                     );
                     if result.anonymous {
                         eprintln!(
-                            "\n  {} This is a temporary tunnel (1 week). To claim a permanent subdomain, re-run `mcpr start --tunnel`.",
+                            "\n  {} This is a temporary tunnel (1 week). To claim a permanent subdomain, re-run `mcpr start --foreground`.",
                             colored::Colorize::yellow("!"),
                         );
                     } else {
@@ -463,9 +463,7 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
                     colored::Colorize::red("error"),
                     e
                 );
-                eprintln!(
-                    "Remove --tunnel flag or `tunnel = true` from config to use proxy-only mode"
-                );
+                eprintln!("Set `tunnel.enabled = false` in mcpr.toml to use proxy-only mode");
                 std::process::exit(1);
             }
         }
