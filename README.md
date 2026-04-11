@@ -8,7 +8,7 @@
 Route, log, and secure MCP traffic — from dev to production.
 
 ```bash
-mcpr start --mcp http://localhost:9000/mcp --port 3000
+mcpr start
 ```
 
 ![mcpr TUI dashboard showing information](docs/mcpr-demo.gif)
@@ -36,9 +36,9 @@ Single Rust binary. No JVM, no Kubernetes, no database.
 
 | Environment | How |
 |---|---|
-| **Local dev** | `mcpr start --mcp :9000` |
-| **Dev + tunnel** | `mcpr start --mcp :9000 --tunnel` |
-| **VPS / VM** | `mcpr start --mcp :9000` |
+| **Local dev** | `mcpr start` |
+| **Dev + tunnel** | `mcpr start` (with `[tunnel]` in `mcpr.toml`) |
+| **VPS / VM** | `mcpr start` |
 | **Docker** | `docker run -p 3000:3000 -p 9901:9901 -v ./mcpr.toml:/app/mcpr.toml ghcr.io/cptrodgers/mcpr:latest` |
 | **Kubernetes** | Helm chart (coming soon) |
 
@@ -123,12 +123,12 @@ mcpr stop                      Stop the daemon
 mcpr restart                   Restart the daemon
 mcpr status                    Show PID, port, uptime, proxy name
 
-mcpr proxy logs [name]         Request logs (--follow, --json, --tool, --status)
-mcpr proxy slow [name]         Slow calls above threshold
+mcpr proxy logs [name]         Request logs (--follow, --tool, --method, --session, --status)
+mcpr proxy slow [name]         Slow calls above threshold (--tool)
 mcpr proxy stats [name]        Per-tool metrics (calls, avg, p95, errors)
 mcpr proxy status [name]       Proxy overview (requests, errors, active sessions)
 mcpr proxy sessions [name]     MCP sessions with client info
-mcpr proxy session <id>        Drill into a session (metadata + all requests)
+mcpr proxy session <id>        Drill into a session (prefix match supported)
 mcpr proxy clients [name]      AI client breakdown
 
 mcpr store stats               Database size and row counts
@@ -148,7 +148,7 @@ See [docs/CLI.md](docs/CLI.md) for full reference with all flags and examples.
 ### Proxy an MCP server
 
 ```bash
-mcpr start --mcp http://localhost:9000 --port 3000 # → mcpr daemon started (PID: 12345, port: 3000)
+mcpr start                                         # → mcpr daemon started (PID: 12345, port: 3000)
 
 mcpr status
 # → mcpr daemon is running

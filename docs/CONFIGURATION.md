@@ -101,29 +101,29 @@ rotation = "daily"
 
 ### Field reference
 
-| Field | CLI | Env | Description |
-|-------|-----|-----|-------------|
-| `mcp` | `--mcp` | | Upstream MCP server URL |
-| `widgets` | `--widgets` | | Widget source: URL or file path |
-| `port` | `--port` | | Local proxy port |
-| `[tunnel].enabled` | `--tunnel` | | Enable tunnel for public URL (default: false) |
-| `[tunnel].relay_url` | `--relay-url` | `MCPR_RELAY_URL` | Relay server URL |
-| `[tunnel].token` | | | Tunnel authentication token |
-| `[tunnel].subdomain` | | | Fixed subdomain for tunnel |
-| `[tunnel].anonymous` | | | Skip interactive claim flow (bool) |
-| `[csp].mode` | `--csp-mode` | | `"extend"` or `"override"` |
-| `[csp].domains` | `--csp` | | Extra CSP domains (repeatable via CLI) |
-| `[cloud].token` | `--cloud-token` | `MCPR_CLOUD_TOKEN` | Cloud sync token from mcpr.app |
-| `[cloud].server` | `--cloud-server` | | Server slug for cloud routing |
-| `[cloud].endpoint` | | | Custom cloud API endpoint |
-| `[cloud].batch_size` | | | Events per batch |
-| `[cloud].flush_interval_ms` | | | Flush interval in milliseconds |
-| `[logging].file` | | | Enable JSONL file logging (bool) |
-| `[logging].dir` | | | Directory for log files |
-| `[logging].rotation` | | | Rotation: `"daily"` or `"size:50MB"` |
-| `[store].enabled` | | | Enable SQLite request storage (default: true) |
-| `[store].path` | | `MCPR_DB` | Override database file path |
-| `[store].name` | | | Proxy name for stored requests |
+| Field | Description |
+|-------|-------------|
+| `mcp` | Upstream MCP server URL |
+| `widgets` | Widget source: URL or file path |
+| `port` | Local proxy port |
+| `[tunnel].enabled` | Enable tunnel for public URL (default: false) |
+| `[tunnel].relay_url` | Relay server URL |
+| `[tunnel].token` | Tunnel authentication token |
+| `[tunnel].subdomain` | Fixed subdomain for tunnel |
+| `[tunnel].anonymous` | Skip interactive claim flow (bool) |
+| `[csp].mode` | `"extend"` or `"override"` |
+| `[csp].domains` | Extra CSP domains |
+| `[cloud].token` | Cloud sync token from mcpr.app |
+| `[cloud].server` | Server slug for cloud routing |
+| `[cloud].endpoint` | Custom cloud API endpoint |
+| `[cloud].batch_size` | Events per batch |
+| `[cloud].flush_interval_ms` | Flush interval in milliseconds |
+| `[logging].file` | Enable JSONL file logging (bool) |
+| `[logging].dir` | Directory for log files |
+| `[logging].rotation` | Rotation: `"daily"` or `"size:50MB"` |
+| `[store].enabled` | Enable SQLite request storage (default: true) |
+| `[store].path` | Override database file path |
+| `[store].name` | Proxy name for stored requests |
 
 ## Relay Mode
 
@@ -169,14 +169,14 @@ auth_provider_secret = "your-shared-secret-here"
 
 ### Field reference
 
-| Field | CLI | Env | Description |
-|-------|-----|-----|-------------|
-| `mode` | `--relay` | | Set to `"relay"` to run as relay server |
-| `port` | `--port` | | Port the relay listens on |
-| `[relay].domain` | `--relay-domain` | | Base domain for tunnel subdomains |
-| `[relay].auth_provider` | `--auth-provider` | `MCPR_AUTH_PROVIDER` | External auth provider URL |
-| `[relay].auth_provider_secret` | `--auth-provider-secret` | `MCPR_AUTH_PROVIDER_SECRET` | Shared secret for auth provider |
-| `[[relay.tokens]]` | | | Static token entries (see below) |
+| Field | Description |
+|-------|-------------|
+| `mode` | Set to `"relay"` to run as relay server |
+| `port` | Port the relay listens on |
+| `[relay].domain` | Base domain for tunnel subdomains |
+| `[relay].auth_provider` | External auth provider URL |
+| `[relay].auth_provider_secret` | Shared secret for auth provider |
+| `[[relay.tokens]]` | Static token entries (see below) |
 
 ### Auth modes
 

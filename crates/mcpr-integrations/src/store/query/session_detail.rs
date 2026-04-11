@@ -30,13 +30,13 @@ impl QueryEngine {
         &self,
         session_id: &str,
     ) -> Result<Option<SessionDetail>, rusqlite::Error> {
-        // Step 1: fetch the session row.
+        // Step 1: fetch the session row (supports prefix matching like git SHAs).
         let session_sql = "
             SELECT
                 session_id, client_name, client_version, client_platform,
                 started_at, last_seen_at, ended_at, total_calls, total_errors
             FROM sessions
-            WHERE session_id = ?1
+            WHERE session_id LIKE ?1 || '%'
         ";
 
         let session = self
@@ -81,7 +81,7 @@ impl QueryEngine {
 
         let mut stmt = self.conn().prepare(&requests_sql)?;
         let requests: Vec<LogRow> = stmt
-            .query_map(params![session_id], map_log_row)?
+            .query_map(params![&sid], map_log_row)?
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Some(SessionDetail {

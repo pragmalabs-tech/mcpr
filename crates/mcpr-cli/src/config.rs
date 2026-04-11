@@ -152,13 +152,22 @@ pub struct ProxyLogsArgs {
     #[arg(long, default_value = "50")]
     pub tail: i64,
 
-    /// Time window: only rows newer than this duration (e.g., 1h, 30m, 7d)
-    #[arg(long, default_value = "1h")]
-    pub since: String,
+    /// Time window: only rows newer than this duration (e.g., 1h, 30m, 7d).
+    /// Defaults to 1h, or all time when --session is used.
+    #[arg(long)]
+    pub since: Option<String>,
 
     /// Filter to a specific tool name
     #[arg(long)]
     pub tool: Option<String>,
+
+    /// Filter by MCP method (e.g., tools/call, resources/read, initialize)
+    #[arg(long)]
+    pub method: Option<String>,
+
+    /// Filter by session ID (supports prefix matching, e.g. first 8 chars)
+    #[arg(long)]
+    pub session: Option<String>,
 
     /// Filter by status: ok, error, timeout
     #[arg(long)]
@@ -186,6 +195,10 @@ pub struct ProxySlowArgs {
     /// Time window (e.g., 1h, 24h)
     #[arg(long, default_value = "1h")]
     pub since: String,
+
+    /// Filter to a specific tool name
+    #[arg(long)]
+    pub tool: Option<String>,
 
     /// Maximum rows to return
     #[arg(long, default_value = "20")]

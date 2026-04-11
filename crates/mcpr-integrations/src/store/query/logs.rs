@@ -15,6 +15,10 @@ pub struct LogsParams {
     pub limit: i64,
     /// Filter to a specific tool name.
     pub tool: Option<String>,
+    /// Filter by MCP method (e.g., "tools/call", "resources/read").
+    pub method: Option<String>,
+    /// Filter by session ID.
+    pub session: Option<String>,
     /// Filter by status ("ok", "error", "timeout").
     pub status: Option<String>,
 }
@@ -64,9 +68,11 @@ impl QueryEngine {
             WHERE proxy = ?1
               AND (?2 IS NULL OR tool = ?2)
               AND (?3 IS NULL OR status = ?3)
-              AND ts >= ?4
+              AND (?4 IS NULL OR method = ?4)
+              AND (?5 IS NULL OR session_id LIKE ?5 || '%')
+              AND ts >= ?6
             ORDER BY ts DESC
-            LIMIT ?5"
+            LIMIT ?7"
         );
 
         let mut stmt = self.conn().prepare(&sql)?;
@@ -75,6 +81,8 @@ impl QueryEngine {
                 params.proxy,
                 params.tool,
                 params.status,
+                params.method,
+                params.session,
                 params.since_ts,
                 params.limit,
             ],
@@ -98,13 +106,22 @@ impl QueryEngine {
             WHERE proxy = ?1
               AND (?2 IS NULL OR tool = ?2)
               AND (?3 IS NULL OR status = ?3)
-              AND ts > ?4
+              AND (?4 IS NULL OR method = ?4)
+              AND (?5 IS NULL OR session_id LIKE ?5 || '%')
+              AND ts > ?6
             ORDER BY ts ASC"
         );
 
         let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map(
-            params![params.proxy, params.tool, params.status, after_ts],
+            params![
+                params.proxy,
+                params.tool,
+                params.status,
+                params.method,
+                params.session,
+                after_ts
+            ],
             map_log_row,
         )?;
 
