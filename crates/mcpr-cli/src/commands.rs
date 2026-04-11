@@ -306,6 +306,47 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
         }
     }
 
+    // --follow mode: poll for new slow calls
+    if args.follow {
+        let params = SlowParams {
+            proxy: name,
+            threshold_ms,
+            since_ts,
+            tool: args.tool,
+            limit: args.limit,
+        };
+        let mut last_ts = rows.last().map(|r| r.ts).unwrap_or(since_ts);
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            let new_rows = engine
+                .slow_since(&params, last_ts)
+                .map_err(|e| format!("follow query failed: {e}"))?;
+            for row in &new_rows {
+                if args.json {
+                    print_json(row);
+                } else {
+                    let tool = row.tool.as_deref().unwrap_or(&row.method);
+                    let bytes_total =
+                        row.bytes_in.unwrap_or(0).max(0) + row.bytes_out.unwrap_or(0).max(0);
+                    let size_str = if bytes_total > 0 {
+                        format_bytes(bytes_total as u64)
+                    } else {
+                        "—".to_string()
+                    };
+                    println!(
+                        "  {:<32} {:>10}  {:>9}   {:<21}  {}",
+                        tool,
+                        format_latency(row.latency_ms),
+                        size_str,
+                        format_ts(row.ts),
+                        row.status,
+                    );
+                }
+                last_ts = row.ts;
+            }
+        }
+    }
+
     Ok(())
 }
 
