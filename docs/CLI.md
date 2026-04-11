@@ -36,7 +36,6 @@ No subcommand defaults to `start`:
 
 ```bash
 mcpr start              # reads mcpr.toml, starts daemon
-mcpr start --mcp :9000  # override upstream URL
 ```
 
 ### Observability
@@ -51,6 +50,8 @@ Show recent MCP request logs.
 mcpr proxy logs                          # auto-detect proxy name
 mcpr proxy logs --follow                 # tail -f mode (poll every 500ms)
 mcpr proxy logs --tool search_products   # filter by tool
+mcpr proxy logs --method tools/call      # filter by MCP method
+mcpr proxy logs --session 6294           # filter by session (prefix match)
 mcpr proxy logs --status error           # filter by status
 mcpr proxy logs --since 30m              # last 30 minutes
 mcpr proxy logs --tail 100               # last 100 rows
@@ -61,8 +62,10 @@ mcpr proxy logs --json                   # NDJSON output
 |------|---------|-------------|
 | `-f, --follow` | false | Poll for new rows every 500ms |
 | `--tail N` | 50 | Number of recent rows to show |
-| `--since DURATION` | 1h | Time window (e.g., `30m`, `2h`, `7d`) |
+| `--since DURATION` | 1h | Time window (e.g., `30m`, `2h`, `7d`). Omitted when `--session` is used (shows all time). |
 | `--tool NAME` | — | Filter to a specific tool |
+| `--method METHOD` | — | Filter by MCP method (e.g., `tools/call`, `resources/read`, `initialize`) |
+| `--session ID` | — | Filter by session ID (supports prefix matching, e.g. first 8 chars) |
 | `--status STATUS` | — | Filter by `ok`, `error`, or `timeout` |
 | `--json` | false | Output as newline-delimited JSON |
 
@@ -73,6 +76,7 @@ Show the slowest requests above a latency threshold.
 ```bash
 mcpr proxy slow                          # default: 500ms threshold
 mcpr proxy slow --threshold 1s           # only calls > 1 second
+mcpr proxy slow --tool search_products   # slow calls for a specific tool
 mcpr proxy slow --since 24h --limit 50   # last 24h, top 50
 mcpr proxy slow --json
 ```
@@ -81,6 +85,7 @@ mcpr proxy slow --json
 |------|---------|-------------|
 | `--threshold DURATION` | 500ms | Minimum latency to include |
 | `--since DURATION` | 1h | Time window |
+| `--tool NAME` | — | Filter to a specific tool |
 | `--limit N` | 20 | Maximum rows |
 | `--json` | false | NDJSON output |
 
@@ -151,8 +156,8 @@ STATUS — localhost-9000 — last 1h
   create_order                  289       341ms    1,200ms    4,201ms     6.2%
 
   ACTIVE SESSIONS:
-    a1b2c3d4-... — claude-desktop 1.2.0 — 42 calls
-    e5f6a7b8-... — cursor 0.44.1 — 8 calls
+    a1b2c3d4 — claude-desktop 1.2.0 — 42 calls
+    e5f6a7b8 — cursor 0.44.1 — 8 calls
 ```
 
 | Flag | Default | Description |
@@ -162,11 +167,12 @@ STATUS — localhost-9000 — last 1h
 
 #### `mcpr proxy session <session_id>`
 
-Drill into a single session — show session metadata and all its request logs.
+Drill into a single session — show session metadata and all its request logs. Supports prefix matching (like git commit hashes).
 
 ```bash
-mcpr proxy session a1b2c3d4-e5f6-7890-abcd-1234567890ab
-mcpr proxy session a1b2c3d4-e5f6-7890-abcd-1234567890ab --json
+mcpr proxy session a1b2c3d4                               # prefix match
+mcpr proxy session a1b2c3d4-e5f6-7890-abcd-1234567890ab   # full ID
+mcpr proxy session a1b2c3d4 --json
 ```
 
 Output:
