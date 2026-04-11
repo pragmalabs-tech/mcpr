@@ -159,12 +159,16 @@ pub enum McpMethod {
     ToolsCall,
     ResourcesList,
     ResourcesRead,
+    ResourcesTemplatesList,
     ResourcesSubscribe,
     ResourcesUnsubscribe,
     PromptsList,
     PromptsGet,
     LoggingSetLevel,
     CompletionComplete,
+    NotificationsToolsListChanged,
+    NotificationsCancelled,
+    NotificationsProgress,
     /// Any `notifications/*` we don't have a specific variant for.
     Notification(String),
     /// Anything else.
@@ -185,6 +189,10 @@ pub const PROMPTS_LIST: &str = "prompts/list";
 pub const PROMPTS_GET: &str = "prompts/get";
 pub const LOGGING_SET_LEVEL: &str = "logging/setLevel";
 pub const COMPLETION_COMPLETE: &str = "completion/complete";
+pub const RESOURCES_TEMPLATES_LIST: &str = "resources/templates/list";
+pub const NOTIFICATIONS_TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
+pub const NOTIFICATIONS_CANCELLED: &str = "notifications/cancelled";
+pub const NOTIFICATIONS_PROGRESS: &str = "notifications/progress";
 
 impl McpMethod {
     pub fn parse(method: &str) -> Self {
@@ -196,12 +204,16 @@ impl McpMethod {
             TOOLS_CALL => Self::ToolsCall,
             RESOURCES_LIST => Self::ResourcesList,
             RESOURCES_READ => Self::ResourcesRead,
+            RESOURCES_TEMPLATES_LIST => Self::ResourcesTemplatesList,
             RESOURCES_SUBSCRIBE => Self::ResourcesSubscribe,
             RESOURCES_UNSUBSCRIBE => Self::ResourcesUnsubscribe,
             PROMPTS_LIST => Self::PromptsList,
             PROMPTS_GET => Self::PromptsGet,
             LOGGING_SET_LEVEL => Self::LoggingSetLevel,
             COMPLETION_COMPLETE => Self::CompletionComplete,
+            NOTIFICATIONS_TOOLS_LIST_CHANGED => Self::NotificationsToolsListChanged,
+            NOTIFICATIONS_CANCELLED => Self::NotificationsCancelled,
+            NOTIFICATIONS_PROGRESS => Self::NotificationsProgress,
             m if m.starts_with("notifications/") => Self::Notification(m.to_string()),
             m => Self::Unknown(m.to_string()),
         }
@@ -217,12 +229,16 @@ impl McpMethod {
             Self::ToolsCall => TOOLS_CALL,
             Self::ResourcesList => RESOURCES_LIST,
             Self::ResourcesRead => RESOURCES_READ,
+            Self::ResourcesTemplatesList => RESOURCES_TEMPLATES_LIST,
             Self::ResourcesSubscribe => RESOURCES_SUBSCRIBE,
             Self::ResourcesUnsubscribe => RESOURCES_UNSUBSCRIBE,
             Self::PromptsList => PROMPTS_LIST,
             Self::PromptsGet => PROMPTS_GET,
             Self::LoggingSetLevel => LOGGING_SET_LEVEL,
             Self::CompletionComplete => COMPLETION_COMPLETE,
+            Self::NotificationsToolsListChanged => NOTIFICATIONS_TOOLS_LIST_CHANGED,
+            Self::NotificationsCancelled => NOTIFICATIONS_CANCELLED,
+            Self::NotificationsProgress => NOTIFICATIONS_PROGRESS,
             Self::Notification(m) => m.as_str(),
             Self::Unknown(m) => m.as_str(),
         }
@@ -343,6 +359,22 @@ impl ParsedBody {
             McpMethod::ToolsCall => params.get("name")?.as_str().map(String::from),
             McpMethod::ResourcesRead => params.get("uri")?.as_str().map(String::from),
             McpMethod::PromptsGet => params.get("name")?.as_str().map(String::from),
+            McpMethod::NotificationsCancelled => {
+                // requestId can be string or number
+                params.get("requestId").map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    _ => v.to_string(),
+                })
+            }
+            McpMethod::NotificationsProgress => {
+                // progressToken can be string or number
+                params.get("progressToken").map(|v| match v {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    _ => v.to_string(),
+                })
+            }
             _ => None,
         }
     }
@@ -575,6 +607,10 @@ mod tests {
         assert_eq!(McpMethod::parse("tools/list"), McpMethod::ToolsList);
         assert_eq!(McpMethod::parse("resources/read"), McpMethod::ResourcesRead);
         assert_eq!(McpMethod::parse("resources/list"), McpMethod::ResourcesList);
+        assert_eq!(
+            McpMethod::parse("resources/templates/list"),
+            McpMethod::ResourcesTemplatesList
+        );
         assert_eq!(McpMethod::parse("prompts/list"), McpMethod::PromptsList);
         assert_eq!(McpMethod::parse("prompts/get"), McpMethod::PromptsGet);
         assert_eq!(McpMethod::parse("ping"), McpMethod::Ping);
@@ -586,6 +622,18 @@ mod tests {
             McpMethod::parse("completion/complete"),
             McpMethod::CompletionComplete
         );
+        assert_eq!(
+            McpMethod::parse("notifications/tools/list_changed"),
+            McpMethod::NotificationsToolsListChanged
+        );
+        assert_eq!(
+            McpMethod::parse("notifications/cancelled"),
+            McpMethod::NotificationsCancelled
+        );
+        assert_eq!(
+            McpMethod::parse("notifications/progress"),
+            McpMethod::NotificationsProgress
+        );
     }
 
     #[test]
@@ -594,10 +642,20 @@ mod tests {
             McpMethod::parse("notifications/initialized"),
             McpMethod::Initialized
         );
+        // Known notification variants are parsed to specific enum values
         assert_eq!(
             McpMethod::parse("notifications/cancelled"),
-            McpMethod::Notification("notifications/cancelled".into())
+            McpMethod::NotificationsCancelled
         );
+        assert_eq!(
+            McpMethod::parse("notifications/progress"),
+            McpMethod::NotificationsProgress
+        );
+        assert_eq!(
+            McpMethod::parse("notifications/tools/list_changed"),
+            McpMethod::NotificationsToolsListChanged
+        );
+        // Unknown notifications still fall through to the generic variant
         assert_eq!(
             McpMethod::parse("notifications/resources/updated"),
             McpMethod::Notification("notifications/resources/updated".into())
@@ -622,10 +680,14 @@ mod tests {
             "tools/call",
             "resources/list",
             "resources/read",
+            "resources/templates/list",
             "prompts/list",
             "prompts/get",
             "logging/setLevel",
             "completion/complete",
+            "notifications/tools/list_changed",
+            "notifications/cancelled",
+            "notifications/progress",
         ];
         for m in methods {
             assert_eq!(McpMethod::parse(m).as_str(), m);
@@ -686,6 +748,35 @@ mod tests {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let parsed = parse_body(body).unwrap();
         assert!(parsed.detail().is_none());
+    }
+
+    #[test]
+    fn detail_notifications_cancelled() {
+        let body = br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"req-42","reason":"timeout"}}"#;
+        let parsed = parse_body(body).unwrap();
+        assert_eq!(parsed.detail().as_deref(), Some("req-42"));
+    }
+
+    #[test]
+    fn detail_notifications_cancelled_numeric_id() {
+        let body =
+            br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#;
+        let parsed = parse_body(body).unwrap();
+        assert_eq!(parsed.detail().as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn detail_notifications_progress() {
+        let body = br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"tok-1","progress":50,"total":100}}"#;
+        let parsed = parse_body(body).unwrap();
+        assert_eq!(parsed.detail().as_deref(), Some("tok-1"));
+    }
+
+    #[test]
+    fn detail_notifications_progress_numeric_token() {
+        let body = br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":99,"progress":10}}"#;
+        let parsed = parse_body(body).unwrap();
+        assert_eq!(parsed.detail().as_deref(), Some("99"));
     }
 
     // ── error_code ──

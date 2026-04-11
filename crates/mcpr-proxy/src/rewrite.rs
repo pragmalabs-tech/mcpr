@@ -48,6 +48,19 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 }
             }
         }
+        jsonrpc::RESOURCES_TEMPLATES_LIST => {
+            if let Some(templates) = body
+                .get_mut("result")
+                .and_then(|r| r.get_mut("resourceTemplates"))
+                .and_then(|t| t.as_array_mut())
+            {
+                for template in templates {
+                    if let Some(meta) = template.get_mut("meta") {
+                        rewrite_widget_meta(meta, config);
+                    }
+                }
+            }
+        }
         jsonrpc::RESOURCES_READ => {
             if let Some(contents) = body
                 .get_mut("result")
@@ -360,6 +373,44 @@ mod tests {
                 .unwrap(),
             "abc.tunnel.example.com"
         );
+    }
+
+    // ── resources/templates/list: rewrite meta on each template ──
+
+    #[test]
+    fn resources_templates_list_rewrites_meta() {
+        let config = test_config();
+        let mut body = json!({
+            "result": {
+                "resourceTemplates": [{
+                    "uriTemplate": "file:///{path}",
+                    "name": "File Access",
+                    "meta": {
+                        "openai/widgetDomain": "old.domain.com",
+                        "openai/widgetCSP": {
+                            "resource_domains": ["http://localhost:4444"],
+                            "connect_domains": ["http://localhost:9000"]
+                        }
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/templates/list", &mut body, &config);
+
+        let meta = &body["result"]["resourceTemplates"][0]["meta"];
+        assert_eq!(
+            meta["openai/widgetDomain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+        let resource: Vec<&str> = meta["openai/widgetCSP"]["resource_domains"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(resource.contains(&"https://abc.tunnel.example.com"));
+        assert!(!resource.iter().any(|d| d.contains("localhost")));
     }
 
     // ── CSP rewriting details ──
