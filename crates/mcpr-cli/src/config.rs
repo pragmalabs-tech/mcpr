@@ -211,6 +211,10 @@ pub struct ProxySlowArgs {
     /// Output as newline-delimited JSON
     #[arg(long)]
     pub json: bool,
+
+    /// Poll for new slow calls every 1s (like tail -f)
+    #[arg(short, long)]
+    pub follow: bool,
 }
 
 /// Arguments for `mcpr proxy stats [name]`.

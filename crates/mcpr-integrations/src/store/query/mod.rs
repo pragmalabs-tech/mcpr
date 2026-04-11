@@ -458,6 +458,92 @@ mod tests {
         assert!(rows.is_empty());
     }
 
+    // ── slow_since (--follow) ──────────────────────────────────────────
+
+    #[test]
+    fn slow_since_returns_newer_rows() {
+        let engine = seeded_engine();
+        // r2 (ts=2000, 891ms) and r3 (ts=3000, 4201ms) are above 500ms
+        // asking for ts > 1000 should return both, oldest first
+        let params = super::slow::SlowParams {
+            proxy: "api".into(),
+            threshold_ms: 500,
+            since_ts: 0,
+            tool: None,
+            limit: 100,
+        };
+        let rows = engine.slow_since(&params, 1000).unwrap();
+        assert_eq!(rows.len(), 2);
+        // Oldest first (ts ASC)
+        assert_eq!(rows[0].request_id, "r2");
+        assert_eq!(rows[1].request_id, "r3");
+    }
+
+    #[test]
+    fn slow_since_excludes_at_boundary() {
+        let engine = seeded_engine();
+        // r2 is at ts=2000; asking for ts > 2000 should exclude r2
+        let params = super::slow::SlowParams {
+            proxy: "api".into(),
+            threshold_ms: 500,
+            since_ts: 0,
+            tool: None,
+            limit: 100,
+        };
+        let rows = engine.slow_since(&params, 2000).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].request_id, "r3");
+    }
+
+    #[test]
+    fn slow_since_returns_empty_when_no_new() {
+        let engine = seeded_engine();
+        // All rows have ts <= 5000; asking for ts > 5000 should return nothing
+        let params = super::slow::SlowParams {
+            proxy: "api".into(),
+            threshold_ms: 500,
+            since_ts: 0,
+            tool: None,
+            limit: 100,
+        };
+        let rows = engine.slow_since(&params, 5000).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn slow_since_respects_threshold() {
+        let engine = seeded_engine();
+        // With threshold 1000, only r3 (4201ms) qualifies
+        let params = super::slow::SlowParams {
+            proxy: "api".into(),
+            threshold_ms: 1000,
+            since_ts: 0,
+            tool: None,
+            limit: 100,
+        };
+        let rows = engine.slow_since(&params, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].latency_ms, 4201);
+    }
+
+    #[test]
+    fn slow_since_respects_tool_filter() {
+        let engine = seeded_engine();
+        // r2 (search, 891ms) and r3 (create_order, 4201ms) are above 500ms
+        // filtering to search should only return r2
+        let params = super::slow::SlowParams {
+            proxy: "api".into(),
+            threshold_ms: 500,
+            since_ts: 0,
+            tool: Some("search".into()),
+            limit: 100,
+        };
+        let rows = engine.slow_since(&params, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].tool.as_deref(), Some("search"));
+        assert_eq!(rows[0].latency_ms, 891);
+    }
+
     // ── stats ───────────────────────────────────────────────────────────
 
     #[test]
