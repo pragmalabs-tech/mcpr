@@ -1,0 +1,2 @@
+mcp = "http://localhost:9001/mcp"
+port = 3000

@@ -232,7 +232,7 @@ app.listen(PORT, () => {
   console.log(`MCP endpoint: http://localhost:${PORT}/mcp`);
   console.log("");
   console.log("Next: start mcpr to proxy it:");
-  console.log(`  mcpr start --mcp http://localhost:${PORT}/mcp`);
+  console.log(`  mcpr start`);
 });
 
 // Graceful shutdown — close all active transports

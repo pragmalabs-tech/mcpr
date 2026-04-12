@@ -11,7 +11,6 @@ dist/
 node_modules
 static/studio/
 studio/
-mcpr.toml
 logs
 
 *.tape

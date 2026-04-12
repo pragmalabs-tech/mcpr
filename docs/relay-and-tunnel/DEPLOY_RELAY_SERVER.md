@@ -5,7 +5,7 @@
 - VPS with public IP (Ubuntu 22.04+ recommended)
 - Domain with DNS control (Cloudflare, Route53, etc.)
 - Wildcard DNS support
-- Docker installed on VPS (optional)
+- Docker installed on VPS
 
 ## 1. DNS
 
@@ -96,9 +96,11 @@ Caddy handles TLS automatically with wildcard certs via DNS challenge.
 
 ## 4. Configuration
 
-Create `mcpr.toml` on the relay server:
+Create `mcpr.toml` on the relay server. The relay supports three auth modes — pick one.
 
-### Open mode (no auth -- anyone can tunnel)
+### Open mode (no auth)
+
+Anyone can tunnel. Good for local dev and testing.
 
 ```toml
 mode = "relay"
@@ -108,7 +110,9 @@ port = 8080
 domain = "tunnel.yourdomain.com"
 ```
 
-### Static tokens (simple -- no external service)
+### Static tokens
+
+No external service, no database — just tokens in `mcpr.toml`. Good for small teams (2-10 developers), CI/CD pipelines, and personal relays.
 
 ```toml
 mode = "relay"
@@ -118,21 +122,48 @@ port = 8080
 domain = "tunnel.yourdomain.com"
 
 [[relay.tokens]]
-token = "mcpr_abc123"
-subdomains = ["myapp", "myapp-*"]
+token = "mcpr_alice_a1b2c3d4e5f6"
+subdomains = ["alice-*"]
 
 [[relay.tokens]]
-token = "mcpr_def456"
-subdomains = ["other-app", "other-app-*"]
+token = "mcpr_bob_f6e5d4c3b2a1"
+subdomains = ["bob-*"]
+
+[[relay.tokens]]
+token = "mcpr_ci_pipeline_xyz789"
+subdomains = ["pr-*", "staging"]
 ```
 
-Each token has a list of allowed subdomain patterns. Patterns support glob wildcards:
-`myapp-*`, `*-preview`, `pr-*-acme`, `*` (allow all).
+Each token has a list of allowed subdomain patterns. The client sets `[tunnel].token` in their `mcpr.toml` to one of these values.
 
-The client sets `[tunnel].token` in their `mcpr.toml` to one of these values.
-See [STATIC_TOKENS.md](STATIC_TOKENS.md) for real-world scenarios (team setup, CI/CD previews, demos).
+**Generate tokens:**
 
-### Secured mode (with auth provider)
+```bash
+echo "mcpr_$(openssl rand -hex 24)"
+# → mcpr_a1b2c3d4e5f6...
+```
+
+**Common scenarios:**
+
+| Scenario | Token pattern | Subdomains |
+|----------|--------------|------------|
+| One dev, multiple projects | `mcpr_alice_...` | `["alice-*"]` |
+| CI/CD branch previews | `mcpr_ci_...` | `["pr-*", "staging"]` |
+| Team with project isolation | `mcpr_frontend_...` | `["web-*", "ui-*"]` |
+| Demo/presentation | `mcpr_demo_acme_...` | `["demo-acme"]` |
+| Personal relay lockdown | `mcpr_myrelay_...` | `["*"]` |
+
+**Revoking access:** Remove or comment out the token entry and restart the relay. Active tunnels continue until they disconnect; new connections are rejected immediately.
+
+**Tips:**
+- Use prefixes like `mcpr_alice_`, `mcpr_ci_` so you know who each token belongs to
+- One token per person/service — easier to revoke without affecting others
+- Use narrow patterns (`alice-*` not `*`) to prevent subdomain collisions
+- Keep the config secure: `chmod 600 mcpr.toml` on the relay server
+
+### Auth provider
+
+For dynamic token management, user registration, and revocation at scale. The relay delegates all auth decisions to your external API — it has no database.
 
 ```toml
 mode = "relay"
@@ -144,56 +175,159 @@ auth_provider = "https://auth.yourdomain.com"
 auth_provider_secret = "your-shared-secret-here"
 ```
 
-When `auth_provider` is set, every tunnel registration is validated via:
+Generate a strong shared secret: `openssl rand -hex 32`
+
+**How it works:**
 
 ```
-POST {auth_provider}/api/verify
-Header: X-Relay-Secret: {auth_provider_secret}
-Body:   { "token": "...", "subdomain": "..." }
-
-200 -> { "subdomains": ["myapp", "myapp-*"] }   (allowed)
-401 -> { "error": "invalid_token" }              (rejected)
-403 -> { "error": "subdomain_not_allowed" }      (rejected)
+Developer's mcpr client
+    │  WS /_tunnel/register?token=TOKEN&subdomain=myapp
+    ▼
+mcpr relay
+    │  POST /api/verify
+    ▼
+Your Auth Provider
+    │  200: allowed subdomains
+    │  401: invalid token
+    │  403: subdomain not allowed
+    ▼
+mcpr relay → allows or rejects the tunnel
 ```
 
-Subdomain patterns support wildcards: `myapp-*` matches `myapp-dev`, `myapp-feat-123`, etc.
+**API contract — your provider must implement:**
 
-The relay itself has no database -- it delegates all auth decisions to your provider.
+```
+POST /api/verify
+Header: X-Relay-Secret: <shared_secret>
+Body:   { "token": "mcpr_...", "subdomain": "myapp-dev" }
+
+200 → { "subdomains": ["myapp", "myapp-*"] }   (allowed)
+401 → { "error": "invalid_token" }              (rejected)
+403 → { "error": "subdomain_not_allowed" }      (rejected)
+```
+
+The `X-Relay-Secret` header verifies the request came from your relay. Your provider should reject requests without it.
+
+**Example: Node.js + Express**
+
+```js
+import express from 'express';
+
+const RELAY_SECRET = process.env.RELAY_SECRET || 'dev-secret';
+
+// In production, use a database
+const tokens = {
+  'mcpr_test_token_123': {
+    user: 'rodgers',
+    subdomains: ['myapp', 'myapp-*'],
+  },
+};
+
+const app = express();
+app.use(express.json());
+
+app.post('/api/verify', (req, res) => {
+  if (req.headers['x-relay-secret'] !== RELAY_SECRET) {
+    return res.status(401).json({ error: 'invalid relay secret' });
+  }
+
+  const { token, subdomain } = req.body;
+  const entry = tokens[token];
+
+  if (!entry) {
+    return res.status(401).json({ error: 'invalid_token' });
+  }
+
+  res.json({ subdomains: entry.subdomains });
+});
+
+app.listen(3001, () => console.log('Auth provider on :3001'));
+```
+
+**Example: Cloudflare Worker + D1**
+
+```js
+export default {
+  async fetch(request, env) {
+    if (new URL(request.url).pathname !== '/api/verify') {
+      return new Response('Not found', { status: 404 });
+    }
+
+    const relaySecret = request.headers.get('x-relay-secret');
+    if (relaySecret !== env.RELAY_SECRET) {
+      return Response.json({ error: 'invalid relay secret' }, { status: 401 });
+    }
+
+    const { token, subdomain } = await request.json();
+
+    const hash = await crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(token)
+    );
+    const tokenHash = [...new Uint8Array(hash)]
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+
+    const row = await env.DB
+      .prepare('SELECT subdomains FROM tokens WHERE token_hash = ? AND revoked_at IS NULL')
+      .bind(tokenHash)
+      .first();
+
+    if (!row) {
+      return Response.json({ error: 'invalid_token' }, { status: 401 });
+    }
+
+    return Response.json({ subdomains: JSON.parse(row.subdomains) });
+  },
+};
+```
+
+**Testing your provider:**
+
+```bash
+# Should return 200 with subdomains
+curl -X POST https://auth.yourdomain.com/api/verify \
+  -H "Content-Type: application/json" \
+  -H "X-Relay-Secret: your-secret" \
+  -d '{"token": "mcpr_test_token", "subdomain": "myapp"}'
+
+# Should return 401 (bad token)
+curl -X POST https://auth.yourdomain.com/api/verify \
+  -H "Content-Type: application/json" \
+  -H "X-Relay-Secret: your-secret" \
+  -d '{"token": "invalid_token", "subdomain": "myapp"}'
+```
+
+**Security considerations:**
+- Never store tokens in plaintext — hash with SHA-256 or bcrypt
+- Always run your auth provider behind HTTPS
+- Rate-limit `/api/verify` to prevent brute-force (traffic is low — one call per tunnel registration)
+
+### Subdomain patterns
+
+All auth modes (static tokens and auth provider) use the same glob-style wildcard matching:
+
+| Pattern | Matches | Does NOT match |
+|---------|---------|----------------|
+| `myapp` | `myapp` | `myapp-dev` |
+| `myapp-*` | `myapp-dev`, `myapp-feat-123` | `myapp` |
+| `*-preview` | `feat-preview`, `hotfix-preview` | `preview` |
+| `pr-*-acme` | `pr-123-acme`, `pr-abc-acme` | `pr-123` |
+| `*` | anything | |
+
+Rules: one `*` per pattern, case-sensitive, no `?` or `**`.
 
 ## 5. Run the Relay
 
-### Direct
-
-```bash
-# With mcpr.toml in current directory:
-mcpr start --foreground --relay
-
-# Or with CLI flags (no config file needed):
-mcpr start --foreground --relay --port 8080 --relay-domain tunnel.yourdomain.com
-```
-
-### With Docker
+All configuration is in `mcpr.toml` (see section 4). Mount it into the container:
 
 ```bash
 docker run -d \
   --name mcpr-relay \
   --restart unless-stopped \
   -p 8080:8080 \
-  ghcr.io/cptrodgers/mcpr:latest \
-  --relay --port 8080 --relay-domain tunnel.yourdomain.com
-```
-
-To enable auth via Docker, pass environment variables:
-
-```bash
-docker run -d \
-  --name mcpr-relay \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -e MCPR_AUTH_PROVIDER=https://auth.yourdomain.com \
-  -e MCPR_AUTH_PROVIDER_SECRET=your-shared-secret-here \
-  ghcr.io/cptrodgers/mcpr:latest \
-  --relay --port 8080 --relay-domain tunnel.yourdomain.com
+  -v ./mcpr.toml:/app/mcpr.toml \
+  ghcr.io/cptrodgers/mcpr:latest
 ```
 
 ### Update
@@ -221,7 +355,7 @@ relay_url = "https://tunnel.yourdomain.com"
 Then run:
 
 ```bash
-mcpr
+mcpr start
 # Should print: Tunnel: https://xxxxxx.tunnel.yourdomain.com
 ```
 
@@ -232,8 +366,9 @@ mcpr
 curl -s https://tunnel.yourdomain.com/_tunnel/register
 # Expected: "missing token" (400) -- means relay is running
 
-# Full test: start mcpr client
-mcpr start --mcp http://localhost:9000 --relay-url https://tunnel.yourdomain.com
+# Full test: start mcpr client with mcpr.toml configured, then
+mcpr start
+mcpr status
 ```
 
 ## Troubleshooting
