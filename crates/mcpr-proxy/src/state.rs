@@ -70,8 +70,6 @@ pub struct ProxyState {
     pub mcp_warning: Option<String>,
     /// Tunnel connection health.
     pub tunnel_status: ConnectionStatus,
-    /// Whether using an anonymous (temporary, 1-week) tunnel subdomain.
-    pub tunnel_anonymous: bool,
     /// Widget source connection health.
     pub widgets_status: ConnectionStatus,
     /// Number of discovered widgets.
@@ -100,7 +98,6 @@ impl ProxyState {
             mcp_status: ConnectionStatus::Unknown,
             mcp_warning: None,
             tunnel_status: ConnectionStatus::Disconnected,
-            tunnel_anonymous: false,
             widgets_status: ConnectionStatus::Unknown,
             widget_count: None,
             widget_names: Vec::new(),

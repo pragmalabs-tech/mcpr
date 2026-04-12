@@ -36,9 +36,6 @@
 //! - **Admin endpoints** (`admin`): Health check and readiness probe endpoints
 //!   on a separate port for orchestration (k8s, docker, etc.).
 //!
-//! - **Onboarding** (`onboarding`): Interactive tunnel setup flow for first-time
-//!   users connecting to tunnel.mcpr.app (when `tunnel.enabled = true`).
-//!
 //! ## Module Structure
 //!
 //! ```text
@@ -52,7 +49,6 @@
 //! +-- widgets.rs      # Widget HTML serving, asset proxying
 //! +-- passthrough.rs  # Non-MCP request forwarding
 //! +-- admin.rs        # Health/readiness admin server
-//! +-- onboarding.rs   # Interactive tunnel claim flow
 //! +-- display.rs      # Startup info formatting
 //! +-- event_bus.rs    # EventBus — routes ProxyEvents to sinks
 //! +-- stderr_sink.rs  # StderrSink — console output
@@ -66,7 +62,6 @@ mod daemon;
 mod display;
 mod event_bus;
 mod mcp_handler;
-mod onboarding;
 mod passthrough;
 mod proxy;
 mod stderr_sink;
@@ -366,86 +361,21 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         format!("http://localhost:{actual_port}")
     } else {
         let relay_url = cfg.relay_url.as_deref().unwrap();
-        let config_path = cfg.config_path.clone();
 
-        // If using tunnel.mcpr.app without a token, run the interactive claim flow.
-        // In daemon mode, stdin is /dev/null — can't do interactive onboarding.
-        let is_mcpr_relay = relay_url.contains("tunnel.mcpr.app");
-        let (token, desired_subdomain) = if is_mcpr_relay && cfg.tunnel_token.is_none() {
-            if ready_fd.is_some() {
-                eprintln!(
-                    "error: tunnel requires a token in daemon mode. Run `mcpr start --foreground` first to complete onboarding, then restart as daemon."
-                );
-                std::process::exit(1);
-            }
+        // Tunnel requires a token from mcpr.app.
+        if cfg.tunnel_token.is_none() {
             eprintln!(
-                "\n  {} Welcome! Let's set up your tunnel.\n",
-                colored::Colorize::cyan("→"),
+                "{}: No tunnel token configured. Register at https://mcpr.app to get one, then set `tunnel.token` in mcpr.toml.",
+                colored::Colorize::red("error"),
             );
-            match onboarding::run_claim_flow(cfg.tunnel_subdomain.as_deref()).await {
-                Ok(result) => {
-                    let save_path = config_path
-                        .clone()
-                        .unwrap_or_else(|| std::env::current_dir().unwrap().join("mcpr.toml"));
-                    // Create the file if it doesn't exist so save_tunnel_config can read+update it
-                    if !save_path.exists() {
-                        let _ = std::fs::write(&save_path, "");
-                    }
-                    GatewayConfig::save_tunnel_config(
-                        &save_path,
-                        &result.token,
-                        &result.subdomain,
-                        result.anonymous,
-                    );
-                    if result.anonymous {
-                        eprintln!(
-                            "\n  {} This is a temporary tunnel (1 week). To claim a permanent subdomain, re-run `mcpr start --foreground`.",
-                            colored::Colorize::yellow("!"),
-                        );
-                    } else {
-                        eprintln!(
-                            "\n  {} We sent a verification link to your email.",
-                            colored::Colorize::yellow("!"),
-                        );
-                        eprintln!(
-                            "  {} Verify to keep '{}' permanently — it's reserved for 72 hours.\n",
-                            colored::Colorize::yellow("!"),
-                            result.subdomain,
-                        );
-                    }
-                    let anonymous = result.anonymous;
-                    let pair = (result.token, Some(result.subdomain));
-                    if anonymous {
-                        proxy_state::lock_state(&proxy_state_ref).tunnel_anonymous = true;
-                    }
-                    pair
-                }
-                Err(e) => {
-                    eprintln!(
-                        "{}: Onboarding failed: {}",
-                        colored::Colorize::red("error"),
-                        e
-                    );
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            GatewayConfig::resolve_tunnel_identity(cfg.tunnel_subdomain, cfg.tunnel_token, || {
-                let new_token = uuid::Uuid::new_v4().to_string();
-                if let Some(path) = &config_path {
-                    GatewayConfig::save_tunnel_token(path, &new_token);
-                }
-                new_token
-            })
-        };
-
-        {
-            let mut state = proxy_state::lock_state(&proxy_state_ref);
-            state.tunnel_status = proxy_state::ConnectionStatus::Connecting;
-            if cfg.tunnel_anonymous {
-                state.tunnel_anonymous = true;
-            }
+            std::process::exit(1);
         }
+
+        let (token, desired_subdomain) =
+            GatewayConfig::resolve_tunnel_identity(cfg.tunnel_subdomain, cfg.tunnel_token);
+
+        proxy_state::lock_state(&proxy_state_ref).tunnel_status =
+            proxy_state::ConnectionStatus::Connecting;
 
         match mcpr_tunnel::start_tunnel_client(
             actual_port,

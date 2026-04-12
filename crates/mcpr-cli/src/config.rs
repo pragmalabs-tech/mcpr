@@ -387,7 +387,6 @@ struct FileTunnelConfig {
     relay_url: Option<String>,
     token: Option<String>,
     subdomain: Option<String>,
-    anonymous: bool,
 }
 
 /// `[events]` table in config file
@@ -510,10 +509,8 @@ pub struct GatewayConfig {
     pub relay_url: Option<String>,
     pub tunnel_token: Option<String>,
     pub tunnel_subdomain: Option<String>,
-    pub tunnel_anonymous: bool,
     /// Whether tunnel is enabled. Default: false (proxy-only mode).
     pub tunnel: bool,
-    pub config_path: Option<std::path::PathBuf>,
     pub max_request_body_size: Option<usize>,
     pub max_response_body_size: Option<usize>,
     pub max_concurrent_upstream: Option<usize>,
@@ -529,135 +526,15 @@ pub struct GatewayConfig {
 
 impl GatewayConfig {
     /// Resolve tunnel identity from config.
-    /// Token and subdomain are independent: token is for auth, subdomain is a preference.
+    /// Token is required (caller must check before calling). Subdomain is optional.
     /// Returns (token, desired_subdomain).
     pub fn resolve_tunnel_identity(
         tunnel_subdomain: Option<String>,
         tunnel_token: Option<String>,
-        generate_token: impl FnOnce() -> String,
     ) -> (String, Option<String>) {
-        let token = tunnel_token.unwrap_or_else(generate_token);
+        let token =
+            tunnel_token.expect("tunnel token must be set before calling resolve_tunnel_identity");
         (token, tunnel_subdomain)
-    }
-
-    /// Append tunnel token to the config file so the URL persists across restarts.
-    pub fn save_tunnel_token(path: &std::path::Path, token: &str) {
-        let contents = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!(
-                    "  {}: failed to read {}: {}",
-                    colored::Colorize::yellow("warn"),
-                    path.display(),
-                    e
-                );
-                return;
-            }
-        };
-
-        if contents.contains("token =") || contents.contains("token=") {
-            return; // already set
-        }
-
-        let new_contents = if contents.contains("[tunnel]") {
-            contents.replacen("[tunnel]", &format!("[tunnel]\ntoken = \"{token}\""), 1)
-        } else {
-            format!("{}\n\n[tunnel]\ntoken = \"{token}\"\n", contents.trim_end())
-        };
-
-        if let Err(e) = std::fs::write(path, new_contents) {
-            eprintln!(
-                "  {}: failed to save tunnel token to {}: {}",
-                colored::Colorize::yellow("warn"),
-                path.display(),
-                e
-            );
-        } else {
-            eprintln!(
-                "  {} saved tunnel token to {}",
-                colored::Colorize::dimmed("config"),
-                path.display()
-            );
-        }
-    }
-
-    /// Save both tunnel token and subdomain to the config file.
-    pub fn save_tunnel_config(
-        path: &std::path::Path,
-        token: &str,
-        subdomain: &str,
-        anonymous: bool,
-    ) {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => {
-                let mut new_contents = contents.clone();
-
-                // Check for uncommented [tunnel] section and keys
-                let has_tunnel_section = new_contents.lines().any(|l| l.trim() == "[tunnel]");
-                let has_token = new_contents.lines().any(|l| {
-                    let t = l.trim();
-                    !t.starts_with('#') && (t.starts_with("token =") || t.starts_with("token="))
-                });
-                let has_subdomain = new_contents.lines().any(|l| {
-                    let t = l.trim();
-                    !t.starts_with('#')
-                        && (t.starts_with("subdomain =") || t.starts_with("subdomain="))
-                });
-                let has_anonymous = new_contents.lines().any(|l| {
-                    let t = l.trim();
-                    !t.starts_with('#')
-                        && (t.starts_with("anonymous =") || t.starts_with("anonymous="))
-                });
-
-                if has_tunnel_section {
-                    // Insert under existing [tunnel] section if keys are missing
-                    let mut insert = String::new();
-                    if !has_token {
-                        insert.push_str(&format!("token = \"{token}\"\n"));
-                    }
-                    if !has_subdomain {
-                        insert.push_str(&format!("subdomain = \"{subdomain}\"\n"));
-                    }
-                    if anonymous && !has_anonymous {
-                        insert.push_str("anonymous = true\n");
-                    }
-                    if !insert.is_empty() {
-                        new_contents =
-                            new_contents.replacen("[tunnel]", &format!("[tunnel]\n{insert}"), 1);
-                    }
-                } else {
-                    // No [tunnel] section — append one
-                    let anon_line = if anonymous { "anonymous = true\n" } else { "" };
-                    new_contents = format!(
-                        "{}\n\n[tunnel]\ntoken = \"{token}\"\nsubdomain = \"{subdomain}\"\n{anon_line}",
-                        new_contents.trim_end()
-                    );
-                }
-
-                if let Err(e) = std::fs::write(path, &new_contents) {
-                    eprintln!(
-                        "  {}: failed to save tunnel config to {}: {}",
-                        colored::Colorize::yellow("warn"),
-                        path.display(),
-                        e
-                    );
-                } else {
-                    eprintln!(
-                        "  {} saved tunnel config to {}",
-                        colored::Colorize::dimmed("config"),
-                        path.display()
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "  {}: failed to read {}: {}",
-                    colored::Colorize::yellow("warn"),
-                    path.display(),
-                    e
-                );
-            }
-        }
     }
 }
 
@@ -838,7 +715,7 @@ fn load_relay(file: FileConfig, _runtime: RuntimeOptions) -> Mode {
 
 fn load_gateway(
     file: FileConfig,
-    config_path: Option<std::path::PathBuf>,
+    _config_path: Option<std::path::PathBuf>,
     runtime: RuntimeOptions,
 ) -> Mode {
     let csp_mode = match file.csp.mode.as_deref() {
@@ -859,9 +736,7 @@ fn load_gateway(
         ),
         tunnel_token: file.tunnel.token,
         tunnel_subdomain: file.tunnel.subdomain,
-        tunnel_anonymous: file.tunnel.anonymous,
         tunnel: file.tunnel.enabled,
-        config_path,
         max_request_body_size: file.max_request_body_size,
         max_response_body_size: file.max_response_body_size,
         max_concurrent_upstream: file.max_concurrent_upstream,
@@ -887,112 +762,23 @@ mod tests {
         let (token, sub) = GatewayConfig::resolve_tunnel_identity(
             Some("myapp".into()),
             Some("mcpr_secret_token_123".into()),
-            || panic!("should not generate"),
         );
         assert_eq!(token, "mcpr_secret_token_123");
         assert_eq!(sub.as_deref(), Some("myapp"));
     }
 
     #[test]
-    fn subdomain_without_token_generates() {
-        let (token, sub) =
-            GatewayConfig::resolve_tunnel_identity(Some("myapp".into()), None, || {
-                "generated-uuid".into()
-            });
-        assert_eq!(token, "generated-uuid");
-        assert_eq!(sub.as_deref(), Some("myapp"));
-    }
-
-    #[test]
     fn no_subdomain_uses_token() {
         let (token, sub) =
-            GatewayConfig::resolve_tunnel_identity(None, Some("my-saved-token".into()), || {
-                panic!("should not generate")
-            });
+            GatewayConfig::resolve_tunnel_identity(None, Some("my-saved-token".into()));
         assert_eq!(token, "my-saved-token");
         assert_eq!(sub, None);
     }
 
     #[test]
-    fn no_subdomain_no_token_generates() {
-        let (token, sub) =
-            GatewayConfig::resolve_tunnel_identity(None, None, || "generated-uuid".into());
-        assert_eq!(token, "generated-uuid");
-        assert_eq!(sub, None);
-    }
-
-    #[test]
-    fn save_tunnel_config_creates_section_in_empty_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcpr.toml");
-        std::fs::write(&path, "").unwrap();
-
-        GatewayConfig::save_tunnel_config(&path, "tok123", "myapp", false);
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("[tunnel]"));
-        assert!(contents.contains("token = \"tok123\""));
-        assert!(contents.contains("subdomain = \"myapp\""));
-    }
-
-    #[test]
-    fn save_tunnel_config_appends_section_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcpr.toml");
-        std::fs::write(&path, "port = 8080\n").unwrap();
-
-        GatewayConfig::save_tunnel_config(&path, "tok456", "demo", false);
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("port = 8080"));
-        assert!(contents.contains("[tunnel]"));
-        assert!(contents.contains("token = \"tok456\""));
-        assert!(contents.contains("subdomain = \"demo\""));
-    }
-
-    #[test]
-    fn save_tunnel_config_inserts_under_existing_tunnel_section() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcpr.toml");
-        std::fs::write(&path, "[tunnel]\nrelay_url = \"https://tunnel.mcpr.app\"\n").unwrap();
-
-        GatewayConfig::save_tunnel_config(&path, "tok789", "example", false);
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(contents.contains("relay_url = \"https://tunnel.mcpr.app\""));
-        assert!(contents.contains("token = \"tok789\""));
-        assert!(contents.contains("subdomain = \"example\""));
-    }
-
-    #[test]
-    fn save_tunnel_config_does_not_duplicate_existing_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mcpr.toml");
-        std::fs::write(
-            &path,
-            "[tunnel]\ntoken = \"existing\"\nsubdomain = \"taken\"\n",
-        )
-        .unwrap();
-
-        GatewayConfig::save_tunnel_config(&path, "new-tok", "new-sub", false);
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        // Original values should be preserved, not duplicated
-        assert_eq!(contents.matches("token =").count(), 1);
-        assert_eq!(contents.matches("subdomain =").count(), 1);
-        assert!(contents.contains("token = \"existing\""));
-        assert!(contents.contains("subdomain = \"taken\""));
-    }
-
-    #[test]
-    fn save_tunnel_config_fails_gracefully_for_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nonexistent.toml");
-
-        // Should not panic — just prints a warning
-        GatewayConfig::save_tunnel_config(&path, "tok", "sub", false);
-
-        assert!(!path.exists());
+    #[should_panic(expected = "tunnel token must be set")]
+    fn no_token_panics() {
+        GatewayConfig::resolve_tunnel_identity(Some("myapp".into()), None);
     }
 
     #[test]

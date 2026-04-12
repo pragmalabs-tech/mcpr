@@ -42,14 +42,11 @@ port = 3000
 # Relay server URL (default: https://tunnel.mcpr.app)
 relay_url = "https://tunnel.mcpr.app"
 
-# Persistent tunnel identity (auto-generated and saved on first run)
+# Tunnel authentication token (register at https://mcpr.app to get one)
 token = "90c74def-8fdc-4922-8702-44bc5cabf830"
 
 # Fixed subdomain (optional -- derived from token if omitted)
 subdomain = "myapp"
-
-# Skip interactive claim flow (default: false)
-anonymous = false
 
 [csp]
 # CSP rewriting mode: "extend" (default) or "override"
@@ -108,9 +105,8 @@ rotation = "daily"
 | `port` | Local proxy port |
 | `[tunnel].enabled` | Enable tunnel for public URL (default: false) |
 | `[tunnel].relay_url` | Relay server URL |
-| `[tunnel].token` | Tunnel authentication token |
+| `[tunnel].token` | Tunnel authentication token (from mcpr.app) |
 | `[tunnel].subdomain` | Fixed subdomain for tunnel |
-| `[tunnel].anonymous` | Skip interactive claim flow (bool) |
 | `[csp].mode` | `"extend"` or `"override"` |
 | `[csp].domains` | Extra CSP domains |
 | `[cloud].token` | Cloud sync token from mcpr.app |
