@@ -220,6 +220,56 @@ CLIENTS — localhost-9000 — last 7d
 | `--since DURATION` | 7d | Lookback window |
 | `--json` | false | NDJSON output |
 
+#### `mcpr proxy schema [name]`
+
+Show the captured MCP server schema — tools, resources, prompts, and server capabilities. Schema is passively captured from discovery responses (`initialize`, `tools/list`, `resources/list`, `prompts/list`, `resources/templates/list`) as they flow through the proxy.
+
+```bash
+mcpr proxy schema                        # show current schema
+mcpr proxy schema --changes              # show change history
+mcpr proxy schema --method tools/list    # filter to a specific method
+mcpr proxy schema --json                 # JSON output
+mcpr proxy schema --changes --limit 100  # last 100 changes
+```
+
+Default output:
+```
+Server: my-mcp-server v1.2.0 (MCP 2025-03-26)
+Capabilities: tools, resources
+Schema: complete
+Last captured: 2026-04-12 14:30:00
+
+── tools/list ──  (captured 2026-04-12 14:30:00)
+  Tools (3):
+    search_products  —  Search the product catalog by keyword
+    get_product      —  Get product details by ID
+    create_order     —  Create a new order
+```
+
+Change history (`--changes`):
+```
+  TIME                  METHOD                       CHANGE                 ITEM
+  2026-04-12 14:30:00   tools/list                   tool_added             send_email
+  2026-04-10 09:15:00   tools/list                   tool_modified          search_products
+  2026-04-08 11:00:00   tools/list                   initial                —
+```
+
+Schema status is computed from captured data:
+
+| Status | Meaning |
+|--------|---------|
+| `unknown` | No schema captured yet |
+| `partial` | Some discovery methods captured, but not all |
+| `complete` | `initialize` + at least one list method captured |
+| `stale` | Server sent `notifications/tools/list_changed` after last capture |
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--changes` | false | Show change history instead of current schema |
+| `--method METHOD` | — | Filter to a specific MCP method |
+| `--limit N` | 50 | Number of change history rows (with `--changes`) |
+| `--json` | false | JSON output |
+
 ### Storage
 
 mcpr stores all request data in a local SQLite database. Location:

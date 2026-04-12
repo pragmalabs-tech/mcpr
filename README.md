@@ -143,6 +143,45 @@ mcpr proxy sessions --active         # only active sessions
 mcpr proxy sessions --client cursor  # filter by client
 ```
 
+### Server Schema
+
+mcpr passively captures what the upstream MCP server exposes — tools, resources, prompts, capabilities — by intercepting discovery responses as they flow through. No extra auth needed.
+
+```bash
+$ mcpr proxy schema
+Server: my-mcp-server v1.2.0 (MCP 2025-03-26)
+Capabilities: tools, resources
+Schema: complete
+Last captured: 2026-04-12 14:30:00
+
+── tools/list ──  (captured 2026-04-12 14:30:00)
+  Tools (3):
+    search_products  —  Search the product catalog by keyword
+    get_product      —  Get product details by ID
+    create_order     —  Create a new order
+
+── resources/list ──  (captured 2026-04-12 14:30:01)
+  Resources (1):
+    products.csv  —  Full product catalog export
+```
+
+Track schema changes over time:
+
+```bash
+$ mcpr proxy schema --changes
+  TIME                  METHOD                       CHANGE                 ITEM
+  2026-04-12 14:30:00   tools/list                   tool_added             send_email
+  2026-04-10 09:15:00   tools/list                   tool_modified          search_products
+  2026-04-08 11:00:00   tools/list                   initial                —
+```
+
+```bash
+mcpr proxy schema --method tools/list   # filter by method
+mcpr proxy schema --json                # machine-readable output
+```
+
+See [docs/SCHEMA_CAPTURE.md](docs/SCHEMA_CAPTURE.md) for the full design: how capture works, storage schema, pagination handling, and change detection.
+
 ### Proxy Status Overview
 
 ```bash
@@ -303,6 +342,12 @@ mcpr proxy session <id>        Drill into a single session (prefix match)
 mcpr proxy clients [name]      AI client breakdown
   --since DURATION               Lookback window (default: 7d)
   --json                         NDJSON output
+
+mcpr proxy schema [name]       Captured MCP server schema (tools, resources, prompts)
+  --changes                      Show change history instead of current schema
+  --method METHOD                Filter by MCP method (e.g. tools/list)
+  --limit N                      Change history rows (default: 50)
+  --json                         JSON output
 ```
 
 ### Storage maintenance
@@ -407,6 +452,7 @@ AI Clients                    mcpr                           MCP Server
 - [x] SIGTERM graceful drain for Kubernetes
 - [x] Built-in tunnel (public HTTPS, no ngrok)
 - [x] Storage maintenance (`mcpr store stats/vacuum`)
+- [x] Schema capture — passively capture MCP server tools, resources, prompts with change tracking
 - [ ] `mcpr proxy view` — TUI viewer that attaches to running daemon
 - [ ] Multiple proxies in one daemon (`[[proxy]]` config array)
 - [ ] Prometheus metrics (`/metrics`)

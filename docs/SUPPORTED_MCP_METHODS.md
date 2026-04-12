@@ -12,7 +12,7 @@ the proxy does with each one.
 
 | Method | Direction | Type | Proxy Behavior |
 |--------|-----------|------|----------------|
-| `initialize` | client->server | request | Extracts `clientInfo` (name, version, platform) to identify the session. Tracks session state transition to `Initialized`. |
+| `initialize` | client->server | request | Extracts `clientInfo` (name, version, platform) to identify the session. Tracks session state transition to `Initialized`. **Schema capture**: stores server name, version, protocol version, and declared capabilities. |
 | `notifications/initialized` | client->server | notification | Transitions session state to `Active`. |
 | `ping` | bidirectional | request | Forwarded as-is. Logged. |
 
@@ -20,16 +20,16 @@ the proxy does with each one.
 
 | Method | Direction | Type | Proxy Behavior |
 |--------|-----------|------|----------------|
-| `tools/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each tool in the response (widget domain, CSP arrays). |
+| `tools/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each tool in the response. **Schema capture**: stores tool names, descriptions, and input schemas with change tracking. |
 | `tools/call` | client->server | request | **CSP rewriting**: rewrites `meta` on the response. Extracts **tool name** (`params.name`) for log detail. |
-| `notifications/tools/list_changed` | server->client | notification | Classified and logged. Useful for future multi-server cache invalidation. |
+| `notifications/tools/list_changed` | server->client | notification | Classified and logged. **Schema capture**: marks the cached `tools/list` schema as stale. |
 
 ### Resources
 
 | Method | Direction | Type | Proxy Behavior |
 |--------|-----------|------|----------------|
-| `resources/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each resource in the response. |
-| `resources/templates/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each template in the response (`result.resourceTemplates[]`). |
+| `resources/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each resource in the response. **Schema capture**: stores resource URIs, names, and descriptions. |
+| `resources/templates/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each template in the response (`result.resourceTemplates[]`). **Schema capture**: stores template URIs and descriptions. |
 | `resources/read` | client->server | request | **CSP rewriting**: rewrites `meta` on each content item. Extracts **resource URI** (`params.uri`) for log detail. HTML text content is never modified. |
 | `resources/subscribe` | client->server | request | Forwarded as-is. Logged. |
 | `resources/unsubscribe` | client->server | request | Forwarded as-is. Logged. |
@@ -38,7 +38,7 @@ the proxy does with each one.
 
 | Method | Direction | Type | Proxy Behavior |
 |--------|-----------|------|----------------|
-| `prompts/list` | client->server | request | Forwarded as-is. Logged. |
+| `prompts/list` | client->server | request | Forwarded as-is. Logged. **Schema capture**: stores prompt names, descriptions, and arguments. |
 | `prompts/get` | client->server | request | Extracts **prompt name** (`params.name`) for log detail. |
 
 ### Utility
