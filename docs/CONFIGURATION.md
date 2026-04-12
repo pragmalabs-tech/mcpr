@@ -1,17 +1,17 @@
 # Configuration Reference
 
-mcpr uses `mcpr.toml` for configuration. It searches the current directory, then parent directories. CLI args and environment variables override config file values.
+`mcpr.toml` is the single source of truth for **how the proxy behaves** — where to route traffic, how to handle CSP, resource limits, tunnel settings, cloud sync, and storage. It declares proxy behavior; it does not manage the daemon process (that's the [CLI](CLI.md)).
 
-**Priority:** CLI args > environment variables > `mcpr.toml` > defaults
+mcpr searches the current directory, then parent directories, for `mcpr.toml`.
 
 ## Modes
 
-mcpr runs in one of two modes:
+mcpr runs in one of two modes, set in `mcpr.toml`:
 
-| Mode | Trigger | Purpose |
-|------|---------|---------|
-| **Gateway** (default) | No `--relay` flag | Proxy + tunnel client for local MCP development |
-| **Relay** | `--relay` flag or `mode = "relay"` in config | Tunnel relay server deployed on a VPS |
+| Mode | Config | Purpose |
+|------|--------|---------|
+| **Gateway** (default) | `mode` omitted or `mode = "gateway"` | Proxy + tunnel client for MCP development and production |
+| **Relay** | `mode = "relay"` | Tunnel relay server deployed on a VPS |
 
 ## Gateway Mode
 

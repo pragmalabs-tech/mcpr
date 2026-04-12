@@ -1,6 +1,10 @@
 # CLI Reference
 
-mcpr is a protocol-aware reverse proxy that sits before your MCP server. Start it once, observe anytime.
+The CLI **manages the daemon process** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](CONFIGURATION.md).
+
+Two responsibilities:
+1. **Daemon lifecycle** — start, stop, restart, check status.
+2. **Query & observe** — read request logs, per-tool metrics, sessions, schema, and storage stats from SQLite. These commands work even when the daemon isn't running.
 
 ## Quick Start
 
@@ -32,15 +36,13 @@ mcpr stop
 
 `mcpr start` reads `mcpr.toml` from the current directory (or parent directories), starts the proxy in the background, and exits. The daemon writes logs to `~/.local/share/mcpr/daemon.log` (Linux) or `~/Library/Application Support/mcpr/daemon.log` (macOS).
 
-No subcommand defaults to `start`:
-
 ```bash
 mcpr start              # reads mcpr.toml, starts daemon
 ```
 
-### Observability
+### Query & Observe
 
-All proxy commands work without a running daemon — they read the SQLite store directly. The `[name]` argument is optional when only one proxy is running (auto-detected from the daemon's PID file).
+All `mcpr proxy` commands read the local SQLite store directly — they work even when the daemon isn't running. The `[name]` argument is optional when only one proxy is running (auto-detected from the daemon's PID file).
 
 #### `mcpr proxy logs [name]`
 
