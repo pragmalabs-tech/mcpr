@@ -7,8 +7,14 @@
 use mcpr_integrations::store::{
     self,
     query::{
-        QueryEngine, clients::ClientsParams, logs::LogsParams, sessions::SessionsParams,
-        slow::SlowParams, stats::StatsParams, store_ops::VacuumParams,
+        QueryEngine,
+        clients::ClientsParams,
+        logs::LogsParams,
+        schema::{SchemaChangesParams, SchemaParams},
+        sessions::SessionsParams,
+        slow::SlowParams,
+        stats::StatsParams,
+        store_ops::VacuumParams,
     },
 };
 
@@ -128,6 +134,7 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         ProxyCommand::Clients(args) => cmd_proxy_clients(args),
         ProxyCommand::Status(args) => cmd_proxy_status(args),
         ProxyCommand::Session(args) => cmd_proxy_session(args),
+        ProxyCommand::Schema(args) => cmd_proxy_schema(args),
     };
 
     if let Err(e) = result {
@@ -682,6 +689,135 @@ fn cmd_proxy_session(args: ProxySessionArgs) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn cmd_proxy_schema(args: ProxySchemaArgs) -> Result<(), String> {
+    let (engine, _) = open_query_engine()?;
+    let _name = resolve_proxy_name(args.name)?;
+
+    if args.changes {
+        let rows = engine
+            .schema_changes(&SchemaChangesParams {
+                upstream_url: None,
+                method: args.method.clone(),
+                limit: args.limit,
+            })
+            .map_err(|e| format!("query failed: {e}"))?;
+
+        if args.json {
+            for row in &rows {
+                print_json(row);
+            }
+        } else {
+            println!("  {:<21} {:<28} {:<22} ITEM", "TIME", "METHOD", "CHANGE");
+            for row in &rows {
+                println!(
+                    "  {:<21} {:<28} {:<22} {}",
+                    format_ts(row.detected_at),
+                    row.method,
+                    row.change_type,
+                    row.item_name.as_deref().unwrap_or("—"),
+                );
+            }
+            if rows.is_empty() {
+                println!("  (no schema changes recorded)");
+            }
+        }
+    } else {
+        let rows = engine
+            .schema(&SchemaParams {
+                upstream_url: None,
+                method: args.method.clone(),
+            })
+            .map_err(|e| format!("query failed: {e}"))?;
+
+        if args.json {
+            for row in &rows {
+                print_json(row);
+            }
+        } else {
+            if rows.is_empty() {
+                println!(
+                    "  (no schema captured yet — schema is populated as responses flow through the proxy)"
+                );
+                return Ok(());
+            }
+
+            // Show status summary if we have an initialize payload.
+            if let Some(init_row) = rows.iter().find(|r| r.method == "initialize") {
+                let status = engine
+                    .schema_status(&init_row.upstream_url)
+                    .map_err(|e| format!("query failed: {e}"))?;
+                if let Some(name) = &status.server_name {
+                    let ver = status.server_version.as_deref().unwrap_or("?");
+                    let proto = status.protocol_version.as_deref().unwrap_or("?");
+                    println!("Server: {} v{} (MCP {})", name, ver, proto);
+                }
+                if !status.capabilities.is_empty() {
+                    println!("Capabilities: {}", status.capabilities.join(", "));
+                }
+                println!("Schema: {}", status.status);
+                if let Some(ts) = status.last_captured_at {
+                    println!("Last captured: {}", format_ts(ts));
+                }
+                println!();
+            }
+
+            for row in &rows {
+                if row.method == "initialize" {
+                    continue; // Already shown in summary.
+                }
+                println!(
+                    "── {} ──  (captured {})",
+                    row.method,
+                    format_ts(row.captured_at)
+                );
+                print_schema_items(&row.payload, &row.method);
+                println!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Print named items from a schema payload in a human-readable format.
+fn print_schema_items(payload: &str, method: &str) {
+    let val: serde_json::Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => {
+            println!("  {payload}");
+            return;
+        }
+    };
+
+    let (array_key, label) = match method {
+        "tools/list" => ("tools", "Tools"),
+        "resources/list" => ("resources", "Resources"),
+        "resources/templates/list" => ("resourceTemplates", "Resource Templates"),
+        "prompts/list" => ("prompts", "Prompts"),
+        _ => {
+            println!("  {payload}");
+            return;
+        }
+    };
+
+    if let Some(items) = val.get(array_key).and_then(|a| a.as_array()) {
+        println!("  {} ({}):", label, items.len());
+        for item in items {
+            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("?");
+            let desc = item
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
+            let desc_short: String = desc.chars().take(60).collect();
+            if desc_short.is_empty() {
+                println!("    {name}");
+            } else {
+                println!("    {name}  —  {desc_short}");
+            }
+        }
+    }
 }
 
 // ── Store commands ─────────────────────────────────────────────────────

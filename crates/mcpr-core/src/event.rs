@@ -7,6 +7,7 @@
 //! - Emit events (proxy engine)
 //! - Consume events (sinks: stderr, sqlite, cloud, prometheus, etc.)
 
+use mcpr_protocol::schema::PageStatus;
 use serde::Serialize;
 
 // ── Event types ────────────────────────────────────────────────────────
@@ -26,6 +27,10 @@ pub enum ProxyEvent {
     SessionEnd(SessionEndEvent),
     /// Periodic health snapshot emitted by the health check loop.
     Heartbeat(HeartbeatEvent),
+    /// A schema discovery response was captured (before proxy rewrite).
+    SchemaCapture(SchemaCaptureEvent),
+    /// Server indicated its schema changed (e.g., `notifications/tools/list_changed`).
+    SchemaStale(SchemaStaleEvent),
 }
 
 /// An MCP request that flowed through the proxy.
@@ -100,6 +105,36 @@ pub struct HeartbeatEvent {
     pub widgets_status: String,
     pub uptime_secs: u64,
     pub request_count: u64,
+}
+
+/// Captured MCP schema discovery response, emitted BEFORE proxy rewrite.
+#[derive(Clone, Debug, Serialize)]
+pub struct SchemaCaptureEvent {
+    /// Unix milliseconds (UTC).
+    pub ts: i64,
+    /// Proxy name.
+    pub proxy: String,
+    /// Upstream MCP server URL.
+    pub upstream_url: String,
+    /// MCP method that produced this response (e.g., "initialize", "tools/list").
+    pub method: String,
+    /// The raw `result` field from the JSON-RPC response, serialized as JSON.
+    pub payload: String,
+    /// Pagination state — used by the writer to buffer multi-page responses.
+    pub page_status: PageStatus,
+}
+
+/// Server indicated its schema changed (e.g., `notifications/tools/list_changed`).
+#[derive(Clone, Debug, Serialize)]
+pub struct SchemaStaleEvent {
+    /// Unix milliseconds (UTC).
+    pub ts: i64,
+    /// Proxy name.
+    pub proxy: String,
+    /// Upstream MCP server URL.
+    pub upstream_url: String,
+    /// The method whose schema is now stale (e.g., "tools/list").
+    pub method: String,
 }
 
 // ── Event sink trait ───────────────────────────────────────────────────

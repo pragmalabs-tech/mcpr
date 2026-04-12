@@ -7,4 +7,5 @@ repository.workspace = true
 description = "Core types, traits, and shared foundations for mcpr crates"
 
 [dependencies]
+mcpr-protocol = { workspace = true }
 serde = { workspace = true }

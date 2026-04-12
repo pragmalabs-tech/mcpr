@@ -9,6 +9,7 @@
 
 pub mod clients;
 pub mod logs;
+pub mod schema;
 pub mod session_detail;
 pub mod sessions;
 pub mod slow;
@@ -783,5 +784,137 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("total_calls"));
         assert!(json.contains("tools"));
+    }
+
+    // ── schema ─────────────────────────────────────────────────────────
+
+    fn seed_schema(engine: &QueryEngine) {
+        engine
+            .conn()
+            .execute(
+                "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "http://localhost:9000",
+                    "initialize",
+                    r#"{"serverInfo":{"name":"test-server","version":"1.0"},"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}"#,
+                    1000i64,
+                    "hash_init"
+                ],
+            )
+            .unwrap();
+        engine
+            .conn()
+            .execute(
+                "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "http://localhost:9000",
+                    "tools/list",
+                    r#"{"tools":[{"name":"search","description":"search things"}]}"#,
+                    2000i64,
+                    "hash_tools"
+                ],
+            )
+            .unwrap();
+        engine
+            .conn()
+            .execute(
+                "INSERT INTO schema_changes (upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params!["http://localhost:9000", "tools/list", "initial", Option::<String>::None, Option::<String>::None, "hash_tools", 2000i64],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn schema_returns_all_snapshots() {
+        let engine = seeded_engine();
+        seed_schema(&engine);
+        let rows = engine
+            .schema(&super::schema::SchemaParams {
+                upstream_url: None,
+                method: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn schema_filter_by_method() {
+        let engine = seeded_engine();
+        seed_schema(&engine);
+        let rows = engine
+            .schema(&super::schema::SchemaParams {
+                upstream_url: None,
+                method: Some("tools/list".into()),
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].method, "tools/list");
+    }
+
+    #[test]
+    fn schema_changes_returns_history() {
+        let engine = seeded_engine();
+        seed_schema(&engine);
+        let rows = engine
+            .schema_changes(&super::schema::SchemaChangesParams {
+                upstream_url: None,
+                method: None,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].change_type, "initial");
+    }
+
+    #[test]
+    fn schema_status_complete() {
+        let engine = seeded_engine();
+        seed_schema(&engine);
+        let status = engine.schema_status("http://localhost:9000").unwrap();
+        assert_eq!(status.status, "complete");
+        assert_eq!(status.server_name.as_deref(), Some("test-server"));
+        assert_eq!(status.server_version.as_deref(), Some("1.0"));
+        assert_eq!(status.protocol_version.as_deref(), Some("2025-03-26"));
+        assert!(status.capabilities.contains(&"tools".to_string()));
+        assert_eq!(status.methods_captured.len(), 2);
+    }
+
+    #[test]
+    fn schema_status_unknown() {
+        let engine = seeded_engine();
+        let status = engine.schema_status("http://nonexistent").unwrap();
+        assert_eq!(status.status, "unknown");
+        assert!(status.methods_captured.is_empty());
+    }
+
+    #[test]
+    fn schema_status_partial() {
+        let engine = seeded_engine();
+        // Only insert tools/list, no initialize.
+        engine
+            .conn()
+            .execute(
+                "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params!["http://partial", "tools/list", "{}", 1000i64, "h1"],
+            )
+            .unwrap();
+        let status = engine.schema_status("http://partial").unwrap();
+        assert_eq!(status.status, "partial");
+    }
+
+    #[test]
+    fn schema_status_stale() {
+        let engine = seeded_engine();
+        seed_schema(&engine);
+        // Add a stale marker newer than the capture.
+        engine
+            .conn()
+            .execute(
+                "INSERT INTO schema_changes (upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params!["http://localhost:9000", "tools/list", "stale", Option::<String>::None, "hash_tools", Option::<String>::None, 9000i64],
+            )
+            .unwrap();
+        let status = engine.schema_status("http://localhost:9000").unwrap();
+        assert_eq!(status.status, "stale");
     }
 }

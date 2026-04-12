@@ -8,6 +8,7 @@ description = "External integrations for mcpr: event emitters, metrics, feature 
 
 [dependencies]
 mcpr-core = { workspace = true }
+mcpr-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -21,6 +22,9 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Platform-specific default paths (XDG on Linux, ~/Library on macOS, %APPDATA% on Windows).
 dirs = "6"
+
+# SHA-256 hashing for schema change detection.
+sha2 = { workspace = true }
 
 # Structured logging for the background storage writer.
 tracing = "0.1"

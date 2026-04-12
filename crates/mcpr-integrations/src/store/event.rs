@@ -30,6 +30,16 @@ pub enum StoreEvent {
         /// Unix milliseconds (UTC) when the close was detected.
         ended_at: i64,
     },
+
+    /// A captured schema discovery response, ready for storage.
+    SchemaCapture(SchemaCaptureEvent),
+
+    /// Mark a schema method as stale (e.g., `notifications/tools/list_changed`).
+    SchemaStale {
+        upstream_url: String,
+        method: String,
+        ts: i64,
+    },
 }
 
 /// One completed MCP request, ready to be written to the `requests` table.
@@ -113,6 +123,21 @@ pub struct SessionEvent {
     /// Values: "claude", "chatgpt", "vscode", "cursor", "unknown".
     /// Normalization happens at write time via a static lookup table.
     pub client_platform: Option<String>,
+}
+
+/// A schema discovery response captured from the proxy, ready for storage.
+#[derive(Debug)]
+pub struct SchemaCaptureEvent {
+    /// Unix milliseconds (UTC).
+    pub ts: i64,
+    /// Upstream MCP server URL.
+    pub upstream_url: String,
+    /// MCP method (e.g., "initialize", "tools/list").
+    pub method: String,
+    /// JSON string of the `result` field.
+    pub payload: String,
+    /// Pagination state.
+    pub page_status: mcpr_protocol::schema::PageStatus,
 }
 
 /// Outcome of a single MCP request.

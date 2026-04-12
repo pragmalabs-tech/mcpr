@@ -35,6 +35,7 @@
 //!
 //! Minimal: `serde`, `serde_json`, `chrono`, `dashmap`. No HTTP framework deps.
 
+pub mod schema;
 pub mod session;
 
 use serde_json::Value;

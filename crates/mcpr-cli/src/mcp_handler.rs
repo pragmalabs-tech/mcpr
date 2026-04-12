@@ -10,7 +10,10 @@ use serde_json::Value;
 use crate::AppState;
 use crate::proxy::forward_request;
 use crate::widgets::fetch_widget_html;
-use mcpr_core::event::{ProxyEvent, RequestEvent, SessionStartEvent};
+use mcpr_core::event::{
+    ProxyEvent, RequestEvent, SchemaCaptureEvent, SchemaStaleEvent, SessionStartEvent,
+};
+use mcpr_protocol::schema as proto_schema;
 use mcpr_protocol::session::{self as session, SessionState, SessionStore};
 use mcpr_protocol::{self as jsonrpc, McpMethod};
 use mcpr_proxy::forwarding::{build_response, read_body_capped};
@@ -217,6 +220,10 @@ pub async fn handle_mcp_post(
         let rpc_error =
             jsonrpc::extract_error_code(&json_body).map(|(code, msg)| (code, msg.to_string()));
 
+        // Schema capture — BEFORE rewrite, to get raw server response.
+        emit_schema_capture(state, &mcp_method, method_str, body, &json_body);
+        emit_schema_stale(state, &json_body);
+
         rewrite_response(method_str, &mut json_body, &config);
         let rewritten = serde_json::to_vec(&json_body).unwrap_or(json_bytes);
         let body = if is_sse {
@@ -412,4 +419,75 @@ async fn handle_resources_read(
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
     Some(build_response(200, &resp_headers, Body::from(body)))
+}
+
+// ── Schema capture helpers ───────────────────────────────────────────
+
+/// Emit a schema capture event if this is a successful schema discovery response.
+fn emit_schema_capture(
+    state: &AppState,
+    mcp_method: &McpMethod,
+    method_str: &str,
+    request_body: &Bytes,
+    response_body: &Value,
+) {
+    if !proto_schema::is_schema_method(mcp_method) {
+        return;
+    }
+
+    // Only capture successful responses that have a result field.
+    let result = match response_body.get("result") {
+        Some(r) => r,
+        None => return,
+    };
+
+    let req_val = serde_json::from_slice::<Value>(request_body).unwrap_or_default();
+    let page_status = proto_schema::detect_page_status(&req_val, response_body);
+    let payload = result.to_string();
+
+    state
+        .event_bus
+        .emit(ProxyEvent::SchemaCapture(SchemaCaptureEvent {
+            ts: chrono::Utc::now().timestamp_millis(),
+            proxy: state.proxy_name.clone(),
+            upstream_url: state.mcp_upstream.clone(),
+            method: method_str.to_string(),
+            payload,
+            page_status,
+        }));
+}
+
+/// Check if the response contains a `notifications/tools/list_changed` notification
+/// and emit a schema stale event if so.
+fn emit_schema_stale(state: &AppState, response_body: &Value) {
+    let is_stale_notification = |v: &Value| {
+        v.get("method").and_then(|m| m.as_str()) == Some(jsonrpc::NOTIFICATIONS_TOOLS_LIST_CHANGED)
+    };
+
+    // Check single notification.
+    if is_stale_notification(response_body) {
+        state
+            .event_bus
+            .emit(ProxyEvent::SchemaStale(SchemaStaleEvent {
+                ts: chrono::Utc::now().timestamp_millis(),
+                proxy: state.proxy_name.clone(),
+                upstream_url: state.mcp_upstream.clone(),
+                method: "tools/list".to_string(),
+            }));
+        return;
+    }
+
+    // Check batch containing the notification.
+    if let Some(arr) = response_body.as_array()
+        && arr.iter().any(is_stale_notification)
+    {
+        state
+            .event_bus
+            .emit(ProxyEvent::SchemaStale(SchemaStaleEvent {
+                ts: chrono::Utc::now().timestamp_millis(),
+                proxy: state.proxy_name.clone(),
+                upstream_url: state.mcp_upstream.clone(),
+                method: "tools/list".to_string(),
+            }));
+    }
 }

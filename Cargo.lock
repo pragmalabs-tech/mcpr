@@ -1066,6 +1066,7 @@ dependencies = [
 name = "mcpr-core"
 version = "0.4.0-alpha.3"
 dependencies = [
+ "mcpr-protocol",
  "serde",
 ]
 
@@ -1076,10 +1077,12 @@ dependencies = [
  "chrono",
  "dirs",
  "mcpr-core",
+ "mcpr-protocol",
  "reqwest",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",
