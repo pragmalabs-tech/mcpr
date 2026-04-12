@@ -10,8 +10,8 @@ type AggRow = (String, i64, f64, i64, i64, f64, i64, i64);
 
 /// Filter parameters for the stats query.
 pub struct StatsParams {
-    /// Proxy name to filter by.
-    pub proxy: String,
+    /// Proxy name to filter by (None = all proxies).
+    pub proxy: Option<String>,
     /// Only rows newer than this unix ms timestamp.
     pub since_ts: i64,
 }
@@ -70,7 +70,7 @@ impl QueryEngine {
                 COALESCE(SUM(bytes_in), 0) AS total_bytes_in,
                 COALESCE(SUM(bytes_out), 0) AS total_bytes_out
             FROM requests
-            WHERE proxy = ?1 AND ts >= ?2
+            WHERE (?1 IS NULL OR proxy = ?1) AND ts >= ?2
             GROUP BY COALESCE(tool, '<' || method || '>')
             ORDER BY calls DESC
         ";
@@ -95,7 +95,7 @@ impl QueryEngine {
         let p95_sql = "
             SELECT latency_ms
             FROM requests
-            WHERE proxy = ?1 AND ts >= ?2
+            WHERE (?1 IS NULL OR proxy = ?1) AND ts >= ?2
               AND COALESCE(tool, '<' || method || '>') = ?3
             ORDER BY latency_ms
         ";

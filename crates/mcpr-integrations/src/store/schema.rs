@@ -18,7 +18,7 @@
 
 /// Current schema version. Stored in the `meta` table and checked on startup.
 /// Bump this when adding migrations.
-pub const SCHEMA_VERSION: &str = "2";
+pub const SCHEMA_VERSION: &str = "3";
 
 /// Initial schema: requests table, sessions table, meta table, and all indexes.
 ///
@@ -165,6 +165,43 @@ CREATE INDEX IF NOT EXISTS idx_schema_changes_upstream
 UPDATE meta SET value = '2' WHERE key = 'schema_version';
 ";
 
+/// V2 → V3 migration: add `proxy` column to server_schema and schema_changes.
+///
+/// server_schema has a UNIQUE(upstream_url, method) table constraint that cannot
+/// be altered in SQLite. We recreate the table with a new UNIQUE that includes proxy.
+pub const V3_SCHEMA: &str = "
+-- Recreate server_schema with proxy column and updated unique constraint.
+CREATE TABLE IF NOT EXISTS server_schema_new (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    proxy         TEXT NOT NULL DEFAULT 'default',
+    upstream_url  TEXT NOT NULL,
+    method        TEXT NOT NULL,
+    payload       TEXT NOT NULL,
+    captured_at   INTEGER NOT NULL,
+    schema_hash   TEXT NOT NULL,
+    UNIQUE(proxy, upstream_url, method)
+);
+INSERT OR IGNORE INTO server_schema_new (id, proxy, upstream_url, method, payload, captured_at, schema_hash)
+    SELECT id, 'default', upstream_url, method, payload, captured_at, schema_hash
+    FROM server_schema;
+DROP TABLE IF EXISTS server_schema;
+ALTER TABLE server_schema_new RENAME TO server_schema;
+
+-- Add proxy column to schema_changes.
+ALTER TABLE schema_changes ADD COLUMN proxy TEXT NOT NULL DEFAULT 'default';
+
+-- New indexes for proxy-scoped queries.
+DROP INDEX IF EXISTS idx_schema_upstream;
+CREATE INDEX IF NOT EXISTS idx_schema_proxy
+    ON server_schema (proxy, upstream_url);
+DROP INDEX IF EXISTS idx_schema_changes_upstream;
+CREATE INDEX IF NOT EXISTS idx_schema_changes_proxy
+    ON schema_changes (proxy, detected_at);
+
+-- Bump schema version.
+UPDATE meta SET value = '3' WHERE key = 'schema_version';
+";
+
 /// SQL to insert or update the mcpr_version meta key on every startup.
 pub const UPSERT_MCPR_VERSION: &str = "
 INSERT INTO meta (key, value) VALUES ('mcpr_version', ?1)
@@ -214,24 +251,27 @@ WHERE session_id = ?2 AND ended_at IS NULL;
 // ── Schema capture prepared statements ───────────────────────────────
 
 /// UPSERT a server_schema row. ON CONFLICT updates the existing row.
+/// Parameters: ?1=proxy, ?2=upstream_url, ?3=method, ?4=payload, ?5=captured_at, ?6=schema_hash.
 pub const UPSERT_SERVER_SCHEMA_SQL: &str = "
-INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash)
-VALUES (?1, ?2, ?3, ?4, ?5)
-ON CONFLICT(upstream_url, method) DO UPDATE SET
+INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+ON CONFLICT(proxy, upstream_url, method) DO UPDATE SET
     payload = excluded.payload,
     captured_at = excluded.captured_at,
     schema_hash = excluded.schema_hash;
 ";
 
-/// Fetch the current schema_hash and payload for a given upstream+method.
+/// Fetch the current schema_hash and payload for a given proxy+upstream+method.
 /// Used by the writer to detect changes before upserting.
+/// Parameters: ?1=proxy, ?2=upstream_url, ?3=method.
 pub const GET_SCHEMA_HASH_SQL: &str = "
 SELECT schema_hash, payload FROM server_schema
-WHERE upstream_url = ?1 AND method = ?2;
+WHERE proxy = ?1 AND upstream_url = ?2 AND method = ?3;
 ";
 
 /// Insert a schema change record into the append-only log.
+/// Parameters: ?1=proxy, ?2=upstream_url, ?3=method, ?4=change_type, ?5=item_name, ?6=old_hash, ?7=new_hash, ?8=detected_at.
 pub const INSERT_SCHEMA_CHANGE_SQL: &str = "
-INSERT INTO schema_changes (upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at)
-VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);
+INSERT INTO schema_changes (proxy, upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);
 ";

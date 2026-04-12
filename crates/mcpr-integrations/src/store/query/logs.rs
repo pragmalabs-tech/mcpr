@@ -7,8 +7,8 @@ use super::QueryEngine;
 
 /// Filter parameters for the logs query.
 pub struct LogsParams {
-    /// Proxy name to filter by.
-    pub proxy: String,
+    /// Proxy name to filter by (None = all proxies).
+    pub proxy: Option<String>,
     /// Only rows newer than this unix ms timestamp.
     pub since_ts: i64,
     /// Maximum number of rows to return.
@@ -68,7 +68,7 @@ impl QueryEngine {
         let sql = format!(
             "SELECT {LOG_COLUMNS}
             FROM requests
-            WHERE proxy = ?1
+            WHERE (?1 IS NULL OR proxy = ?1)
               AND (?2 IS NULL OR tool = ?2)
               AND (?3 IS NULL OR status = ?3)
               AND (?4 IS NULL OR method = ?4)
@@ -108,7 +108,7 @@ impl QueryEngine {
         let sql = format!(
             "SELECT {LOG_COLUMNS}
             FROM requests
-            WHERE proxy = ?1
+            WHERE (?1 IS NULL OR proxy = ?1)
               AND (?2 IS NULL OR tool = ?2)
               AND (?3 IS NULL OR status = ?3)
               AND (?4 IS NULL OR method = ?4)

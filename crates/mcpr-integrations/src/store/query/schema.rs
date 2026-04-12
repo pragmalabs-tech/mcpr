@@ -42,7 +42,7 @@ pub struct SchemaChangeRow {
 
 /// Parameters for the unused tools query.
 pub struct SchemaUnusedParams {
-    pub proxy: String,
+    pub proxy: Option<String>,
     pub since_ts: i64,
 }
 
@@ -258,7 +258,7 @@ impl QueryEngine {
                    SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors,
                    MAX(ts) as last_called_at
             FROM requests
-            WHERE proxy = ?1 AND ts >= ?2 AND tool = ?3
+            WHERE (?1 IS NULL OR proxy = ?1) AND ts >= ?2 AND tool = ?3
         ";
 
         let mut result = Vec::new();

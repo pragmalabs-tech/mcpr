@@ -1,4 +1,4 @@
-//! Query: `mcpr proxy slow <proxy>` — slowest requests above a threshold.
+//! Query: `mcpr proxy slow` — slowest requests above a threshold.
 
 use rusqlite::params;
 
@@ -7,8 +7,8 @@ use super::logs::{LOG_COLUMNS, LogRow, map_log_row};
 
 /// Filter parameters for the slow query.
 pub struct SlowParams {
-    /// Proxy name to filter by.
-    pub proxy: String,
+    /// Proxy name to filter by (None = all proxies).
+    pub proxy: Option<String>,
     /// Minimum latency in milliseconds to include.
     pub threshold_ms: i64,
     /// Only rows newer than this unix ms timestamp.
@@ -25,7 +25,7 @@ impl QueryEngine {
         let sql = format!(
             "SELECT {LOG_COLUMNS}
             FROM requests
-            WHERE proxy = ?1
+            WHERE (?1 IS NULL OR proxy = ?1)
               AND latency_ms >= ?2
               AND (?3 IS NULL OR tool = ?3)
               AND ts >= ?4
@@ -57,7 +57,7 @@ impl QueryEngine {
         let sql = format!(
             "SELECT {LOG_COLUMNS}
             FROM requests
-            WHERE proxy = ?1
+            WHERE (?1 IS NULL OR proxy = ?1)
               AND latency_ms >= ?2
               AND (?3 IS NULL OR tool = ?3)
               AND ts > ?4

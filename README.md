@@ -385,13 +385,8 @@ Community-driven — we want to hear your feedback to adjust priorities.
 - [ ] Request validation and schema enforcement
 - [ ] IP whitelisting
 - [ ] Multi-server routing (route to multiple MCP backends)
-- [ ] Multiple proxies in one daemon (`[[proxy]]` config array)
 - [ ] Rate limiting + circuit breaker
 - [ ] SIGHUP config reload
-- [ ] Prometheus metrics (`/metrics`)
-- [ ] `mcpr proxy view` — TUI viewer that attaches to running daemon
-- [ ] Widget injection (add widgets to tool-only servers)
-- [ ] OTLP ingestion
 
 ## License
 

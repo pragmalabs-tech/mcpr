@@ -32,6 +32,15 @@ pub enum CliAction {
     Update,
     /// Read-only query against the store — no server needed.
     Proxy(ProxyCommand),
+    /// Run a proxy as a background process (fork before tokio).
+    ProxyRun {
+        mode: Mode,
+        replace: bool,
+        /// Raw TOML content for config snapshot.
+        config_content: String,
+        /// Absolute path to the original config file.
+        config_path: String,
+    },
     /// Store maintenance commands.
     Store(StoreCommand),
 }
@@ -121,10 +130,18 @@ pub struct ProxyArgs {
     pub command: ProxyCommand,
 }
 
-/// Observability commands — read-only queries against the SQLite store.
-/// These work without a running proxy (they open the DB file directly).
+/// Proxy lifecycle and observability commands.
 #[derive(Subcommand, Clone)]
 pub enum ProxyCommand {
+    // ── Lifecycle ─────────────────────────────────────────────────────
+    /// Run a proxy in the background from a config file
+    Run(ProxyRunArgs),
+    /// Stop a running proxy (or all proxies with --all)
+    Stop(ProxyStopArgs),
+    /// Restart a running proxy from its saved config (or all with --all)
+    Restart(ProxyRestartArgs),
+
+    // ── Observability ────────────────────────────────────────────────
     /// Show recent request logs
     Logs(ProxyLogsArgs),
     /// Show slowest requests above a latency threshold
@@ -135,7 +152,7 @@ pub enum ProxyCommand {
     Sessions(ProxySessionsArgs),
     /// Show client (AI model) breakdown
     Clients(ProxyClientsArgs),
-    /// Show proxy status overview (activity summary, active sessions, error rate)
+    /// Show proxy status overview (running proxies, activity, errors)
     Status(ProxyStatusArgs),
     /// Drill into a single session — show session info and all its requests
     Session(ProxySessionArgs),
@@ -143,12 +160,47 @@ pub enum ProxyCommand {
     Schema(ProxySchemaArgs),
 }
 
+// ── Proxy lifecycle args ──────────────────────────────────────────────
+
+/// Arguments for `mcpr proxy run [config]`.
+#[derive(Parser, Clone)]
+pub struct ProxyRunArgs {
+    /// Config file path (default: mcpr.toml)
+    pub config: Option<String>,
+
+    /// Replace existing proxy with the same name
+    #[arg(long)]
+    pub replace: bool,
+}
+
+/// Arguments for `mcpr proxy stop [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxyStopArgs {
+    /// Proxy name to stop
+    pub name: Option<String>,
+
+    /// Stop all running proxies
+    #[arg(long)]
+    pub all: bool,
+}
+
+/// Arguments for `mcpr proxy restart [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxyRestartArgs {
+    /// Proxy name to restart from its saved config snapshot
+    pub name: Option<String>,
+
+    /// Restart all running proxies
+    #[arg(long)]
+    pub all: bool,
+}
+
 /// Arguments for `mcpr proxy logs [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxyLogsArgs {
-    /// Proxy name to query. Optional when only one proxy is running —
-    /// auto-detected from the running daemon's config.
-    pub name: Option<String>,
+    /// Filter to a specific proxy name (omit to show all proxies)
+    #[arg(long)]
+    pub proxy: Option<String>,
 
     /// Number of recent rows to show
     #[arg(long, default_value = "50")]
@@ -191,8 +243,9 @@ pub struct ProxyLogsArgs {
 /// Arguments for `mcpr proxy slow [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxySlowArgs {
-    /// Proxy name to query (optional — auto-detected when one proxy is running)
-    pub name: Option<String>,
+    /// Filter to a specific proxy name (omit to show all proxies)
+    #[arg(long)]
+    pub proxy: Option<String>,
 
     /// Minimum latency to include (e.g., 500ms, 1s, 2s). Default: 500ms
     #[arg(long, default_value = "500ms")]
@@ -222,8 +275,9 @@ pub struct ProxySlowArgs {
 /// Arguments for `mcpr proxy stats [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxyStatsArgs {
-    /// Proxy name to query (optional — auto-detected when one proxy is running)
-    pub name: Option<String>,
+    /// Filter to a specific proxy name (omit to show all proxies)
+    #[arg(long)]
+    pub proxy: Option<String>,
 
     /// Aggregation window (e.g., 1h, 24h)
     #[arg(long, default_value = "1h")]
@@ -237,8 +291,9 @@ pub struct ProxyStatsArgs {
 /// Arguments for `mcpr proxy sessions [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxySessionsArgs {
-    /// Proxy name to query (optional — auto-detected when one proxy is running)
-    pub name: Option<String>,
+    /// Filter to a specific proxy name (omit to show all proxies)
+    #[arg(long)]
+    pub proxy: Option<String>,
 
     /// Only show active sessions (seen in last 5 minutes)
     #[arg(long)]
@@ -264,8 +319,9 @@ pub struct ProxySessionsArgs {
 /// Arguments for `mcpr proxy clients [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxyClientsArgs {
-    /// Proxy name to query (optional — auto-detected when one proxy is running)
-    pub name: Option<String>,
+    /// Filter to a specific proxy name (omit to show all proxies)
+    #[arg(long)]
+    pub proxy: Option<String>,
 
     /// Lookback window (default longer: clients change slowly)
     #[arg(long, default_value = "7d")]
@@ -279,8 +335,9 @@ pub struct ProxyClientsArgs {
 /// Arguments for `mcpr proxy status [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxyStatusArgs {
-    /// Proxy name to query (optional — auto-detected when one proxy is running)
-    pub name: Option<String>,
+    /// Filter to a specific proxy name (omit to show all proxies)
+    #[arg(long)]
+    pub proxy: Option<String>,
 
     /// Lookback window for activity summary (e.g., 1h, 24h)
     #[arg(long, default_value = "1h")]
@@ -305,8 +362,9 @@ pub struct ProxySessionArgs {
 /// Arguments for `mcpr proxy schema [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxySchemaArgs {
-    /// Proxy name to query (optional — auto-detected when one proxy is running)
-    pub name: Option<String>,
+    /// Filter to a specific proxy name (omit to show all proxies)
+    #[arg(long)]
+    pub proxy: Option<String>,
 
     /// Filter to a specific MCP method (e.g., tools/list, initialize)
     #[arg(long)]
@@ -438,6 +496,9 @@ struct FileCloudConfig {
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct FileConfig {
+    // -- Identity --
+    name: Option<String>,
+
     // -- Shared --
     port: Option<u16>,
     mode: Option<String>, // "relay" | "gateway" (default)
@@ -534,6 +595,7 @@ impl FileConfig {
 
 /// Resolved configuration for gateway (proxy) mode.
 pub struct GatewayConfig {
+    pub name: String,
     pub mcp: Option<String>,
     pub widgets: Option<String>,
     pub port: Option<u16>,
@@ -581,6 +643,48 @@ pub fn load() -> CliAction {
         Some(Commands::Validate(args)) => return CliAction::Validate(args),
         Some(Commands::Version) => return CliAction::Version,
         Some(Commands::Update) => return CliAction::Update,
+        Some(Commands::Proxy(ProxyArgs {
+            command: ProxyCommand::Run(run_args),
+        })) => {
+            // `mcpr proxy run` needs to load config and fork — handle like Start.
+            let explicit_path = run_args.config.as_deref().or(cli.config.as_deref());
+            let (file, cfg_path) = FileConfig::load(explicit_path);
+            let config_content = cfg_path
+                .as_ref()
+                .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+                .unwrap_or_default();
+            let config_path_str = cfg_path
+                .as_ref()
+                .and_then(|p| p.canonicalize().ok())
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+
+            let runtime = RuntimeOptions {
+                drain_timeout: file.drain_timeout.unwrap_or(30),
+                log_format: file
+                    .log_format
+                    .as_deref()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(LogFormat::Json),
+                admin_bind: file
+                    .admin_bind
+                    .clone()
+                    .unwrap_or_else(|| "127.0.0.1:9901".to_string()),
+            };
+
+            let mode = if file.is_relay() {
+                load_relay(file, runtime)
+            } else {
+                load_gateway(file, cfg_path, runtime)
+            };
+
+            return CliAction::ProxyRun {
+                mode,
+                replace: run_args.replace,
+                config_content,
+                config_path: config_path_str,
+            };
+        }
         Some(Commands::Proxy(args)) => return CliAction::Proxy(args.command),
         Some(Commands::Store(args)) => return CliAction::Store(args.command),
         Some(Commands::Stop) => return CliAction::Stop,
@@ -748,7 +852,7 @@ fn load_relay(file: FileConfig, _runtime: RuntimeOptions) -> Mode {
 
 fn load_gateway(
     file: FileConfig,
-    _config_path: Option<std::path::PathBuf>,
+    config_path: Option<std::path::PathBuf>,
     runtime: RuntimeOptions,
 ) -> Mode {
     let csp_mode = match file.csp.mode.as_deref() {
@@ -756,7 +860,31 @@ fn load_gateway(
         None => CspMode::default(),
     };
 
+    // Resolve proxy name: explicit name > filename stem > "default"
+    let name = file
+        .name
+        .clone()
+        .unwrap_or_else(|| {
+            config_path
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .and_then(|s| s.to_str())
+                .map(|s| if s == "mcpr" { "default" } else { s })
+                .unwrap_or("default")
+                .to_string()
+        })
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+
     Mode::Gateway(Box::new(GatewayConfig {
+        name,
         mcp: file.mcp,
         widgets: file.widgets,
         port: file.port,

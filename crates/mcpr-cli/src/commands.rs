@@ -21,20 +21,27 @@ use mcpr_integrations::store::{
 use crate::config::*;
 #[cfg(unix)]
 use crate::daemon;
+use crate::proxy_lock;
 
-/// Resolve the proxy name — use the provided name, or auto-detect from the
-/// running daemon's PID file (since we only have one proxy right now).
-fn resolve_proxy_name(name: Option<String>) -> Result<String, String> {
-    if let Some(n) = name {
-        return Ok(n);
+/// Display-friendly proxy name: the name itself or "all proxies".
+fn proxy_display(name: &Option<String>) -> &str {
+    name.as_deref().unwrap_or("all proxies")
+}
+
+/// Resolve the proxy name — returns the explicit name if given, or None for "all proxies".
+/// Falls back to the running daemon's proxy name if neither is specified and a daemon is running.
+fn resolve_proxy_name(name: Option<String>) -> Option<String> {
+    if name.is_some() {
+        return name;
     }
 
     #[cfg(unix)]
     if let Some(info) = daemon::read_pid_file() {
-        return Ok(info.proxy_name);
+        return Some(info.proxy_name);
     }
 
-    Err("proxy name required — pass it as an argument, or start the daemon first".to_string())
+    // No filter — show all proxies.
+    None
 }
 
 /// Resolve the store database path and open a query engine.
@@ -127,6 +134,15 @@ fn print_json(value: &impl serde::Serialize) {
 
 pub fn handle_proxy_command(cmd: ProxyCommand) {
     let result = match cmd {
+        // Lifecycle commands
+        ProxyCommand::Run(_) => {
+            // Handled in main() before tokio — should not reach here.
+            unreachable!("`mcpr proxy run` is handled before async dispatch");
+        }
+        ProxyCommand::Stop(args) => cmd_proxy_stop(args),
+        ProxyCommand::Restart(args) => cmd_proxy_restart(args),
+
+        // Observability commands
         ProxyCommand::Logs(args) => cmd_proxy_logs(args),
         ProxyCommand::Slow(args) => cmd_proxy_slow(args),
         ProxyCommand::Stats(args) => cmd_proxy_stats(args),
@@ -143,9 +159,99 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
     }
 }
 
+// ── Proxy lifecycle commands ──────────────────────────────────────────
+
+fn cmd_proxy_stop(args: ProxyStopArgs) -> Result<(), String> {
+    if args.all {
+        let stopped = proxy_lock::stop_all_proxies();
+        if stopped.is_empty() {
+            eprintln!("No running proxies found.");
+        } else {
+            for name in &stopped {
+                eprintln!("Stopped proxy \"{}\".", name);
+            }
+        }
+        return Ok(());
+    }
+
+    let name = args
+        .name
+        .ok_or_else(|| "proxy name required. Use --all to stop all proxies.".to_string())?;
+
+    match proxy_lock::check_lock(&name) {
+        proxy_lock::LockStatus::Held(info) => {
+            eprintln!("Stopping proxy \"{}\" (pid {})...", name, info.pid);
+            proxy_lock::stop_proxy(&name);
+            eprintln!("Stopped.");
+            Ok(())
+        }
+        proxy_lock::LockStatus::Stale(_) => {
+            proxy_lock::remove_lock(&name);
+            eprintln!("Cleaned up stale lock for proxy \"{}\".", name);
+            Ok(())
+        }
+        proxy_lock::LockStatus::Free => Err(format!("proxy \"{}\" is not running.", name)),
+    }
+}
+
+fn cmd_proxy_restart(args: ProxyRestartArgs) -> Result<(), String> {
+    if args.all {
+        let proxies = proxy_lock::list_proxies();
+        let mut restarted = 0;
+        for (name, status) in &proxies {
+            match status {
+                proxy_lock::LockStatus::Held(_) | proxy_lock::LockStatus::Stale(_) => {
+                    restart_one_proxy(name)?;
+                    restarted += 1;
+                }
+                proxy_lock::LockStatus::Free => {}
+            }
+        }
+        if restarted == 0 {
+            eprintln!("No running proxies found to restart.");
+        }
+        return Ok(());
+    }
+
+    let name = args
+        .name
+        .ok_or_else(|| "proxy name required. Use --all to restart all proxies.".to_string())?;
+
+    restart_one_proxy(&name)
+}
+
+/// Restart a single proxy from its saved config snapshot.
+fn restart_one_proxy(name: &str) -> Result<(), String> {
+    // Stop old process if running.
+    proxy_lock::stop_proxy(name);
+
+    // Verify config snapshot exists before attempting re-launch.
+    proxy_lock::read_snapshot(name)
+        .map_err(|e| format!("no config snapshot for proxy \"{name}\": {e}"))?;
+
+    let config_path = proxy_lock::config_snapshot_path(name).display().to_string();
+
+    // Re-launch by running the mcpr binary with proxy run.
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find mcpr binary: {e}"))?;
+
+    let status = std::process::Command::new(exe)
+        .args(["proxy", "run", &config_path, "--replace"])
+        .status()
+        .map_err(|e| format!("failed to spawn proxy \"{name}\": {e}"))?;
+
+    if !status.success() {
+        return Err(format!("proxy \"{name}\" failed to start"));
+    }
+
+    eprintln!("Restarted proxy \"{}\".", name);
+    Ok(())
+}
+
+// ── Proxy observability commands ─────────────────────────────────────
+
 fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.name)?;
+    let name = resolve_proxy_name(args.proxy.clone());
 
     // When --session is set and --since is not, show all time (no time filter).
     let since_ts = match (&args.since, &args.session) {
@@ -256,7 +362,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
 
 fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.name)?;
+    let name = resolve_proxy_name(args.proxy.clone());
     let since_ts = parse_since(&args.since)?;
     let threshold_ms = parse_threshold_ms(&args.threshold)?;
 
@@ -277,7 +383,9 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
     } else {
         println!(
             "TOP SLOW CALLS — {} — last {} (threshold: {})\n",
-            name, args.since, args.threshold
+            proxy_display(&name),
+            args.since,
+            args.threshold
         );
         println!(
             "  {:<32} {:>10}  {:>9}   {:<21}  STATUS",
@@ -359,7 +467,7 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
 
 fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.name)?;
+    let name = resolve_proxy_name(args.proxy.clone());
     let since_ts = parse_since(&args.since)?;
 
     let result = engine
@@ -374,7 +482,10 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
     } else {
         println!(
             "STATS — {} — last {}   Total: {} calls   Errors: {:.1}%\n",
-            name, args.since, result.total_calls, result.error_pct
+            proxy_display(&name),
+            args.since,
+            result.total_calls,
+            result.error_pct
         );
         println!(
             "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}  {:>9}  {:>9}",
@@ -426,7 +537,7 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
 
 fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.name)?;
+    let name = resolve_proxy_name(args.proxy.clone());
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
@@ -444,7 +555,11 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
             print_json(row);
         }
     } else {
-        println!("SESSIONS — {} — last {}\n", name, args.since);
+        println!(
+            "SESSIONS — {} — last {}\n",
+            proxy_display(&name),
+            args.since
+        );
         println!(
             "  {:<10} {:<24} {:<17} {:>12} {:>6} {:>6}",
             "SESSION", "CLIENT", "STARTED", "LAST SEEN", "CALLS", "ERRS"
@@ -484,7 +599,7 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
 
 fn cmd_proxy_clients(args: ProxyClientsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.name)?;
+    let name = resolve_proxy_name(args.proxy.clone());
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
@@ -499,7 +614,7 @@ fn cmd_proxy_clients(args: ProxyClientsArgs) -> Result<(), String> {
             print_json(row);
         }
     } else {
-        println!("CLIENTS — {} — last {}\n", name, args.since);
+        println!("CLIENTS — {} — last {}\n", proxy_display(&name), args.since);
         println!(
             "  {:<20} {:<10} {:<10} {:>8} {:>8} {:>8}",
             "CLIENT", "VERSION", "PLATFORM", "SESSIONS", "CALLS", "ERRORS"
@@ -530,8 +645,42 @@ fn cmd_proxy_clients(args: ProxyClientsArgs) -> Result<(), String> {
 }
 
 fn cmd_proxy_status(args: ProxyStatusArgs) -> Result<(), String> {
+    // Show running proxies from lockfiles.
+    let proxies = proxy_lock::list_proxies();
+    let running: Vec<_> = proxies
+        .iter()
+        .filter(|(_, s)| matches!(s, proxy_lock::LockStatus::Held(_)))
+        .collect();
+
+    if !running.is_empty() && !args.json {
+        println!(
+            "  {:<16} {:>8} {:>8} {:>10}",
+            "PROXY", "PORT", "PID", "UPTIME"
+        );
+        for (name, status) in &running {
+            if let proxy_lock::LockStatus::Held(info) = status {
+                let uptime_secs = chrono::Utc::now().timestamp() - info.started_at;
+                let uptime = if uptime_secs >= 3600 {
+                    format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
+                } else if uptime_secs >= 60 {
+                    format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
+                } else {
+                    format!("{}s", uptime_secs)
+                };
+                println!(
+                    "  {:<16} {:>8} {:>8} {:>10}",
+                    name,
+                    format!(":{}", info.port),
+                    info.pid,
+                    uptime,
+                );
+            }
+        }
+        println!();
+    }
+
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.name)?;
+    let name = resolve_proxy_name(args.proxy.clone());
     let since_ts = parse_since(&args.since)?;
 
     let stats = engine
@@ -565,7 +714,7 @@ fn cmd_proxy_status(args: ProxyStatusArgs) -> Result<(), String> {
         });
         println!("{}", serde_json::to_string(&snapshot).unwrap_or_default());
     } else {
-        println!("STATUS — {} — last {}\n", name, args.since);
+        println!("STATUS — {} — last {}\n", proxy_display(&name), args.since);
         println!("  Total requests:    {}", stats.total_calls);
         println!("  Error rate:        {:.1}%", stats.error_pct);
         println!(
@@ -693,7 +842,7 @@ fn cmd_proxy_session(args: ProxySessionArgs) -> Result<(), String> {
 
 fn cmd_proxy_schema(args: ProxySchemaArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.name.clone())?;
+    let name = resolve_proxy_name(args.proxy.clone());
 
     if args.unused {
         return cmd_proxy_schema_unused(&engine, &name, &args);
@@ -787,14 +936,14 @@ fn cmd_proxy_schema(args: ProxySchemaArgs) -> Result<(), String> {
 
 fn cmd_proxy_schema_unused(
     engine: &mcpr_integrations::store::query::QueryEngine,
-    name: &str,
+    name: &Option<String>,
     args: &ProxySchemaArgs,
 ) -> Result<(), String> {
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
         .schema_unused(&SchemaUnusedParams {
-            proxy: name.to_string(),
+            proxy: name.clone(),
             since_ts,
         })
         .map_err(|e| format!("query failed: {e}"))?;
@@ -813,7 +962,10 @@ fn cmd_proxy_schema_unused(
         let total = rows.len();
         println!(
             "TOOL USAGE — {} — last {}   {}/{} unused\n",
-            name, args.since, unused_count, total
+            proxy_display(name),
+            args.since,
+            unused_count,
+            total
         );
         println!(
             "  {:<28} {:>8} {:>8} {:>21}  STATUS",

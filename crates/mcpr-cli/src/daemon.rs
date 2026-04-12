@@ -188,6 +188,95 @@ pub fn daemonize(timeout: Duration) -> Result<std::os::unix::io::RawFd, String> 
     }
 }
 
+/// Daemonize a proxy process using double-fork.
+///
+/// Same pattern as `daemonize()` but redirects stdio to the proxy-specific
+/// log file and prints proxy-specific readiness messages.
+#[cfg(unix)]
+pub fn daemonize_proxy(
+    proxy_name: &str,
+    timeout: Duration,
+) -> Result<std::os::unix::io::RawFd, String> {
+    use nix::unistd::{ForkResult, close, fork, pipe, setsid};
+    use std::os::unix::io::{IntoRawFd, RawFd};
+
+    let name = proxy_name.to_string();
+    let (read_owned, write_owned) = pipe().map_err(|e| format!("pipe failed: {e}"))?;
+    let read_fd: RawFd = read_owned.into_raw_fd();
+    let write_fd: RawFd = write_owned.into_raw_fd();
+
+    match unsafe { fork() }.map_err(|e| format!("fork failed: {e}"))? {
+        ForkResult::Parent { child: _ } => {
+            let _ = close(write_fd);
+            wait_for_proxy_readiness(read_fd, timeout, &name);
+            unreachable!();
+        }
+        ForkResult::Child => {
+            let _ = close(read_fd);
+            setsid().map_err(|e| format!("setsid failed: {e}"))?;
+
+            match unsafe { fork() }.map_err(|e| format!("second fork failed: {e}"))? {
+                ForkResult::Parent { child: _ } => {
+                    std::process::exit(0);
+                }
+                ForkResult::Child => {
+                    super::proxy_lock::redirect_stdio(&name)
+                        .map_err(|e| format!("failed to redirect stdio: {e}"))?;
+                    Ok(write_fd)
+                }
+            }
+        }
+    }
+}
+
+/// Wait for a proxy child to signal readiness, then exit.
+#[cfg(unix)]
+fn wait_for_proxy_readiness(
+    read_fd: std::os::unix::io::RawFd,
+    _timeout: Duration,
+    proxy_name: &str,
+) {
+    use std::os::unix::io::FromRawFd;
+
+    let mut pipe_read = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    let mut buf = [0u8; 1];
+
+    let handle = std::thread::spawn(move || {
+        let result = pipe_read.read(&mut buf);
+        (buf, result)
+    });
+
+    match handle.join() {
+        Ok((buf, Ok(1))) if buf[0] == b'1' => {
+            if let Some(info) = super::proxy_lock::read_lock_info(proxy_name) {
+                eprintln!(
+                    "proxy \"{}\" started (PID: {}, port: {})",
+                    proxy_name, info.pid, info.port
+                );
+            } else {
+                eprintln!("proxy \"{}\" started", proxy_name);
+            }
+            std::process::exit(0);
+        }
+        Ok((_, Ok(_))) => {
+            eprintln!(
+                "error: proxy \"{}\" failed to start (check {})",
+                proxy_name,
+                super::proxy_lock::log_path(proxy_name).display()
+            );
+            std::process::exit(1);
+        }
+        Ok((_, Err(e))) => {
+            eprintln!("error: reading readiness pipe: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("error: internal error waiting for proxy");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Wait for the daemon to signal readiness via the pipe.
 /// Exits the process with appropriate status.
 #[cfg(unix)]
@@ -382,15 +471,18 @@ pub fn print_status() {
     }
 }
 
-/// Ensure no daemon is already running. Exits with error if one is.
+/// If a daemon is already running, stop it first so the new one can take over.
 pub fn ensure_not_running() {
     match check_status() {
         DaemonStatus::Running(info) => {
             eprintln!(
-                "error: daemon already running (PID: {}, port: {})",
+                "Stopping existing mcpr daemon (PID: {}, port: {})...",
                 info.pid, info.port
             );
-            std::process::exit(1);
+            send_sigterm(info.pid);
+            wait_for_exit(info.pid, Duration::from_secs(10));
+            remove_pid_file();
+            eprintln!("Stopped. Starting with new configuration...");
         }
         DaemonStatus::Stale(_) => {
             remove_pid_file();

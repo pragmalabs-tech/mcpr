@@ -64,6 +64,8 @@ mod event_bus;
 mod mcp_handler;
 mod passthrough;
 mod proxy;
+#[allow(dead_code)]
+mod proxy_lock;
 mod stderr_sink;
 mod widgets;
 
@@ -154,6 +156,15 @@ fn main() {
     // Tokio's IO driver uses kqueue/epoll fds that don't survive fork().
     let ready_fd: Option<i32> = match &action {
         CliAction::Start {
+            foreground: true,
+            mode: Mode::Gateway(_),
+        } => {
+            // Foreground mode — stop any existing daemon so the port is free.
+            #[cfg(unix)]
+            daemon::stop_daemon_if_running();
+            None
+        }
+        CliAction::Start {
             foreground: false,
             mode: Mode::Gateway(_),
         } => {
@@ -176,6 +187,15 @@ fn main() {
         CliAction::Restart(Mode::Gateway(_)) => {
             #[cfg(unix)]
             {
+                // Mark all managed proxies as stopped when restarting daemon.
+                let stopped = proxy_lock::mark_all_stopped();
+                if !stopped.is_empty() {
+                    eprintln!(
+                        "Stopped {} managed proxy(ies): {}",
+                        stopped.len(),
+                        stopped.join(", ")
+                    );
+                }
                 daemon::stop_daemon_if_running();
                 let fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
                     eprintln!("error: {e}");
@@ -186,6 +206,57 @@ fn main() {
             #[cfg(not(unix))]
             {
                 eprintln!("error: daemon management not supported on this platform");
+                std::process::exit(1);
+            }
+        }
+        CliAction::ProxyRun {
+            mode: Mode::Gateway(cfg),
+            replace,
+            config_content,
+            config_path: _,
+        } => {
+            #[cfg(unix)]
+            {
+                let proxy_name = &cfg.name;
+
+                // Conflict detection.
+                match proxy_lock::check_lock(proxy_name) {
+                    proxy_lock::LockStatus::Free => {}
+                    proxy_lock::LockStatus::Stale(_) => {
+                        proxy_lock::remove_lock(proxy_name);
+                    }
+                    proxy_lock::LockStatus::Held(info) => {
+                        if *replace {
+                            eprintln!("Stopping old \"{}\" (pid {})...", proxy_name, info.pid);
+                            proxy_lock::stop_proxy(proxy_name);
+                        } else {
+                            eprintln!(
+                                "error: proxy \"{}\" is already running (pid {}).",
+                                proxy_name, info.pid
+                            );
+                            eprintln!("  Use --replace to stop the old one and start this one.");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+
+                // Snapshot config.
+                if let Err(e) = proxy_lock::snapshot_config(proxy_name, config_content) {
+                    eprintln!("error: failed to snapshot config: {e}");
+                    std::process::exit(1);
+                }
+
+                // Double-fork to background (reuse daemon pattern).
+                let fd = daemon::daemonize_proxy(proxy_name, Duration::from_secs(10))
+                    .unwrap_or_else(|e| {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    });
+                Some(fd)
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: background proxy mode not supported on this platform");
                 std::process::exit(1);
             }
         }
@@ -288,16 +359,45 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
         CliAction::Proxy(cmd) => {
             commands::handle_proxy_command(cmd);
         }
+        CliAction::ProxyRun {
+            mode, config_path, ..
+        } => match mode {
+            Mode::Relay(_) => {
+                eprintln!("error: relay mode does not support `mcpr proxy run`");
+                std::process::exit(1);
+            }
+            Mode::Gateway(cfg) => {
+                // Already forked in main(). Run gateway with proxy lockfile semantics.
+                run_gateway_proxy(*cfg, ready_fd, &config_path).await;
+            }
+        },
         CliAction::Store(cmd) => {
             commands::handle_store_command(cmd);
         }
     }
 }
 
-/// Run the gateway proxy. If `ready_fd` is Some, we're in daemon mode —
-/// signal readiness after binding and write the PID file.
+/// Run the gateway proxy. If `ready_fd` is Some, we're in daemon/proxy-run mode —
+/// signal readiness after binding and write the PID/lock file.
+/// If `proxy_config_path` is Some, we're in `mcpr proxy run` mode — use lockfiles.
+/// If None, we're in daemon/foreground mode — use PID files.
 #[allow(unused_variables)]
 async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
+    run_gateway_inner(cfg, ready_fd, None).await;
+}
+
+/// `mcpr proxy run` mode — same as run_gateway but uses lockfiles.
+#[allow(unused_variables)]
+async fn run_gateway_proxy(cfg: GatewayConfig, ready_fd: Option<i32>, config_path: &str) {
+    run_gateway_inner(cfg, ready_fd, Some(config_path.to_string())).await;
+}
+
+#[allow(unused_variables)]
+async fn run_gateway_inner(
+    cfg: GatewayConfig,
+    ready_fd: Option<i32>,
+    proxy_config_path: Option<String>,
+) {
     let proxy_state_ref = proxy_state::new_shared_state();
 
     let mcp = cfg.mcp.expect("mcp is required in mcpr.toml");
@@ -305,23 +405,8 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     // Validate MCP URL format
     validate_mcp_url(&mcp);
 
-    // Derive proxy name from upstream URL (e.g., "http://localhost:9000" → "localhost-9000").
-    let proxy_name = {
-        let stripped = mcp
-            .trim_start_matches("https://")
-            .trim_start_matches("http://");
-        let host_port = stripped.split('/').next().unwrap_or(stripped);
-        host_port
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>()
-    };
+    let proxy_name = cfg.name.clone();
+    let proxy_name_for_shutdown = proxy_name.clone();
 
     let widget_source = cfg.widgets.as_ref().map(|w| {
         if w.starts_with("http://") || w.starts_with("https://") {
@@ -340,14 +425,23 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
         .expect("Failed to bind");
     let actual_port = listener.local_addr().unwrap().port();
 
-    // Write PID file so `mcpr status` works in both daemon and foreground mode.
+    // Write PID/lock file so status commands can find this process.
     #[cfg(unix)]
     {
-        if let Err(e) = daemon::write_pid_file(actual_port, &proxy_name) {
-            eprintln!("error: failed to write PID file: {e}");
-            std::process::exit(1);
+        if let Some(ref config_path) = proxy_config_path {
+            // Proxy-run mode: write lockfile.
+            if let Err(e) = proxy_lock::write_lock(&proxy_name, actual_port, config_path) {
+                eprintln!("error: failed to write lockfile: {e}");
+                std::process::exit(1);
+            }
+        } else {
+            // Daemon/foreground mode: write PID file.
+            if let Err(e) = daemon::write_pid_file(actual_port, &proxy_name) {
+                eprintln!("error: failed to write PID file: {e}");
+                std::process::exit(1);
+            }
         }
-        // If daemon mode, signal readiness to the parent process.
+        // Signal readiness to the parent process (daemon or proxy-run fork).
         if let Some(fd) = ready_fd {
             daemon::signal_ready(fd);
         }
@@ -595,10 +689,15 @@ async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
     // Flush all event sinks (stderr, sqlite, cloud).
     event_bus_handle.shutdown().await;
 
-    // Clean up PID file if we're running as a daemon.
-    // Clean up PID file (written in both daemon and foreground mode).
+    // Clean up PID/lock file.
     #[cfg(unix)]
-    daemon::remove_pid_file();
+    {
+        if proxy_config_path.is_some() {
+            proxy_lock::remove_lock(&proxy_name_for_shutdown);
+        } else {
+            daemon::remove_pid_file();
+        }
+    }
 
     eprintln!("[mcpr] Shutdown complete.");
 }
