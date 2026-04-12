@@ -85,6 +85,30 @@ Emitted every 10 seconds by the health check loop. Carries a snapshot of the pro
 | `uptime_secs` | `u64` | Seconds since proxy started |
 | `request_count` | `u64` | Total requests handled |
 
+### `ProxyEvent::SchemaCapture`
+
+Emitted when a schema discovery response (`initialize`, `tools/list`, `resources/list`, `prompts/list`, `resources/templates/list`) is intercepted. Captured **before** CSP rewriting so the stored schema reflects the raw server response.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts` | `i64` | Unix milliseconds (UTC) |
+| `proxy` | `String` | Proxy name |
+| `upstream_url` | `String` | Upstream MCP server URL |
+| `method` | `String` | MCP method (e.g., "tools/list", "initialize") |
+| `payload` | `String` | JSON string of the `result` field from the response |
+| `page_status` | `PageStatus` | Pagination state: `Complete`, `FirstPage`, `MiddlePage`, `LastPage` |
+
+### `ProxyEvent::SchemaStale`
+
+Emitted when the proxy detects a `notifications/tools/list_changed` notification in a response, indicating the server's schema has changed and the cached snapshot may be outdated.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `ts` | `i64` | Unix milliseconds (UTC) |
+| `proxy` | `String` | Proxy name |
+| `upstream_url` | `String` | Upstream MCP server URL |
+| `method` | `String` | Which method's schema is stale (e.g., "tools/list") |
+
 ---
 
 ## EventSink Trait
@@ -176,6 +200,8 @@ Converts `ProxyEvent` variants into SQLite store operations:
 | `SessionStart` | INSERT into `sessions` table |
 | `SessionEnd` | UPDATE `ended_at` on the session |
 | `Heartbeat` | Ignored |
+| `SchemaCapture` | Hash, diff, UPSERT into `server_schema` + INSERT into `schema_changes` |
+| `SchemaStale` | INSERT "stale" marker into `schema_changes` |
 
 The SqliteSink wraps the `Store` engine which has its own background writer thread with batch flushing (200ms intervals). So the flow is: EventBus → SqliteSink.on_event() → Store.record() → mpsc channel → writer thread → SQLite.
 

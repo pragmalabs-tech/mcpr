@@ -75,6 +75,24 @@ impl EventSink for SqliteSink {
             ProxyEvent::Heartbeat(_) => {
                 // Heartbeats are not stored locally.
             }
+            ProxyEvent::SchemaCapture(e) => {
+                self.store.record(StoreEvent::SchemaCapture(
+                    super::event::SchemaCaptureEvent {
+                        ts: e.ts,
+                        upstream_url: e.upstream_url.clone(),
+                        method: e.method.clone(),
+                        payload: e.payload.clone(),
+                        page_status: e.page_status.clone(),
+                    },
+                ));
+            }
+            ProxyEvent::SchemaStale(e) => {
+                self.store.record(StoreEvent::SchemaStale {
+                    upstream_url: e.upstream_url.clone(),
+                    method: e.method.clone(),
+                    ts: e.ts,
+                });
+            }
         }
     }
 

@@ -139,6 +139,8 @@ pub enum ProxyCommand {
     Status(ProxyStatusArgs),
     /// Drill into a single session — show session info and all its requests
     Session(ProxySessionArgs),
+    /// Show captured MCP server schema (tools, resources, prompts)
+    Schema(ProxySchemaArgs),
 }
 
 /// Arguments for `mcpr proxy logs [name]`.
@@ -294,6 +296,37 @@ pub struct ProxyStatusArgs {
 pub struct ProxySessionArgs {
     /// Session ID to look up
     pub session_id: String,
+
+    /// Output as JSON
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments for `mcpr proxy schema [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxySchemaArgs {
+    /// Proxy name to query (optional — auto-detected when one proxy is running)
+    pub name: Option<String>,
+
+    /// Filter to a specific MCP method (e.g., tools/list, initialize)
+    #[arg(long)]
+    pub method: Option<String>,
+
+    /// Show change history instead of current schema
+    #[arg(long)]
+    pub changes: bool,
+
+    /// Show tool usage — listed tools vs actual calls (unused tools highlighted)
+    #[arg(long)]
+    pub unused: bool,
+
+    /// Time window for usage stats (used with --unused, default: 7d)
+    #[arg(long, default_value = "7d")]
+    pub since: String,
+
+    /// Number of change history rows to show (used with --changes)
+    #[arg(long, default_value = "50")]
+    pub limit: i64,
 
     /// Output as JSON
     #[arg(long)]

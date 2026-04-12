@@ -23,11 +23,17 @@
 //!   (`Created -> Initialized -> Active -> Closed`), `SessionStore` trait for
 //!   pluggable storage backends, and `MemorySessionStore` for in-memory use.
 //!
+//! - **Schema capture** (`schema` module): Types and logic for passively
+//!   capturing MCP server schemas from discovery responses. Includes pagination
+//!   detection/merging, schema diffing (detect added/removed/modified tools,
+//!   resources, prompts), and schema method classification.
+//!
 //! ## Module Structure
 //!
 //! ```text
 //! mcpr-protocol/src/
 //! +-- lib.rs          # JSON-RPC 2.0 types, parsing, MCP method classification
+//! +-- schema.rs       # Schema capture types, pagination merge, diff logic
 //! +-- session.rs      # Session state, SessionStore trait, MemorySessionStore
 //! ```
 //!
@@ -35,6 +41,7 @@
 //!
 //! Minimal: `serde`, `serde_json`, `chrono`, `dashmap`. No HTTP framework deps.
 
+pub mod schema;
 pub mod session;
 
 use serde_json::Value;

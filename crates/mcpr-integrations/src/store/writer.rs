@@ -30,9 +30,13 @@
 //! the writer flushes any remaining batch and exits. This guarantees no
 //! events are lost on `mcpr stop` / SIGTERM.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
+
+use mcpr_protocol::schema::{self as proto_schema, PageStatus};
 
 use super::event::{RequestStatus, StoreEvent};
 use super::schema;
@@ -65,6 +69,8 @@ pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEv
     let mut rx = rx;
     let mut batch: Vec<StoreEvent> = Vec::with_capacity(MAX_BATCH_SIZE);
     let mut last_flush = Instant::now();
+    // Pagination buffer: (upstream_url, method) → (first_page_ts, accumulated payloads).
+    let mut page_buffer: HashMap<(String, String), (Instant, Vec<String>)> = HashMap::new();
 
     loop {
         // Try to receive one event, blocking up to the remaining batch interval.
@@ -94,14 +100,14 @@ pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEv
 
                 // Flush if batch is full.
                 if batch.len() >= MAX_BATCH_SIZE {
-                    flush_batch(&conn, &mut batch);
+                    flush_batch(&conn, &mut batch, &mut page_buffer);
                     last_flush = Instant::now();
                 }
             }
             None => {
                 // Either timeout (flush interval) or channel closed.
                 if !batch.is_empty() {
-                    flush_batch(&conn, &mut batch);
+                    flush_batch(&conn, &mut batch, &mut page_buffer);
                     last_flush = Instant::now();
                 }
 
@@ -115,7 +121,7 @@ pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEv
 
         // Time-based flush for partially filled batches.
         if !batch.is_empty() && last_flush.elapsed() >= BATCH_INTERVAL {
-            flush_batch(&conn, &mut batch);
+            flush_batch(&conn, &mut batch, &mut HashMap::new());
             last_flush = Instant::now();
         }
     }
@@ -152,7 +158,11 @@ fn recv_with_timeout(
 ///
 /// Session inserts, request inserts, and counter updates all happen in the
 /// same transaction — counters are always consistent with the request rows.
-fn flush_batch(conn: &Connection, batch: &mut Vec<StoreEvent>) {
+fn flush_batch(
+    conn: &Connection,
+    batch: &mut Vec<StoreEvent>,
+    page_buffer: &mut HashMap<(String, String), (Instant, Vec<String>)>,
+) {
     if batch.is_empty() {
         return;
     }
@@ -232,12 +242,182 @@ fn flush_batch(conn: &Connection, batch: &mut Vec<StoreEvent>) {
                     tracing::warn!("storage writer: session close failed: {e}");
                 }
             }
+
+            StoreEvent::SchemaCapture(sc) => {
+                handle_schema_capture(conn, sc, page_buffer);
+            }
+
+            StoreEvent::SchemaStale {
+                upstream_url,
+                method,
+                ts,
+            } => {
+                handle_schema_stale(conn, &upstream_url, &method, ts);
+            }
         }
     }
+
+    // Expire stale page buffer entries (abandoned pagination, >60s).
+    page_buffer.retain(|_, (started, _)| started.elapsed() < Duration::from_secs(60));
 
     if let Err(e) = conn.execute_batch("COMMIT;") {
         tracing::warn!("storage writer: commit failed: {e}");
     }
+}
+
+// ── Schema capture helpers ────────────────────────────────────────────
+
+/// Handle a schema capture event: buffer pages or write immediately.
+fn handle_schema_capture(
+    conn: &Connection,
+    sc: super::event::SchemaCaptureEvent,
+    page_buffer: &mut HashMap<(String, String), (Instant, Vec<String>)>,
+) {
+    let key = (sc.upstream_url.clone(), sc.method.clone());
+
+    match sc.page_status {
+        PageStatus::Complete => {
+            write_schema(conn, &sc.upstream_url, &sc.method, &sc.payload, sc.ts);
+        }
+        PageStatus::FirstPage => {
+            page_buffer.insert(key, (Instant::now(), vec![sc.payload]));
+        }
+        PageStatus::MiddlePage => {
+            if let Some((_, pages)) = page_buffer.get_mut(&key) {
+                pages.push(sc.payload);
+            }
+        }
+        PageStatus::LastPage => {
+            if let Some((_, mut pages)) = page_buffer.remove(&key) {
+                pages.push(sc.payload);
+                // Parse accumulated payloads and merge via protocol layer.
+                let parsed: Vec<serde_json::Value> = pages
+                    .iter()
+                    .filter_map(|p| serde_json::from_str(p).ok())
+                    .collect();
+                if let Some(merged) = proto_schema::merge_pages(&sc.method, &parsed) {
+                    let payload = merged.to_string();
+                    write_schema(conn, &sc.upstream_url, &sc.method, &payload, sc.ts);
+                }
+            } else {
+                // Missed earlier pages — store what we have (best effort).
+                write_schema(conn, &sc.upstream_url, &sc.method, &sc.payload, sc.ts);
+            }
+        }
+    }
+}
+
+/// Write a schema snapshot to SQLite: hash, diff, upsert.
+fn write_schema(conn: &Connection, upstream_url: &str, method: &str, payload: &str, ts: i64) {
+    let new_hash = sha256_hex(payload);
+
+    // Check for existing snapshot.
+    let existing: Option<(String, String)> = conn
+        .query_row(
+            schema::GET_SCHEMA_HASH_SQL,
+            rusqlite::params![upstream_url, method],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok();
+
+    match existing {
+        None => {
+            // First capture — insert and record "initial" change.
+            if let Err(e) = conn.execute(
+                schema::UPSERT_SERVER_SCHEMA_SQL,
+                rusqlite::params![upstream_url, method, payload, ts, new_hash],
+            ) {
+                tracing::warn!("storage writer: schema upsert failed: {e}");
+            }
+            if let Err(e) = conn.execute(
+                schema::INSERT_SCHEMA_CHANGE_SQL,
+                rusqlite::params![
+                    upstream_url,
+                    method,
+                    "initial",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    new_hash,
+                    ts
+                ],
+            ) {
+                tracing::warn!("storage writer: schema change insert failed: {e}");
+            }
+        }
+        Some((old_hash, _)) if old_hash == new_hash => {
+            // Same hash — just refresh the captured_at timestamp.
+            if let Err(e) = conn.execute(
+                schema::UPSERT_SERVER_SCHEMA_SQL,
+                rusqlite::params![upstream_url, method, payload, ts, new_hash],
+            ) {
+                tracing::warn!("storage writer: schema upsert failed: {e}");
+            }
+        }
+        Some((old_hash, old_payload)) => {
+            // Schema changed — diff and record changes.
+            let old_val: serde_json::Value = serde_json::from_str(&old_payload).unwrap_or_default();
+            let new_val: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+            let diffs = proto_schema::diff_schema(method, &old_val, &new_val);
+
+            for diff in &diffs {
+                if let Err(e) = conn.execute(
+                    schema::INSERT_SCHEMA_CHANGE_SQL,
+                    rusqlite::params![
+                        upstream_url,
+                        method,
+                        diff.change_type,
+                        diff.item_name,
+                        old_hash,
+                        new_hash,
+                        ts
+                    ],
+                ) {
+                    tracing::warn!("storage writer: schema change insert failed: {e}");
+                }
+            }
+
+            // Update the stored schema.
+            if let Err(e) = conn.execute(
+                schema::UPSERT_SERVER_SCHEMA_SQL,
+                rusqlite::params![upstream_url, method, payload, ts, new_hash],
+            ) {
+                tracing::warn!("storage writer: schema upsert failed: {e}");
+            }
+        }
+    }
+}
+
+/// Record a stale marker in schema_changes.
+fn handle_schema_stale(conn: &Connection, upstream_url: &str, method: &str, ts: i64) {
+    let current_hash: Option<String> = conn
+        .query_row(
+            "SELECT schema_hash FROM server_schema WHERE upstream_url = ?1 AND method = ?2",
+            rusqlite::params![upstream_url, method],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Err(e) = conn.execute(
+        schema::INSERT_SCHEMA_CHANGE_SQL,
+        rusqlite::params![
+            upstream_url,
+            method,
+            "stale",
+            Option::<String>::None,
+            current_hash,
+            Option::<String>::None,
+            ts
+        ],
+    ) {
+        tracing::warn!("storage writer: schema stale insert failed: {e}");
+    }
+}
+
+/// Compute SHA-256 hex hash of a string.
+fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -282,7 +462,7 @@ mod tests {
             }),
         ];
 
-        flush_batch(&conn, &mut batch);
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
 
         // Verify session was inserted
         let client: String = conn
@@ -329,14 +509,14 @@ mod tests {
             client_version: None,
             client_platform: None,
         })];
-        flush_batch(&conn, &mut batch);
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
 
         // Close it.
         let mut batch = vec![StoreEvent::SessionClosed {
             session_id: "sess-2".into(),
             ended_at: 3000,
         }];
-        flush_batch(&conn, &mut batch);
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
 
         let ended: i64 = conn
             .query_row(
@@ -376,7 +556,7 @@ mod tests {
                 bytes_out: None,
             }),
         ];
-        flush_batch(&conn, &mut batch);
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
 
         let (calls, errors): (i64, i64) = conn
             .query_row(
@@ -387,5 +567,225 @@ mod tests {
             .unwrap();
         assert_eq!(calls, 1);
         assert_eq!(errors, 1);
+    }
+
+    // ── Schema capture tests ─────────────────────────────────────────
+
+    use crate::store::event::SchemaCaptureEvent as StoreSchemaCaptureEvent;
+
+    fn tools_payload(names: &[&str]) -> String {
+        let tools: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "description": format!("tool {n}")}))
+            .collect();
+        serde_json::json!({"tools": tools}).to_string()
+    }
+
+    #[test]
+    fn flush_batch_inserts_schema_initial() {
+        let conn = test_db();
+        let payload = tools_payload(&["search", "create"]);
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+            ts: 1000,
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload: payload.clone(),
+            page_status: PageStatus::Complete,
+        })];
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
+
+        // Verify server_schema row.
+        let (method, hash): (String, String) = conn
+            .query_row(
+                "SELECT method, schema_hash FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(method, "tools/list");
+        assert!(!hash.is_empty());
+
+        // Verify "initial" change.
+        let change_type: String = conn
+            .query_row(
+                "SELECT change_type FROM schema_changes WHERE upstream_url = 'http://localhost:9000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(change_type, "initial");
+    }
+
+    #[test]
+    fn flush_batch_schema_unchanged_no_new_change() {
+        let conn = test_db();
+        let payload = tools_payload(&["search"]);
+
+        // First capture.
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+            ts: 1000,
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload: payload.clone(),
+            page_status: PageStatus::Complete,
+        })];
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
+
+        // Same payload again.
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+            ts: 2000,
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload,
+            page_status: PageStatus::Complete,
+        })];
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
+
+        // Only 1 change record (the initial one).
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_changes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // But captured_at was updated.
+        let captured_at: i64 = conn
+            .query_row(
+                "SELECT captured_at FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(captured_at, 2000);
+    }
+
+    #[test]
+    fn flush_batch_schema_diff_records_changes() {
+        let conn = test_db();
+
+        // Initial: tools a, b.
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+            ts: 1000,
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload: tools_payload(&["a", "b"]),
+            page_status: PageStatus::Complete,
+        })];
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
+
+        // Changed: tools a, c (b removed, c added).
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+            ts: 2000,
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload: tools_payload(&["a", "c"]),
+            page_status: PageStatus::Complete,
+        })];
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
+
+        // Should have: initial + tool_removed(b) + tool_added(c).
+        let mut stmt = conn
+            .prepare("SELECT change_type, item_name FROM schema_changes ORDER BY id")
+            .unwrap();
+        let changes: Vec<(String, Option<String>)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(changes[0].0, "initial");
+        let change_types: Vec<&str> = changes[1..].iter().map(|(t, _)| t.as_str()).collect();
+        assert!(change_types.contains(&"tool_added"));
+        assert!(change_types.contains(&"tool_removed"));
+    }
+
+    #[test]
+    fn flush_batch_schema_stale() {
+        let conn = test_db();
+
+        // Insert initial schema first.
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+            ts: 1000,
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload: tools_payload(&["search"]),
+            page_status: PageStatus::Complete,
+        })];
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
+
+        // Mark as stale.
+        let mut batch = vec![StoreEvent::SchemaStale {
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            ts: 2000,
+        }];
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
+
+        // Should have "initial" + "stale" changes.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_changes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let stale_type: String = conn
+            .query_row(
+                "SELECT change_type FROM schema_changes ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale_type, "stale");
+    }
+
+    #[test]
+    fn flush_batch_pagination_merges() {
+        let conn = test_db();
+        let mut page_buffer = HashMap::new();
+
+        // First page.
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+            ts: 1000,
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload: r#"{"tools":[{"name":"a","description":"tool a"}]}"#.into(),
+            page_status: PageStatus::FirstPage,
+        })];
+        flush_batch(&conn, &mut batch, &mut page_buffer);
+
+        // Not written yet — still buffering.
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM server_schema", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // Last page.
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+            ts: 2000,
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload: r#"{"tools":[{"name":"b","description":"tool b"}]}"#.into(),
+            page_status: PageStatus::LastPage,
+        })];
+        flush_batch(&conn, &mut batch, &mut page_buffer);
+
+        // Now written — merged payload should have both tools.
+        let payload: String = conn
+            .query_row(
+                "SELECT payload FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        let tools = val["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+    }
+
+    #[test]
+    fn sha256_hex_deterministic() {
+        let h1 = sha256_hex("hello");
+        let h2 = sha256_hex("hello");
+        assert_eq!(h1, h2);
+        assert_ne!(sha256_hex("hello"), sha256_hex("world"));
+        assert_eq!(h1.len(), 64); // SHA-256 hex is 64 chars
     }
 }

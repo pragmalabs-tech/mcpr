@@ -18,7 +18,7 @@
 
 /// Current schema version. Stored in the `meta` table and checked on startup.
 /// Bump this when adding migrations.
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 
 /// Initial schema: requests table, sessions table, meta table, and all indexes.
 ///
@@ -123,6 +123,48 @@ INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');
 INSERT OR IGNORE INTO meta (key, value) VALUES ('created_at', CAST(strftime('%s', 'now') AS TEXT) || '000');
 ";
 
+/// V1 → V2 migration: add server_schema and schema_changes tables.
+///
+/// `server_schema` holds the latest snapshot per (upstream_url, method).
+/// `schema_changes` is an append-only log of diffs detected by the writer.
+pub const V2_SCHEMA: &str = "
+-- ── server_schema ────────────────────────────────────────────────────
+-- Latest captured snapshot per upstream server and MCP method.
+-- UPSERT pattern: ON CONFLICT(upstream_url, method) DO UPDATE.
+CREATE TABLE IF NOT EXISTS server_schema (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    upstream_url  TEXT NOT NULL,          -- upstream MCP server URL
+    method        TEXT NOT NULL,          -- 'initialize', 'tools/list', etc.
+    payload       TEXT NOT NULL,          -- full JSON of the `result` field
+    captured_at   INTEGER NOT NULL,       -- unix ms when captured
+    schema_hash   TEXT NOT NULL,          -- SHA-256 hex of payload
+    UNIQUE(upstream_url, method)
+);
+
+-- ── schema_changes ───────────────────────────────────────────────────
+-- Immutable append-only log of schema changes detected by the writer.
+CREATE TABLE IF NOT EXISTS schema_changes (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    upstream_url  TEXT NOT NULL,
+    method        TEXT NOT NULL,
+    change_type   TEXT NOT NULL,          -- 'initial', 'stale', 'updated',
+                                          -- 'tool_added', 'tool_removed', 'tool_modified', etc.
+    item_name     TEXT,                   -- e.g. 'search_products', NULL for bulk changes
+    old_hash      TEXT,
+    new_hash      TEXT,
+    detected_at   INTEGER NOT NULL        -- unix ms
+);
+
+-- ── indexes ──────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_schema_upstream
+    ON server_schema (upstream_url);
+CREATE INDEX IF NOT EXISTS idx_schema_changes_upstream
+    ON schema_changes (upstream_url, detected_at);
+
+-- Bump schema version.
+UPDATE meta SET value = '2' WHERE key = 'schema_version';
+";
+
 /// SQL to insert or update the mcpr_version meta key on every startup.
 pub const UPSERT_MCPR_VERSION: &str = "
 INSERT INTO meta (key, value) VALUES ('mcpr_version', ?1)
@@ -167,4 +209,29 @@ WHERE session_id = ?3;
 pub const CLOSE_SESSION_SQL: &str = "
 UPDATE sessions SET ended_at = ?1
 WHERE session_id = ?2 AND ended_at IS NULL;
+";
+
+// ── Schema capture prepared statements ───────────────────────────────
+
+/// UPSERT a server_schema row. ON CONFLICT updates the existing row.
+pub const UPSERT_SERVER_SCHEMA_SQL: &str = "
+INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash)
+VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(upstream_url, method) DO UPDATE SET
+    payload = excluded.payload,
+    captured_at = excluded.captured_at,
+    schema_hash = excluded.schema_hash;
+";
+
+/// Fetch the current schema_hash and payload for a given upstream+method.
+/// Used by the writer to detect changes before upserting.
+pub const GET_SCHEMA_HASH_SQL: &str = "
+SELECT schema_hash, payload FROM server_schema
+WHERE upstream_url = ?1 AND method = ?2;
+";
+
+/// Insert a schema change record into the append-only log.
+pub const INSERT_SCHEMA_CHANGE_SQL: &str = "
+INSERT INTO schema_changes (upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at)
+VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);
 ";
