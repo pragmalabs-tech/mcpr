@@ -1,7 +1,8 @@
 # MCP Method Support
 
-mcpr is an MCP-aware proxy. It parses every JSON-RPC 2.0 message, classifies the
-MCP method, and extracts metadata for logging, rewriting, and observability.
+mcpr is a protocol-aware reverse proxy that sits before your MCP server. It parses
+every JSON-RPC 2.0 message, classifies the MCP method, and extracts metadata for
+logging, rewriting, and observability.
 
 This document covers which MCP spec methods (2025-03-26) are recognized and what
 the proxy does with each one.

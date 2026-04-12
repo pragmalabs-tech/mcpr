@@ -17,7 +17,7 @@ mcpr start
 
 ## What It Does
 
-mcpr sits between AI clients (ChatGPT, Claude, VS Code, Cursor) and your MCP server. It parses every JSON-RPC message at the protocol level — not as raw HTTP — so it can route, observe, and secure MCP traffic in ways generic proxies can't.
+mcpr is a protocol-aware reverse proxy that sits before your MCP server. AI clients (ChatGPT, Claude, VS Code, Cursor) connect to mcpr instead of the server directly. It parses every JSON-RPC message at the protocol level — not as raw HTTP — so it can route, observe, and secure MCP traffic in ways generic proxies can't.
 
 - **Route** — MCP-aware reverse proxy. Tool calls, resource reads, session handshakes — all parsed and forwarded correctly.
 - **Observe** — Structured events for every request: tool name, latency, status, error codes, bytes, session ID. Query locally via CLI.
@@ -421,8 +421,8 @@ mcpr start
 ## Architecture
 
 ```
-AI Clients                    mcpr                           MCP Server
-(ChatGPT, Claude,    ──►  [Route + Observe + CSP]  ──►   (your server)
+AI Clients                    mcpr (before server)             MCP Server
+(ChatGPT, Claude,    ──►  [Route + Observe + CSP]    ──►   (your server)
  VS Code, Cursor)          │
                            ├─► stderr (JSON/pretty logs)
                            └─► SQLite (local query engine)

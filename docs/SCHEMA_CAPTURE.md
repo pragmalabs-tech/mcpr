@@ -1,6 +1,6 @@
 # Schema Capture
 
-mcpr passively captures what the upstream MCP server exposes — tools, resources, prompts, capabilities — by intercepting discovery responses as they flow through the proxy. No extra authentication, no active polling, zero latency added.
+mcpr sits before your MCP server and passively captures what it exposes — tools, resources, prompts, capabilities — by intercepting discovery responses as they flow through. No extra authentication, no active polling, zero latency added.
 
 ## Why
 

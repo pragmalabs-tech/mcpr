@@ -1,6 +1,6 @@
 # CLI Reference
 
-mcpr is a daemon-style proxy for MCP servers. Start it once, observe anytime.
+mcpr is a protocol-aware reverse proxy that sits before your MCP server. Start it once, observe anytime.
 
 ## Quick Start
 
