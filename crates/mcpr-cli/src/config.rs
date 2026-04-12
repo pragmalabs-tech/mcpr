@@ -850,6 +850,33 @@ fn load_relay(file: FileConfig, _runtime: RuntimeOptions) -> Mode {
     })
 }
 
+/// Resolve proxy name: explicit name > filename stem > "default".
+/// Characters that aren't alphanumeric or '-' are replaced with '-'.
+fn resolve_proxy_name(
+    explicit_name: Option<&str>,
+    config_path: Option<&std::path::Path>,
+) -> String {
+    let raw = match explicit_name {
+        Some(n) => n.to_string(),
+        None => config_path
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .map(|s| if s == "mcpr" { "default" } else { s })
+            .unwrap_or("default")
+            .to_string(),
+    };
+
+    raw.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 fn load_gateway(
     file: FileConfig,
     config_path: Option<std::path::PathBuf>,
@@ -860,28 +887,7 @@ fn load_gateway(
         None => CspMode::default(),
     };
 
-    // Resolve proxy name: explicit name > filename stem > "default"
-    let name = file
-        .name
-        .clone()
-        .unwrap_or_else(|| {
-            config_path
-                .as_ref()
-                .and_then(|p| p.file_stem())
-                .and_then(|s| s.to_str())
-                .map(|s| if s == "mcpr" { "default" } else { s })
-                .unwrap_or("default")
-                .to_string()
-        })
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '-' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
+    let name = resolve_proxy_name(file.name.as_deref(), config_path.as_deref());
 
     Mode::Gateway(Box::new(GatewayConfig {
         name,
@@ -1068,5 +1074,56 @@ mod tests {
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert!(config.cloud.token.is_none());
         assert!(config.cloud.server.is_none());
+    }
+
+    // ── Proxy name resolution ──────────────────────────────────────────
+
+    #[test]
+    fn name_explicit_wins_over_filename() {
+        let name = resolve_proxy_name(
+            Some("my-proxy"),
+            Some(std::path::Path::new("/tmp/search.toml")),
+        );
+        assert_eq!(name, "my-proxy");
+    }
+
+    #[test]
+    fn name_from_filename_stem() {
+        let name = resolve_proxy_name(None, Some(std::path::Path::new("/tmp/search.toml")));
+        assert_eq!(name, "search");
+    }
+
+    #[test]
+    fn name_mcpr_toml_becomes_default() {
+        let name = resolve_proxy_name(None, Some(std::path::Path::new("/tmp/mcpr.toml")));
+        assert_eq!(name, "default");
+    }
+
+    #[test]
+    fn name_no_config_path_becomes_default() {
+        let name = resolve_proxy_name(None, None);
+        assert_eq!(name, "default");
+    }
+
+    #[test]
+    fn name_sanitizes_special_chars() {
+        let name = resolve_proxy_name(Some("my proxy!@#$"), None);
+        assert_eq!(name, "my-proxy----");
+    }
+
+    #[test]
+    fn name_preserves_hyphens_and_alphanumeric() {
+        let name = resolve_proxy_name(Some("search-v2"), None);
+        assert_eq!(name, "search-v2");
+    }
+
+    #[test]
+    fn name_from_toml_field() {
+        let toml_str = r#"
+            name = "email"
+            mcp = "http://localhost:9000"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.name.as_deref(), Some("email"));
     }
 }

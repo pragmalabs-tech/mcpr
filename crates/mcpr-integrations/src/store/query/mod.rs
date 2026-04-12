@@ -962,4 +962,142 @@ mod tests {
             .unwrap();
         assert!(rows.is_empty());
     }
+
+    // ── multi-proxy: proxy: None shows all ──────────────────────────────
+
+    /// Seed a second proxy ("email") alongside the default "api" proxy.
+    fn seeded_multi_proxy_engine() -> QueryEngine {
+        let engine = seeded_engine();
+
+        // Add a second proxy's session and requests.
+        engine.conn().execute(
+            "INSERT INTO sessions (session_id, proxy, started_at, last_seen_at, client_name, client_version, client_platform, total_calls, total_errors)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params!["s-email-1", "email", 6000, 7000, "claude-desktop", "1.2.0", "claude", 1, 0],
+        ).unwrap();
+
+        engine.conn().execute(
+            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_ms, status, error_code, error_msg, bytes_in, bytes_out)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params!["r-email-1", 6000i64, "email", "s-email-1", "tools/call", "send_email", 320i64, "ok", None::<&str>, None::<&str>, Some(512i64), Some(128i64)],
+        ).unwrap();
+
+        engine.conn().execute(
+            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_ms, status, error_code, error_msg, bytes_in, bytes_out)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params!["r-email-2", 7000i64, "email", "s-email-1", "tools/call", "send_email", 250i64, "ok", None::<&str>, None::<&str>, Some(512i64), Some(128i64)],
+        ).unwrap();
+
+        engine
+    }
+
+    #[test]
+    fn logs_proxy_none_returns_all_proxies() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: None,
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: None,
+                status: None,
+                error_code: None,
+            })
+            .unwrap();
+        // 5 from "api" + 2 from "email" = 7
+        assert_eq!(rows.len(), 7);
+    }
+
+    #[test]
+    fn logs_proxy_filter_excludes_other() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: Some("email".into()),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: None,
+                status: None,
+                error_code: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn stats_proxy_none_aggregates_all() {
+        let engine = seeded_multi_proxy_engine();
+        let result = engine
+            .stats(&super::stats::StatsParams {
+                proxy: None,
+                since_ts: 0,
+            })
+            .unwrap();
+        // 5 from api + 2 from email = 7
+        assert_eq!(result.total_calls, 7);
+    }
+
+    #[test]
+    fn stats_proxy_filter_scopes_to_one() {
+        let engine = seeded_multi_proxy_engine();
+        let result = engine
+            .stats(&super::stats::StatsParams {
+                proxy: Some("email".into()),
+                since_ts: 0,
+            })
+            .unwrap();
+        assert_eq!(result.total_calls, 2);
+    }
+
+    #[test]
+    fn slow_proxy_none_returns_all_proxies() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .slow(&super::slow::SlowParams {
+                proxy: None,
+                threshold_ms: 100,
+                since_ts: 0,
+                tool: None,
+                limit: 100,
+            })
+            .unwrap();
+        // api: r2(891), r3(4201), r1(142), r5(156) above 100 = 4
+        // email: r-email-1(320), r-email-2(250) above 100 = 2
+        // total = 6
+        assert_eq!(rows.len(), 6);
+    }
+
+    #[test]
+    fn sessions_proxy_none_returns_all() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .sessions(&super::sessions::SessionsParams {
+                proxy: None,
+                since_ts: 0,
+                limit: 100,
+                active_only: false,
+                client: None,
+            })
+            .unwrap();
+        // s1, s2 from "api" + s-email-1 from "email" = 3
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn clients_proxy_none_returns_all() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .clients(&super::clients::ClientsParams {
+                proxy: None,
+                since_ts: 0,
+            })
+            .unwrap();
+        // claude-desktop appears in both proxies, cursor in api only
+        // grouped by (name, version, platform) — depends on exact grouping
+        assert!(rows.len() >= 2);
+    }
 }

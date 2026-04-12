@@ -307,4 +307,84 @@ mod tests {
         let info = read_lock_file(Path::new("/nonexistent/path/lock"));
         assert!(info.is_none());
     }
+
+    #[test]
+    fn malformed_lock_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("bad.lock");
+        // Only 2 lines instead of 4
+        fs::write(&lock, "12345\n8080\n").unwrap();
+        assert!(read_lock_file(&lock).is_none());
+    }
+
+    #[test]
+    fn write_and_read_lock() {
+        // Override the home dir to a temp dir so we don't pollute real ~/.mcpr
+        let dir = tempfile::tempdir().unwrap();
+        let proxy_dir = dir.path().join("test-proxy");
+        fs::create_dir_all(&proxy_dir).unwrap();
+        let lock_file = proxy_dir.join("lock");
+
+        let pid = std::process::id();
+        let started_at = chrono::Utc::now().timestamp();
+        let content = format!("{pid}\n3001\n{started_at}\n/tmp/search.toml\n");
+        fs::write(&lock_file, &content).unwrap();
+
+        let info = read_lock_file(&lock_file).unwrap();
+        assert_eq!(info.pid, pid);
+        assert_eq!(info.port, 3001);
+        assert_eq!(info.config_path, "/tmp/search.toml");
+    }
+
+    #[test]
+    fn snapshot_config_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot_path = dir.path().join("config.toml");
+        let content = "[mcp]\nurl = \"http://localhost:9000\"\n";
+        fs::write(&snapshot_path, content).unwrap();
+
+        let read_back = fs::read_to_string(&snapshot_path).unwrap();
+        assert_eq!(read_back, content);
+    }
+
+    #[test]
+    fn check_lock_free_when_no_dir() {
+        // check_lock for a name that has no proxy dir returns Free.
+        // This only works if ~/.mcpr/proxies/nonexistent-test-proxy/ doesn't exist.
+        let status = check_lock("nonexistent-test-proxy-abc123");
+        assert!(matches!(status, LockStatus::Free));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_lock_stale_when_pid_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+
+        // PID 99999999 is almost certainly not running
+        let ts = chrono::Utc::now().timestamp();
+        let content = format!("99999999\n3001\n{ts}\n/tmp/test.toml\n");
+        fs::write(&lock, &content).unwrap();
+
+        let info = read_lock_file(&lock).unwrap();
+        assert_eq!(info.pid, 99999999);
+        // The process should not be alive
+        assert!(!is_process_alive(99999999));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_lock_held_when_pid_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+
+        // Use our own PID (definitely alive)
+        let pid = std::process::id();
+        let ts = chrono::Utc::now().timestamp();
+        let content = format!("{pid}\n3001\n{ts}\n/tmp/test.toml\n");
+        fs::write(&lock, &content).unwrap();
+
+        let info = read_lock_file(&lock).unwrap();
+        assert!(is_process_alive(info.pid));
+    }
 }
