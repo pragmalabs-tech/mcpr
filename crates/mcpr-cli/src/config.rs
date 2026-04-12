@@ -316,6 +316,14 @@ pub struct ProxySchemaArgs {
     #[arg(long)]
     pub changes: bool,
 
+    /// Show tool usage — listed tools vs actual calls (unused tools highlighted)
+    #[arg(long)]
+    pub unused: bool,
+
+    /// Time window for usage stats (used with --unused, default: 7d)
+    #[arg(long, default_value = "7d")]
+    pub since: String,
+
     /// Number of change history rows to show (used with --changes)
     #[arg(long, default_value = "50")]
     pub limit: i64,

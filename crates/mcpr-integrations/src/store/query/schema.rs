@@ -40,6 +40,22 @@ pub struct SchemaChangeRow {
     pub detected_at: i64,
 }
 
+/// Parameters for the unused tools query.
+pub struct SchemaUnusedParams {
+    pub proxy: String,
+    pub since_ts: i64,
+}
+
+/// A tool listed in the schema with its usage stats.
+#[derive(Debug, Clone, Serialize)]
+pub struct SchemaToolUsageRow {
+    pub tool_name: String,
+    pub description: String,
+    pub calls: i64,
+    pub errors: i64,
+    pub last_called_at: Option<i64>,
+}
+
 /// Computed schema status for a given upstream.
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaStatusRow {
@@ -185,6 +201,92 @@ impl QueryEngine {
             methods_captured: method_names,
             last_captured_at: last_captured,
         })
+    }
+
+    /// Cross-reference captured tools/list schema with actual request logs.
+    /// Returns all listed tools with their usage stats — unused tools have calls = 0.
+    pub fn schema_unused(
+        &self,
+        params: &SchemaUnusedParams,
+    ) -> Result<Vec<SchemaToolUsageRow>, rusqlite::Error> {
+        // Step 1: Get the tools/list payload from server_schema.
+        let payload: Option<String> = self
+            .conn()
+            .query_row(
+                "SELECT payload FROM server_schema WHERE method = 'tools/list' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+
+        let payload = match payload {
+            Some(p) => p,
+            None => return Ok(vec![]),
+        };
+
+        // Step 2: Parse tool names from the payload.
+        let val: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
+        let tools = match val.get("tools").and_then(|t| t.as_array()) {
+            Some(arr) => arr,
+            None => return Ok(vec![]),
+        };
+
+        let mut tool_info: Vec<(String, String)> = Vec::new();
+        for tool in tools {
+            let name = tool
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let desc = tool
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !name.is_empty() {
+                tool_info.push((name, desc));
+            }
+        }
+
+        if tool_info.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Step 3: Query request logs for each tool's usage.
+        let sql = "
+            SELECT COUNT(*) as calls,
+                   SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors,
+                   MAX(ts) as last_called_at
+            FROM requests
+            WHERE proxy = ?1 AND ts >= ?2 AND tool = ?3
+        ";
+
+        let mut result = Vec::new();
+        for (name, desc) in &tool_info {
+            let row =
+                self.conn()
+                    .query_row(sql, params![params.proxy, params.since_ts, name], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    });
+
+            let (calls, errors, last_called_at) = row.unwrap_or((0, 0, None));
+            result.push(SchemaToolUsageRow {
+                tool_name: name.clone(),
+                description: desc.clone(),
+                calls,
+                errors,
+                last_called_at,
+            });
+        }
+
+        // Sort: unused first (calls = 0), then by calls ascending.
+        result.sort_by(|a, b| a.calls.cmp(&b.calls));
+
+        Ok(result)
     }
 
     /// Extract server info from a captured initialize payload.

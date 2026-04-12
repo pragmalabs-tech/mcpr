@@ -345,6 +345,8 @@ mcpr proxy clients [name]      AI client breakdown
 
 mcpr proxy schema [name]       Captured MCP server schema (tools, resources, prompts)
   --changes                      Show change history instead of current schema
+  --unused                       Show tool usage — listed vs actually called
+  --since DURATION               Usage lookback window (default: 7d, with --unused)
   --method METHOD                Filter by MCP method (e.g. tools/list)
   --limit N                      Change history rows (default: 50)
   --json                         JSON output

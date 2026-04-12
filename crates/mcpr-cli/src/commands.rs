@@ -10,7 +10,7 @@ use mcpr_integrations::store::{
         QueryEngine,
         clients::ClientsParams,
         logs::LogsParams,
-        schema::{SchemaChangesParams, SchemaParams},
+        schema::{SchemaChangesParams, SchemaParams, SchemaUnusedParams},
         sessions::SessionsParams,
         slow::SlowParams,
         stats::StatsParams,
@@ -693,7 +693,11 @@ fn cmd_proxy_session(args: ProxySessionArgs) -> Result<(), String> {
 
 fn cmd_proxy_schema(args: ProxySchemaArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let _name = resolve_proxy_name(args.name)?;
+    let name = resolve_proxy_name(args.name.clone())?;
+
+    if args.unused {
+        return cmd_proxy_schema_unused(&engine, &name, &args);
+    }
 
     if args.changes {
         let rows = engine
@@ -775,6 +779,77 @@ fn cmd_proxy_schema(args: ProxySchemaArgs) -> Result<(), String> {
                 print_schema_items(&row.payload, &row.method);
                 println!();
             }
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_proxy_schema_unused(
+    engine: &mcpr_integrations::store::query::QueryEngine,
+    name: &str,
+    args: &ProxySchemaArgs,
+) -> Result<(), String> {
+    let since_ts = parse_since(&args.since)?;
+
+    let rows = engine
+        .schema_unused(&SchemaUnusedParams {
+            proxy: name.to_string(),
+            since_ts,
+        })
+        .map_err(|e| format!("query failed: {e}"))?;
+
+    if rows.is_empty() {
+        println!("  (no tools/list schema captured yet)");
+        return Ok(());
+    }
+
+    if args.json {
+        for row in &rows {
+            print_json(row);
+        }
+    } else {
+        let unused_count = rows.iter().filter(|r| r.calls == 0).count();
+        let total = rows.len();
+        println!(
+            "TOOL USAGE — {} — last {}   {}/{} unused\n",
+            name, args.since, unused_count, total
+        );
+        println!(
+            "  {:<28} {:>8} {:>8} {:>21}  STATUS",
+            "TOOL", "CALLS", "ERRORS", "LAST CALLED"
+        );
+        for row in &rows {
+            let last_called = row
+                .last_called_at
+                .map(format_ts)
+                .unwrap_or_else(|| "never".to_string());
+            let status = if row.calls == 0 {
+                "unused"
+            } else if row.errors > 0 {
+                "errors"
+            } else {
+                "ok"
+            };
+            let line = format!(
+                "  {:<28} {:>8} {:>8} {:>21}  {}",
+                row.tool_name, row.calls, row.errors, last_called, status,
+            );
+            if row.calls == 0 {
+                println!("{}", colored::Colorize::yellow(line.as_str()));
+            } else if row.errors > 0 {
+                println!("{}", colored::Colorize::red(line.as_str()));
+            } else {
+                println!("{line}");
+            }
+        }
+        if unused_count > 0 {
+            println!(
+                "\n  {} tool{} listed but never called in the last {}.",
+                unused_count,
+                if unused_count == 1 { "" } else { "s" },
+                args.since,
+            );
         }
     }
 

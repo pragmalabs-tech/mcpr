@@ -227,6 +227,8 @@ Show the captured MCP server schema — tools, resources, prompts, and server ca
 ```bash
 mcpr proxy schema                        # show current schema
 mcpr proxy schema --changes              # show change history
+mcpr proxy schema --unused               # show tool usage — highlight unused tools
+mcpr proxy schema --unused --since 30d   # usage window (default: 7d)
 mcpr proxy schema --method tools/list    # filter to a specific method
 mcpr proxy schema --json                 # JSON output
 mcpr proxy schema --changes --limit 100  # last 100 changes
@@ -263,9 +265,25 @@ Schema status is computed from captured data:
 | `complete` | `initialize` + at least one list method captured |
 | `stale` | Server sent `notifications/tools/list_changed` after last capture |
 
+Unused tools (`--unused`):
+```
+TOOL USAGE — localhost-9000 — last 7d   2/5 unused
+
+  TOOL                             CALLS   ERRORS          LAST CALLED  STATUS
+  send_email                           0        0                never  unused
+  internal_debug                       0        0                never  unused
+  search_products                    847        3    2026-04-12 14:30  ok
+  get_product                        312        0    2026-04-12 14:15  ok
+  create_order                        89        8    2026-04-12 13:00  errors
+
+  2 tools listed but never called in the last 7d.
+```
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--changes` | false | Show change history instead of current schema |
+| `--unused` | false | Show tool usage — listed vs actually called |
+| `--since DURATION` | 7d | Usage lookback window (with `--unused`) |
 | `--method METHOD` | — | Filter to a specific MCP method |
 | `--limit N` | 50 | Number of change history rows (with `--changes`) |
 | `--json` | false | JSON output |

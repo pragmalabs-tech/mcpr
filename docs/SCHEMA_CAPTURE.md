@@ -180,6 +180,10 @@ mcpr proxy schema
 # Show change history
 mcpr proxy schema --changes
 
+# Show tool usage — highlight unused tools
+mcpr proxy schema --unused
+mcpr proxy schema --unused --since 30d
+
 # Filter to one method
 mcpr proxy schema --method tools/list
 
@@ -190,6 +194,25 @@ mcpr proxy schema --changes --json
 # More history
 mcpr proxy schema --changes --limit 100
 ```
+
+### Unused Tools
+
+`--unused` cross-references the captured `tools/list` schema with actual `tools/call` request logs. Tools that are listed by the server but never called by any client are highlighted:
+
+```
+TOOL USAGE — localhost-9000 — last 7d   2/5 unused
+
+  TOOL                             CALLS   ERRORS          LAST CALLED  STATUS
+  send_email                           0        0                never  unused
+  internal_debug                       0        0                never  unused
+  search_products                    847        3    2026-04-12 14:30  ok
+  get_product                        312        0    2026-04-12 14:15  ok
+  create_order                        89        8    2026-04-12 13:00  errors
+
+  2 tools listed but never called in the last 7d.
+```
+
+This helps answer: "Are clients actually using what the server exposes?" — useful for identifying dead tools, understanding agent workflows, and cleaning up unused server capabilities.
 
 ## Design Decisions
 

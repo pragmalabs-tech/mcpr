@@ -917,4 +917,49 @@ mod tests {
         let status = engine.schema_status("http://localhost:9000").unwrap();
         assert_eq!(status.status, "stale");
     }
+
+    // ── schema unused ──────────────────────────────────────────────────
+
+    #[test]
+    fn schema_unused_finds_uncalled_tools() {
+        let engine = seeded_engine();
+        seed_schema(&engine);
+
+        // The seeded requests have tool="search" and tool="create_order" called.
+        // The schema has tool "search" listed.
+        // Add a tool "never_used" to the schema payload.
+        engine
+            .conn()
+            .execute(
+                "UPDATE server_schema SET payload = ?1 WHERE method = 'tools/list'",
+                params![r#"{"tools":[{"name":"search","description":"search things"},{"name":"never_used","description":"does nothing"}]}"#],
+            )
+            .unwrap();
+
+        let rows = engine
+            .schema_unused(&super::schema::SchemaUnusedParams {
+                proxy: "api".into(),
+                since_ts: 0,
+            })
+            .unwrap();
+
+        assert_eq!(rows.len(), 2);
+        // Sorted: unused first (calls=0), then by calls ascending.
+        assert_eq!(rows[0].tool_name, "never_used");
+        assert_eq!(rows[0].calls, 0);
+        assert_eq!(rows[1].tool_name, "search");
+        assert!(rows[1].calls > 0);
+    }
+
+    #[test]
+    fn schema_unused_empty_when_no_schema() {
+        let engine = seeded_engine();
+        let rows = engine
+            .schema_unused(&super::schema::SchemaUnusedParams {
+                proxy: "api".into(),
+                since_ts: 0,
+            })
+            .unwrap();
+        assert!(rows.is_empty());
+    }
 }
