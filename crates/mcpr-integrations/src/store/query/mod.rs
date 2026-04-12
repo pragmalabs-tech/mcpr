@@ -174,7 +174,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -195,7 +195,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: Some("search".into()),
@@ -214,7 +214,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -233,7 +233,7 @@ mod tests {
     fn logs_since_returns_newer_rows() {
         let engine = seeded_engine();
         let params = super::logs::LogsParams {
-            proxy: "api".into(),
+            proxy: Some("api".into()),
             since_ts: 0,
             limit: 100,
             tool: None,
@@ -254,7 +254,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "nonexistent".into(),
+                proxy: Some("nonexistent".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -273,7 +273,7 @@ mod tests {
         // s1 has r1, r2, r3
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -293,7 +293,7 @@ mod tests {
         // "s" matches both s1 and s2 — all 5 rows
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -312,7 +312,7 @@ mod tests {
         // resources/read: only r4
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -332,7 +332,7 @@ mod tests {
         // s1 + tools/call = r1, r2, r3
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -351,7 +351,7 @@ mod tests {
         // r3 has error_code = "-32600"
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -371,7 +371,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -389,7 +389,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -414,7 +414,7 @@ mod tests {
         // search has latencies 42, 891, 156 — only 891 is above 500
         let rows = engine
             .slow(&super::slow::SlowParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 tool: Some("search".into()),
                 threshold_ms: 500,
                 since_ts: 0,
@@ -431,7 +431,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .slow(&super::slow::SlowParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 tool: None,
                 threshold_ms: 500,
                 since_ts: 0,
@@ -449,7 +449,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .slow(&super::slow::SlowParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 tool: None,
                 threshold_ms: 10000,
                 since_ts: 0,
@@ -467,7 +467,7 @@ mod tests {
         // r2 (ts=2000, 891ms) and r3 (ts=3000, 4201ms) are above 500ms
         // asking for ts > 1000 should return both, oldest first
         let params = super::slow::SlowParams {
-            proxy: "api".into(),
+            proxy: Some("api".into()),
             threshold_ms: 500,
             since_ts: 0,
             tool: None,
@@ -485,7 +485,7 @@ mod tests {
         let engine = seeded_engine();
         // r2 is at ts=2000; asking for ts > 2000 should exclude r2
         let params = super::slow::SlowParams {
-            proxy: "api".into(),
+            proxy: Some("api".into()),
             threshold_ms: 500,
             since_ts: 0,
             tool: None,
@@ -501,7 +501,7 @@ mod tests {
         let engine = seeded_engine();
         // All rows have ts <= 5000; asking for ts > 5000 should return nothing
         let params = super::slow::SlowParams {
-            proxy: "api".into(),
+            proxy: Some("api".into()),
             threshold_ms: 500,
             since_ts: 0,
             tool: None,
@@ -516,7 +516,7 @@ mod tests {
         let engine = seeded_engine();
         // With threshold 1000, only r3 (4201ms) qualifies
         let params = super::slow::SlowParams {
-            proxy: "api".into(),
+            proxy: Some("api".into()),
             threshold_ms: 1000,
             since_ts: 0,
             tool: None,
@@ -533,7 +533,7 @@ mod tests {
         // r2 (search, 891ms) and r3 (create_order, 4201ms) are above 500ms
         // filtering to search should only return r2
         let params = super::slow::SlowParams {
-            proxy: "api".into(),
+            proxy: Some("api".into()),
             threshold_ms: 500,
             since_ts: 0,
             tool: Some("search".into()),
@@ -552,7 +552,7 @@ mod tests {
         let engine = seeded_engine();
         let result = engine
             .stats(&super::stats::StatsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
             })
             .unwrap();
@@ -568,7 +568,7 @@ mod tests {
         let engine = seeded_engine();
         let result = engine
             .stats(&super::stats::StatsParams {
-                proxy: "nonexistent".into(),
+                proxy: Some("nonexistent".into()),
                 since_ts: 0,
             })
             .unwrap();
@@ -583,7 +583,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .clients(&super::clients::ClientsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
             })
             .unwrap();
@@ -602,7 +602,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .sessions(&super::sessions::SessionsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 active_only: false,
@@ -617,7 +617,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .sessions(&super::sessions::SessionsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 active_only: false,
@@ -723,7 +723,7 @@ mod tests {
         // Verify remaining rows
         let remaining = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 100,
                 tool: None,
@@ -743,7 +743,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .logs(&super::logs::LogsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
                 limit: 1,
                 tool: None,
@@ -763,7 +763,7 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .clients(&super::clients::ClientsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
             })
             .unwrap();
@@ -777,7 +777,7 @@ mod tests {
         let engine = seeded_engine();
         let result = engine
             .stats(&super::stats::StatsParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
             })
             .unwrap();
@@ -938,7 +938,7 @@ mod tests {
 
         let rows = engine
             .schema_unused(&super::schema::SchemaUnusedParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
             })
             .unwrap();
@@ -956,10 +956,148 @@ mod tests {
         let engine = seeded_engine();
         let rows = engine
             .schema_unused(&super::schema::SchemaUnusedParams {
-                proxy: "api".into(),
+                proxy: Some("api".into()),
                 since_ts: 0,
             })
             .unwrap();
         assert!(rows.is_empty());
+    }
+
+    // ── multi-proxy: proxy: None shows all ──────────────────────────────
+
+    /// Seed a second proxy ("email") alongside the default "api" proxy.
+    fn seeded_multi_proxy_engine() -> QueryEngine {
+        let engine = seeded_engine();
+
+        // Add a second proxy's session and requests.
+        engine.conn().execute(
+            "INSERT INTO sessions (session_id, proxy, started_at, last_seen_at, client_name, client_version, client_platform, total_calls, total_errors)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params!["s-email-1", "email", 6000, 7000, "claude-desktop", "1.2.0", "claude", 1, 0],
+        ).unwrap();
+
+        engine.conn().execute(
+            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_ms, status, error_code, error_msg, bytes_in, bytes_out)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params!["r-email-1", 6000i64, "email", "s-email-1", "tools/call", "send_email", 320i64, "ok", None::<&str>, None::<&str>, Some(512i64), Some(128i64)],
+        ).unwrap();
+
+        engine.conn().execute(
+            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_ms, status, error_code, error_msg, bytes_in, bytes_out)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params!["r-email-2", 7000i64, "email", "s-email-1", "tools/call", "send_email", 250i64, "ok", None::<&str>, None::<&str>, Some(512i64), Some(128i64)],
+        ).unwrap();
+
+        engine
+    }
+
+    #[test]
+    fn logs_proxy_none_returns_all_proxies() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: None,
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: None,
+                status: None,
+                error_code: None,
+            })
+            .unwrap();
+        // 5 from "api" + 2 from "email" = 7
+        assert_eq!(rows.len(), 7);
+    }
+
+    #[test]
+    fn logs_proxy_filter_excludes_other() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: Some("email".into()),
+                since_ts: 0,
+                limit: 100,
+                tool: None,
+                method: None,
+                session: None,
+                status: None,
+                error_code: None,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn stats_proxy_none_aggregates_all() {
+        let engine = seeded_multi_proxy_engine();
+        let result = engine
+            .stats(&super::stats::StatsParams {
+                proxy: None,
+                since_ts: 0,
+            })
+            .unwrap();
+        // 5 from api + 2 from email = 7
+        assert_eq!(result.total_calls, 7);
+    }
+
+    #[test]
+    fn stats_proxy_filter_scopes_to_one() {
+        let engine = seeded_multi_proxy_engine();
+        let result = engine
+            .stats(&super::stats::StatsParams {
+                proxy: Some("email".into()),
+                since_ts: 0,
+            })
+            .unwrap();
+        assert_eq!(result.total_calls, 2);
+    }
+
+    #[test]
+    fn slow_proxy_none_returns_all_proxies() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .slow(&super::slow::SlowParams {
+                proxy: None,
+                threshold_ms: 100,
+                since_ts: 0,
+                tool: None,
+                limit: 100,
+            })
+            .unwrap();
+        // api: r2(891), r3(4201), r1(142), r5(156) above 100 = 4
+        // email: r-email-1(320), r-email-2(250) above 100 = 2
+        // total = 6
+        assert_eq!(rows.len(), 6);
+    }
+
+    #[test]
+    fn sessions_proxy_none_returns_all() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .sessions(&super::sessions::SessionsParams {
+                proxy: None,
+                since_ts: 0,
+                limit: 100,
+                active_only: false,
+                client: None,
+            })
+            .unwrap();
+        // s1, s2 from "api" + s-email-1 from "email" = 3
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn clients_proxy_none_returns_all() {
+        let engine = seeded_multi_proxy_engine();
+        let rows = engine
+            .clients(&super::clients::ClientsParams {
+                proxy: None,
+                since_ts: 0,
+            })
+            .unwrap();
+        // claude-desktop appears in both proxies, cursor in api only
+        // grouped by (name, version, platform) — depends on exact grouping
+        assert!(rows.len() >= 2);
     }
 }

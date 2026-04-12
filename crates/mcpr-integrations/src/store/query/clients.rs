@@ -7,8 +7,8 @@ use super::QueryEngine;
 
 /// Filter parameters for the clients query.
 pub struct ClientsParams {
-    /// Proxy name to filter by.
-    pub proxy: String,
+    /// Proxy name to filter by (None = all proxies).
+    pub proxy: Option<String>,
     /// Only sessions started after this unix ms timestamp.
     pub since_ts: i64,
 }
@@ -43,7 +43,7 @@ impl QueryEngine {
                 MIN(started_at) AS first_seen,
                 MAX(last_seen_at) AS last_seen
             FROM sessions
-            WHERE proxy = ?1 AND started_at >= ?2
+            WHERE (?1 IS NULL OR proxy = ?1) AND started_at >= ?2
             GROUP BY client_name, client_version, client_platform
             ORDER BY total_calls DESC
         ";

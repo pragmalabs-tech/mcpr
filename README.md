@@ -362,36 +362,24 @@ See [docs/CLI.md](docs/CLI.md) for the full reference with examples.
 Community-driven — we want to hear your feedback to adjust priorities.
 
 - [x] MCP-aware reverse proxy (JSON-RPC routing)
+- [x] MCP method parsing (tools, resources, templates, prompts, notifications, progress)
 - [x] Widget proxy (merge MCP + widget assets)
 - [x] CSP auto-detection and enrichment
-- [x] Platform adaptation (ChatGPT / Claude / VS Code / Cursor)
 - [x] Edge config (CSP, domains, OAuth URLs)
 - [x] Per-tool health metrics (calls, error%, p95, max, bytes in/out)
 - [x] Daemon mode (`mcpr start/stop/restart/status`)
 - [x] SQLite storage engine with CLI query tools
-- [x] Full CLI observability (`logs/stats/slow/status/sessions/clients`)
-- [x] Live tailing (`--follow` on logs and slow)
-- [x] JSON output mode on all commands (`--json`)
-- [x] Error code tracking and filtering
-- [x] MCP method parsing (tools, resources, templates, prompts, notifications, progress)
-- [x] TUI dashboard
-- [x] Admin API (`/healthz`, `/ready`, `/version`)
+- [x] CLI observability (`logs/stats/slow/status/sessions/clients`)
 - [x] SIGTERM graceful drain for Kubernetes
 - [x] Built-in tunnel (public HTTPS, no ngrok)
-- [x] Storage maintenance (`mcpr store stats/vacuum`)
 - [x] Schema capture — passively capture MCP server tools, resources, prompts with change tracking
-- [ ] OAuth 2.1 and API key auth at the proxy
+- [ ] OAuth 2.1 and Token Auth
 - [ ] ACL (per-tool access control)
 - [ ] Request validation and schema enforcement
 - [ ] IP whitelisting
 - [ ] Multi-server routing (route to multiple MCP backends)
-- [ ] Multiple proxies in one daemon (`[[proxy]]` config array)
 - [ ] Rate limiting + circuit breaker
 - [ ] SIGHUP config reload
-- [ ] Prometheus metrics (`/metrics`)
-- [ ] `mcpr proxy view` — TUI viewer that attaches to running daemon
-- [ ] Widget injection (add widgets to tool-only servers)
-- [ ] OTLP ingestion
 
 ## License
 

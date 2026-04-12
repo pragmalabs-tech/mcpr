@@ -72,6 +72,10 @@ pub fn run_migrations(conn: &Connection, mcpr_version: &str) -> rusqlite::Result
         conn.execute_batch(schema::V2_SCHEMA)?;
     }
 
+    if version < 3 {
+        conn.execute_batch(schema::V3_SCHEMA)?;
+    }
+
     // Always update the mcpr binary version on startup.
     conn.execute(schema::UPSERT_MCPR_VERSION, rusqlite::params![mcpr_version])?;
 
@@ -137,7 +141,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "2");
+        assert_eq!(version, "3");
 
         // Verify mcpr version
         let mcpr_ver: String = conn
@@ -168,5 +172,98 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mcpr_ver, "0.3.1", "version should be updated on re-run");
+    }
+
+    #[test]
+    fn v3_migration_adds_proxy_to_schema_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_connection(&db_path).unwrap();
+        run_migrations(&conn, "test").unwrap();
+
+        // Verify server_schema has proxy column.
+        conn.execute(
+            "INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash)
+             VALUES ('search', 'http://localhost:9000', 'tools/list', '{}', 1000, 'abc')",
+            [],
+        )
+        .unwrap();
+
+        let proxy: String = conn
+            .query_row(
+                "SELECT proxy FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(proxy, "search");
+
+        // Verify schema_changes has proxy column.
+        conn.execute(
+            "INSERT INTO schema_changes (proxy, upstream_url, method, change_type, detected_at)
+             VALUES ('search', 'http://localhost:9000', 'tools/list', 'initial', 1000)",
+            [],
+        )
+        .unwrap();
+
+        let proxy: String = conn
+            .query_row(
+                "SELECT proxy FROM schema_changes WHERE upstream_url = 'http://localhost:9000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(proxy, "search");
+
+        // Verify UNIQUE(proxy, upstream_url, method) — same upstream+method but different proxy works.
+        conn.execute(
+            "INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash)
+             VALUES ('email', 'http://localhost:9000', 'tools/list', '{}', 2000, 'def')",
+            [],
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM server_schema", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "two rows with same upstream but different proxy");
+    }
+
+    #[test]
+    fn v3_migration_default_proxy_for_existing_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_connection(&db_path).unwrap();
+
+        // Simulate V2 state: run V1+V2 only.
+        conn.execute_batch(super::schema::V1_SCHEMA).unwrap();
+        conn.execute_batch(super::schema::V1_META_SEED).unwrap();
+        conn.execute_batch(super::schema::V2_SCHEMA).unwrap();
+
+        // Insert data in V2 schema (no proxy column).
+        conn.execute(
+            "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash)
+             VALUES ('http://localhost:9000', 'tools/list', '{}', 1000, 'abc')",
+            [],
+        )
+        .unwrap();
+
+        // Run V3 migration.
+        conn.execute_batch(super::schema::V3_SCHEMA).unwrap();
+
+        // Existing row should have proxy = 'default'.
+        let proxy: String = conn
+            .query_row(
+                "SELECT proxy FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            proxy, "default",
+            "V3 migration should default proxy to 'default'"
+        );
     }
 }

@@ -36,6 +36,7 @@ pub enum StoreEvent {
 
     /// Mark a schema method as stale (e.g., `notifications/tools/list_changed`).
     SchemaStale {
+        proxy: String,
         upstream_url: String,
         method: String,
         ts: i64,
@@ -130,6 +131,8 @@ pub struct SessionEvent {
 pub struct SchemaCaptureEvent {
     /// Unix milliseconds (UTC).
     pub ts: i64,
+    /// Proxy name from config.
+    pub proxy: String,
     /// Upstream MCP server URL.
     pub upstream_url: String,
     /// MCP method (e.g., "initialize", "tools/list").

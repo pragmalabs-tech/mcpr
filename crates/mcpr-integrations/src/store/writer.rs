@@ -248,11 +248,12 @@ fn flush_batch(
             }
 
             StoreEvent::SchemaStale {
+                proxy,
                 upstream_url,
                 method,
                 ts,
             } => {
-                handle_schema_stale(conn, &upstream_url, &method, ts);
+                handle_schema_stale(conn, &proxy, &upstream_url, &method, ts);
             }
         }
     }
@@ -277,7 +278,14 @@ fn handle_schema_capture(
 
     match sc.page_status {
         PageStatus::Complete => {
-            write_schema(conn, &sc.upstream_url, &sc.method, &sc.payload, sc.ts);
+            write_schema(
+                conn,
+                &sc.proxy,
+                &sc.upstream_url,
+                &sc.method,
+                &sc.payload,
+                sc.ts,
+            );
         }
         PageStatus::FirstPage => {
             page_buffer.insert(key, (Instant::now(), vec![sc.payload]));
@@ -297,25 +305,46 @@ fn handle_schema_capture(
                     .collect();
                 if let Some(merged) = proto_schema::merge_pages(&sc.method, &parsed) {
                     let payload = merged.to_string();
-                    write_schema(conn, &sc.upstream_url, &sc.method, &payload, sc.ts);
+                    write_schema(
+                        conn,
+                        &sc.proxy,
+                        &sc.upstream_url,
+                        &sc.method,
+                        &payload,
+                        sc.ts,
+                    );
                 }
             } else {
                 // Missed earlier pages — store what we have (best effort).
-                write_schema(conn, &sc.upstream_url, &sc.method, &sc.payload, sc.ts);
+                write_schema(
+                    conn,
+                    &sc.proxy,
+                    &sc.upstream_url,
+                    &sc.method,
+                    &sc.payload,
+                    sc.ts,
+                );
             }
         }
     }
 }
 
 /// Write a schema snapshot to SQLite: hash, diff, upsert.
-fn write_schema(conn: &Connection, upstream_url: &str, method: &str, payload: &str, ts: i64) {
+fn write_schema(
+    conn: &Connection,
+    proxy: &str,
+    upstream_url: &str,
+    method: &str,
+    payload: &str,
+    ts: i64,
+) {
     let new_hash = sha256_hex(payload);
 
     // Check for existing snapshot.
     let existing: Option<(String, String)> = conn
         .query_row(
             schema::GET_SCHEMA_HASH_SQL,
-            rusqlite::params![upstream_url, method],
+            rusqlite::params![proxy, upstream_url, method],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok();
@@ -325,13 +354,14 @@ fn write_schema(conn: &Connection, upstream_url: &str, method: &str, payload: &s
             // First capture — insert and record "initial" change.
             if let Err(e) = conn.execute(
                 schema::UPSERT_SERVER_SCHEMA_SQL,
-                rusqlite::params![upstream_url, method, payload, ts, new_hash],
+                rusqlite::params![proxy, upstream_url, method, payload, ts, new_hash],
             ) {
                 tracing::warn!("storage writer: schema upsert failed: {e}");
             }
             if let Err(e) = conn.execute(
                 schema::INSERT_SCHEMA_CHANGE_SQL,
                 rusqlite::params![
+                    proxy,
                     upstream_url,
                     method,
                     "initial",
@@ -348,7 +378,7 @@ fn write_schema(conn: &Connection, upstream_url: &str, method: &str, payload: &s
             // Same hash — just refresh the captured_at timestamp.
             if let Err(e) = conn.execute(
                 schema::UPSERT_SERVER_SCHEMA_SQL,
-                rusqlite::params![upstream_url, method, payload, ts, new_hash],
+                rusqlite::params![proxy, upstream_url, method, payload, ts, new_hash],
             ) {
                 tracing::warn!("storage writer: schema upsert failed: {e}");
             }
@@ -363,6 +393,7 @@ fn write_schema(conn: &Connection, upstream_url: &str, method: &str, payload: &s
                 if let Err(e) = conn.execute(
                     schema::INSERT_SCHEMA_CHANGE_SQL,
                     rusqlite::params![
+                        proxy,
                         upstream_url,
                         method,
                         diff.change_type,
@@ -379,7 +410,7 @@ fn write_schema(conn: &Connection, upstream_url: &str, method: &str, payload: &s
             // Update the stored schema.
             if let Err(e) = conn.execute(
                 schema::UPSERT_SERVER_SCHEMA_SQL,
-                rusqlite::params![upstream_url, method, payload, ts, new_hash],
+                rusqlite::params![proxy, upstream_url, method, payload, ts, new_hash],
             ) {
                 tracing::warn!("storage writer: schema upsert failed: {e}");
             }
@@ -388,11 +419,11 @@ fn write_schema(conn: &Connection, upstream_url: &str, method: &str, payload: &s
 }
 
 /// Record a stale marker in schema_changes.
-fn handle_schema_stale(conn: &Connection, upstream_url: &str, method: &str, ts: i64) {
+fn handle_schema_stale(conn: &Connection, proxy: &str, upstream_url: &str, method: &str, ts: i64) {
     let current_hash: Option<String> = conn
         .query_row(
-            "SELECT schema_hash FROM server_schema WHERE upstream_url = ?1 AND method = ?2",
-            rusqlite::params![upstream_url, method],
+            "SELECT schema_hash FROM server_schema WHERE proxy = ?1 AND upstream_url = ?2 AND method = ?3",
+            rusqlite::params![proxy, upstream_url, method],
             |row| row.get(0),
         )
         .ok();
@@ -400,6 +431,7 @@ fn handle_schema_stale(conn: &Connection, upstream_url: &str, method: &str, ts: 
     if let Err(e) = conn.execute(
         schema::INSERT_SCHEMA_CHANGE_SQL,
         rusqlite::params![
+            proxy,
             upstream_url,
             method,
             "stale",
@@ -571,7 +603,7 @@ mod tests {
 
     // ── Schema capture tests ─────────────────────────────────────────
 
-    use crate::store::event::SchemaCaptureEvent as StoreSchemaCaptureEvent;
+    use crate::store::event::SchemaCaptureEvent as StoreSchemaCapture;
 
     fn tools_payload(names: &[&str]) -> String {
         let tools: Vec<serde_json::Value> = names
@@ -585,8 +617,9 @@ mod tests {
     fn flush_batch_inserts_schema_initial() {
         let conn = test_db();
         let payload = tools_payload(&["search", "create"]);
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             payload: payload.clone(),
@@ -622,8 +655,9 @@ mod tests {
         let payload = tools_payload(&["search"]);
 
         // First capture.
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             payload: payload.clone(),
@@ -632,8 +666,9 @@ mod tests {
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
         // Same payload again.
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 2000,
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             payload,
@@ -663,8 +698,9 @@ mod tests {
         let conn = test_db();
 
         // Initial: tools a, b.
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             payload: tools_payload(&["a", "b"]),
@@ -673,8 +709,9 @@ mod tests {
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
         // Changed: tools a, c (b removed, c added).
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 2000,
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             payload: tools_payload(&["a", "c"]),
@@ -703,8 +740,9 @@ mod tests {
         let conn = test_db();
 
         // Insert initial schema first.
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             payload: tools_payload(&["search"]),
@@ -714,6 +752,7 @@ mod tests {
 
         // Mark as stale.
         let mut batch = vec![StoreEvent::SchemaStale {
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             ts: 2000,
@@ -742,8 +781,9 @@ mod tests {
         let mut page_buffer = HashMap::new();
 
         // First page.
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             payload: r#"{"tools":[{"name":"a","description":"tool a"}]}"#.into(),
@@ -758,8 +798,9 @@ mod tests {
         assert_eq!(count, 0);
 
         // Last page.
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCaptureEvent {
+        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 2000,
+            proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
             method: "tools/list".into(),
             payload: r#"{"tools":[{"name":"b","description":"tool b"}]}"#.into(),

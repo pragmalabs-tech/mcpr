@@ -79,6 +79,7 @@ impl EventSink for SqliteSink {
                 self.store.record(StoreEvent::SchemaCapture(
                     super::event::SchemaCaptureEvent {
                         ts: e.ts,
+                        proxy: e.proxy.clone(),
                         upstream_url: e.upstream_url.clone(),
                         method: e.method.clone(),
                         payload: e.payload.clone(),
@@ -88,6 +89,7 @@ impl EventSink for SqliteSink {
             }
             ProxyEvent::SchemaStale(e) => {
                 self.store.record(StoreEvent::SchemaStale {
+                    proxy: e.proxy.clone(),
                     upstream_url: e.upstream_url.clone(),
                     method: e.method.clone(),
                     ts: e.ts,

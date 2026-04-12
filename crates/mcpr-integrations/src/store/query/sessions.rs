@@ -11,8 +11,8 @@ const ACTIVE_SESSION_THRESHOLD_MS: i64 = 5 * 60 * 1000; // 5 minutes
 
 /// Filter parameters for the sessions query.
 pub struct SessionsParams {
-    /// Proxy name to filter by.
-    pub proxy: String,
+    /// Proxy name to filter by (None = all proxies).
+    pub proxy: Option<String>,
     /// Only sessions started after this unix ms timestamp.
     pub since_ts: i64,
     /// Maximum number of rows to return.
@@ -50,7 +50,7 @@ impl QueryEngine {
                 started_at, last_seen_at, ended_at, total_calls, total_errors,
                 (ended_at IS NULL AND last_seen_at > ?1) AS is_active
             FROM sessions
-            WHERE proxy = ?2
+            WHERE (?2 IS NULL OR proxy = ?2)
               AND (?3 IS NULL OR client_name = ?3)
               AND (?4 = 0 OR (ended_at IS NULL AND last_seen_at > ?1))
               AND started_at >= ?5
