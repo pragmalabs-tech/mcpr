@@ -247,7 +247,6 @@ fn start_one_proxy(name: &str) -> Result<(), String> {
         return Err(format!("proxy \"{name}\" failed to start"));
     }
 
-    eprintln!("Start proxy \"{}\".", name);
     Ok(())
 }
 
