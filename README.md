@@ -16,6 +16,10 @@ AI Client (ChatGPT, Claude, Cursor)
   Your MCP Server
 ```
 
+![mcpr TUI dashboard showing information](docs/mcpr-demo.gif)
+
+### Quickstart
+
 ```bash
 curl -fsSL https://mcpr.app/install.sh | sh
 ```
@@ -27,10 +31,8 @@ port = 3000
 ```
 
 ```bash
-mcpr start
+mcpr proxy run
 ```
-
-![mcpr TUI dashboard showing information](docs/mcpr-demo.gif)
 
 ---
 
@@ -247,6 +249,16 @@ mcpr start --foreground        Start in foreground (Docker/systemd)
 mcpr stop                      Stop daemon (graceful SIGTERM)
 mcpr restart                   Stop + start
 mcpr status                    PID, port, uptime, proxy name
+```
+
+### Proxy Management
+
+```
+mcpr proxy list                List all proxies and their status (--json)
+mcpr proxy start <name>        Start a stopped proxy from saved config
+mcpr proxy run [config]        Run a proxy from a config file (--replace)
+mcpr proxy stop [name]         Stop a proxy (--all)
+mcpr proxy restart [name]      Restart a proxy from saved config (--all)
 ```
 
 ### Observe

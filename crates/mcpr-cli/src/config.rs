@@ -140,6 +140,10 @@ pub enum ProxyCommand {
     Stop(ProxyStopArgs),
     /// Restart a running proxy from its saved config (or all with --all)
     Restart(ProxyRestartArgs),
+    /// Start a stopped proxy by name (from its saved config snapshot)
+    Start(ProxyStartArgs),
+    /// List all known proxies and their status
+    List(ProxyListArgs),
 
     // ── Observability ────────────────────────────────────────────────
     /// Show recent request logs
@@ -193,6 +197,21 @@ pub struct ProxyRestartArgs {
     /// Restart all running proxies
     #[arg(long)]
     pub all: bool,
+}
+
+/// Arguments for `mcpr proxy start <name>`.
+#[derive(Parser, Clone)]
+pub struct ProxyStartArgs {
+    /// Proxy name to start
+    pub name: String,
+}
+
+/// Arguments for `mcpr proxy list`.
+#[derive(Parser, Clone)]
+pub struct ProxyListArgs {
+    /// Output as JSON (one object per proxy)
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for `mcpr proxy logs [name]`.
