@@ -124,22 +124,9 @@ fn format_bytes_col(bytes: Option<i64>) -> String {
 }
 
 /// Format latency (in μs) for human-readable display.
-///
-/// - < 1ms (< 1000μs): show as "142μs"
-/// - 1ms..1s: show as "4.20ms"
-/// - ≥ 1s: show as "1,234ms"
+/// Delegates to the shared implementation in `mcpr_core::time`.
 fn format_latency(us: i64) -> String {
-    if us < 1_000 {
-        format!("{us}μs")
-    } else {
-        let ms = us as f64 / 1_000.0;
-        if ms >= 1_000.0 {
-            let ms_int = (ms + 0.5) as i64;
-            format!("{},{:03}ms", ms_int / 1000, ms_int % 1000)
-        } else {
-            format!("{ms:.2}ms")
-        }
-    }
+    mcpr_core::time::format_latency_us(us)
 }
 
 /// Print a serializable struct as a single JSON line.

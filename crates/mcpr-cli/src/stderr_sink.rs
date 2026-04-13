@@ -5,20 +5,9 @@
 use std::io::Write;
 
 use mcpr_core::event::{EventSink, ProxyEvent};
+use mcpr_core::time::format_latency_us;
 
 use crate::config::LogFormat;
-
-/// Format latency in microseconds for stderr display.
-///
-/// - < 1ms: "200μs"
-/// - ≥ 1ms: "4.20ms"
-fn format_duration_us(us: u64) -> String {
-    if us >= 1_000 {
-        format!(" {:.2}ms", us as f64 / 1_000.0)
-    } else {
-        format!(" {}μs", us)
-    }
-}
 
 /// Sink that prints proxy events to stderr.
 pub struct StderrSink {
@@ -47,7 +36,7 @@ impl EventSink for StderrSink {
                 let status = e.status;
                 let method = &e.method;
                 let path = &e.path;
-                let duration = format_duration_us(e.latency_us);
+                let duration = format_latency_us(e.latency_us as i64);
                 let size = e
                     .response_size
                     .map(|b| {
@@ -77,7 +66,7 @@ impl EventSink for StderrSink {
                     })
                     .unwrap_or_default();
 
-                format!("{ts} {method} {status}{size}{duration}{mcp}{detail} {path}")
+                format!("{ts} {method} {status}{size} {duration}{mcp}{detail} {path}")
             }
         };
 
@@ -98,33 +87,56 @@ impl EventSink for StderrSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcpr_core::event::RequestEvent;
 
-    #[test]
-    fn format_duration_sub_ms() {
-        assert_eq!(format_duration_us(0), " 0μs");
-        assert_eq!(format_duration_us(1), " 1μs");
-        assert_eq!(format_duration_us(200), " 200μs");
-        assert_eq!(format_duration_us(999), " 999μs");
+    fn make_event(latency_us: u64) -> ProxyEvent {
+        ProxyEvent::Request(RequestEvent {
+            id: "test".into(),
+            ts: 1_700_000_000_000,
+            proxy: "api".into(),
+            session_id: None,
+            method: "POST".into(),
+            path: "/mcp".into(),
+            mcp_method: Some("tools/call".into()),
+            tool: Some("search".into()),
+            status: 200,
+            latency_us,
+            upstream_us: None,
+            request_size: Some(100),
+            response_size: Some(200),
+            error_code: None,
+            error_msg: None,
+            note: "test".into(),
+        })
     }
 
     #[test]
-    fn format_duration_ms_range() {
-        assert_eq!(format_duration_us(1_000), " 1.00ms");
-        assert_eq!(format_duration_us(1_500), " 1.50ms");
-        assert_eq!(format_duration_us(42_000), " 42.00ms");
-        assert_eq!(format_duration_us(999_999), " 1000.00ms");
+    fn pretty_format_sub_ms_latency() {
+        let sink = StderrSink::new(LogFormat::Pretty);
+        let event = make_event(200);
+        // Just verify it doesn't panic and the sink accepts the event.
+        sink.on_event(&event);
     }
 
     #[test]
-    fn format_duration_large() {
-        assert_eq!(format_duration_us(1_000_000), " 1000.00ms");
-        assert_eq!(format_duration_us(5_000_000), " 5000.00ms");
+    fn pretty_format_ms_latency() {
+        let sink = StderrSink::new(LogFormat::Pretty);
+        let event = make_event(4_200);
+        sink.on_event(&event);
     }
 
     #[test]
-    fn format_duration_boundary() {
-        // Exact boundary between μs and ms display
-        assert_eq!(format_duration_us(999), " 999μs");
-        assert_eq!(format_duration_us(1_000), " 1.00ms");
+    fn pretty_format_seconds_latency() {
+        let sink = StderrSink::new(LogFormat::Pretty);
+        let event = make_event(1_500_000);
+        sink.on_event(&event);
+    }
+
+    #[test]
+    fn json_format_contains_latency_us() {
+        let event = make_event(200);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"latency_us\":200"));
+        assert!(!json.contains("latency_ms"));
     }
 }
