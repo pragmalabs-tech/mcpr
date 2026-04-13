@@ -150,7 +150,7 @@ impl mcpr_tunnel::TunnelStatusCallback for TunnelStatusAdapter {
 /// Tokio's IO driver uses epoll/kqueue file descriptors that don't survive
 /// fork(). So we must fork first, then start the async runtime in the child.
 fn main() {
-    let action = config::load();
+    let mut action = config::load();
 
     // Daemonize before tokio starts (if needed).
     // Tokio's IO driver uses kqueue/epoll fds that don't survive fork().
@@ -184,11 +184,22 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        CliAction::Restart(Mode::Gateway(_)) => {
+        CliAction::Restart {
+            mode: Mode::Gateway(_),
+            ..
+        } => {
             #[cfg(unix)]
             {
-                // Mark all managed proxies as stopped when restarting daemon.
-                let stopped = proxy_lock::mark_all_stopped();
+                // Collect names of currently running proxies so we can re-launch them
+                // after the daemon restarts.
+                let running_names: Vec<String> = proxy_lock::list_proxies()
+                    .into_iter()
+                    .filter(|(_, s)| matches!(s, proxy_lock::LockStatus::Held(_)))
+                    .map(|(name, _)| name)
+                    .collect();
+
+                // Stop all managed proxies.
+                let stopped = proxy_lock::stop_all_proxies();
                 if !stopped.is_empty() {
                     eprintln!(
                         "Stopped {} managed proxy(ies): {}",
@@ -196,6 +207,15 @@ fn main() {
                         stopped.join(", ")
                     );
                 }
+
+                // Pass the names to the child so it can re-launch after startup.
+                if let CliAction::Restart {
+                    restart_proxies, ..
+                } = &mut action
+                {
+                    *restart_proxies = running_names;
+                }
+
                 daemon::stop_daemon_if_running();
                 let fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
                     eprintln!("error: {e}");
@@ -287,6 +307,11 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
             }
         },
         CliAction::Stop => {
+            // Stop all running proxies before stopping the daemon.
+            let stopped = proxy_lock::stop_all_proxies();
+            for name in &stopped {
+                eprintln!("Stopped proxy \"{}\".", name);
+            }
             #[cfg(unix)]
             daemon::stop_daemon();
             #[cfg(not(unix))]
@@ -295,12 +320,28 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 std::process::exit(1);
             }
         }
-        CliAction::Restart(mode) => match mode {
+        CliAction::Restart {
+            mode,
+            restart_proxies,
+        } => match mode {
             Mode::Relay(_) => {
                 eprintln!("error: relay mode does not support daemon mode");
                 std::process::exit(1);
             }
             Mode::Gateway(cfg) => {
+                // Spawn a background task to re-launch previously running proxies
+                // after the gateway has had time to start up.
+                if !restart_proxies.is_empty() {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        for name in &restart_proxies {
+                            match commands::start_one_proxy(name) {
+                                Ok(_) => eprintln!("Restarted proxy \"{}\".", name),
+                                Err(e) => eprintln!("Failed to restart proxy \"{}\": {}", name, e),
+                            }
+                        }
+                    });
+                }
                 // Daemonize already happened in main() before tokio started.
                 run_gateway(*cfg, ready_fd).await;
             }
@@ -348,7 +389,15 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 .args(["-c", "curl -fsSL https://mcpr.app/install.sh | sh"])
                 .status();
             match status {
-                Ok(s) if s.success() => {}
+                Ok(s) if s.success() => {
+                    // Auto-restart daemon if it's running, using the new binary.
+                    #[cfg(unix)]
+                    if matches!(daemon::check_status(), daemon::DaemonStatus::Running(_)) {
+                        eprintln!("Restarting daemon with updated binary...");
+                        let exe = std::env::current_exe().unwrap_or_else(|_| "mcpr".into());
+                        let _ = std::process::Command::new(exe).arg("restart").status();
+                    }
+                }
                 Ok(s) => std::process::exit(s.code().unwrap_or(1)),
                 Err(e) => {
                     eprintln!("update failed: {e}");
