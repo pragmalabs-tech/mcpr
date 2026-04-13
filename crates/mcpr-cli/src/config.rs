@@ -8,6 +8,7 @@ const CONFIG_FILE: &str = "mcpr.toml";
 // ── Run mode ────────────────────────────────────────────────────────────
 
 /// Top-level mode: either run as a relay server or as the gateway proxy.
+#[allow(dead_code)]
 pub enum Mode {
     Relay(RelayConfig),
     Gateway(Box<GatewayConfig>),
@@ -15,16 +16,14 @@ pub enum Mode {
 
 /// Result of parsing CLI args — either a subcommand action or the run mode.
 pub enum CliAction {
-    /// Start the proxy (daemon by default, foreground with --foreground).
+    /// Start the daemon supervisor (no config needed).
     Start {
-        mode: Mode,
         foreground: bool,
     },
     /// Stop the running daemon via SIGTERM.
     Stop,
     /// Stop + start the daemon, re-launching previously running proxies.
     Restart {
-        mode: Mode,
         restart_proxies: Vec<String>,
     },
     /// Show daemon status (PID, port, uptime, proxy name).
@@ -662,9 +661,9 @@ pub fn load() -> CliAction {
     let cli = Cli::parse();
 
     match cli.command {
-        Some(Commands::Validate(args)) => return CliAction::Validate(args),
-        Some(Commands::Version) => return CliAction::Version,
-        Some(Commands::Update) => return CliAction::Update,
+        Some(Commands::Validate(args)) => CliAction::Validate(args),
+        Some(Commands::Version) => CliAction::Version,
+        Some(Commands::Update) => CliAction::Update,
         Some(Commands::Proxy(ProxyArgs {
             command: ProxyCommand::Run(run_args),
         })) => {
@@ -700,53 +699,25 @@ pub fn load() -> CliAction {
                 load_gateway(file, cfg_path, runtime)
             };
 
-            return CliAction::ProxyRun {
+            CliAction::ProxyRun {
                 mode,
                 replace: run_args.replace,
                 config_content,
                 config_path: config_path_str,
-            };
+            }
         }
-        Some(Commands::Proxy(args)) => return CliAction::Proxy(args.command),
-        Some(Commands::Store(args)) => return CliAction::Store(args.command),
-        Some(Commands::Stop) => return CliAction::Stop,
-        Some(Commands::Status) => return CliAction::Status,
-        Some(Commands::Start(_)) | None | Some(Commands::Restart) => {
-            // Continue to load config and determine run mode.
-        }
-    }
-
-    let foreground = matches!(&cli.command, Some(Commands::Start(args)) if args.foreground);
-    let is_restart = matches!(cli.command, Some(Commands::Restart));
-
-    let (file, config_path) = FileConfig::load(cli.config.as_deref());
-
-    let runtime = RuntimeOptions {
-        drain_timeout: file.drain_timeout.unwrap_or(30),
-        log_format: file
-            .log_format
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(LogFormat::Json),
-        admin_bind: file
-            .admin_bind
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1:9901".to_string()),
-    };
-
-    let mode = if file.is_relay() {
-        load_relay(file, runtime)
-    } else {
-        load_gateway(file, config_path, runtime)
-    };
-
-    if is_restart {
-        CliAction::Restart {
-            mode,
+        Some(Commands::Proxy(args)) => CliAction::Proxy(args.command),
+        Some(Commands::Store(args)) => CliAction::Store(args.command),
+        Some(Commands::Stop) => CliAction::Stop,
+        Some(Commands::Status) => CliAction::Status,
+        Some(Commands::Start(args)) => CliAction::Start {
+            foreground: args.foreground,
+        },
+        Some(Commands::Restart) => CliAction::Restart {
             restart_proxies: vec![],
-        }
-    } else {
-        CliAction::Start { mode, foreground }
+        },
+        // No subcommand — default to starting the daemon.
+        None => CliAction::Start { foreground: false },
     }
 }
 

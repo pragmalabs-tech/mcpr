@@ -5,10 +5,7 @@
 //!
 //! 1. **Explicit config**: `[store] path` in `mcpr.toml` — user chose a specific location.
 //! 2. **Environment variable**: `MCPR_DB` — useful for CI, Docker, or per-session overrides.
-//! 3. **Platform default**: follows OS conventions so the file lives where users expect:
-//!    - Linux: `$XDG_DATA_HOME/mcpr/mcpr.db` → fallback `~/.local/share/mcpr/mcpr.db`
-//!    - macOS: `~/Library/Application Support/mcpr/mcpr.db`
-//!    - Windows: `%APPDATA%\mcpr\mcpr.db`
+//! 3. **Default**: `~/.mcpr/store.db` — all mcpr state lives under `~/.mcpr/`.
 //!
 //! The parent directory is created automatically if it doesn't exist.
 
@@ -18,10 +15,7 @@ use std::path::PathBuf;
 const MCPR_DB_ENV: &str = "MCPR_DB";
 
 /// Database filename within the mcpr data directory.
-const DB_FILENAME: &str = "mcpr.db";
-
-/// Application directory name used under the platform data dir.
-const APP_DIR: &str = "mcpr";
+const DB_FILENAME: &str = "store.db";
 
 /// Resolve the database file path.
 ///
@@ -42,12 +36,8 @@ pub fn resolve_db_path(config_path: Option<&str>) -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
 
-    // 3. Platform default — follows OS conventions via the `dirs` crate.
-    //    dirs::data_local_dir() returns:
-    //      Linux:   $XDG_DATA_HOME or ~/.local/share
-    //      macOS:   ~/Library/Application Support
-    //      Windows: %LOCALAPPDATA% (e.g., C:\Users\X\AppData\Local)
-    dirs::data_local_dir().map(|d| d.join(APP_DIR).join(DB_FILENAME))
+    // 3. Default — all mcpr state under ~/.mcpr/
+    dirs::home_dir().map(|h| h.join(".mcpr").join(DB_FILENAME))
 }
 
 /// Ensure the parent directory of the given path exists.
@@ -80,8 +70,8 @@ mod tests {
             "platform default should resolve on dev machines"
         );
         let path = result.unwrap();
-        assert!(path.to_str().unwrap().contains("mcpr"));
-        assert!(path.to_str().unwrap().ends_with("mcpr.db"));
+        assert!(path.to_str().unwrap().contains(".mcpr"));
+        assert!(path.to_str().unwrap().ends_with("store.db"));
     }
 
     #[test]

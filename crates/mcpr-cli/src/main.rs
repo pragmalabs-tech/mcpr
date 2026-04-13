@@ -1,48 +1,21 @@
 //! # mcpr (CLI binary)
 //!
-//! The main mcpr binary: a daemon-style reverse proxy for MCP applications.
-//! Runs as a background daemon by default (`mcpr start`), with CLI commands
-//! for observability (`mcpr proxy logs/stats/slow/sessions/clients`) and
-//! lifecycle management (`mcpr stop/restart/status`).
+//! Two-process architecture:
+//! - **mcprd** (daemon/supervisor): `mcpr start` — no config needed, just manages
+//!   proxy lifecycles and monitors health.
+//! - **proxy** (standalone): `mcpr proxy run <config>` — snapshots config, forks to
+//!   background, runs the MCP gateway. Self-terminates if the daemon dies.
 //!
-//! ## Responsibilities
-//!
-//! - **Configuration** (`config`): TOML config file loading, CLI subcommand
-//!   routing (clap), and config validation.
-//!
-//! - **Daemon management** (`daemon`): Background process lifecycle — fork,
-//!   PID file, readiness signaling, graceful stop via SIGTERM.
-//!
-//! - **Proxy orchestration** (`proxy`): Catch-all HTTP handler that dispatches
-//!   classified requests to the appropriate handler (MCP, widgets, passthrough).
-//!
-//! - **MCP request handling** (`mcp_handler`): Processes MCP JSON-RPC POST and
-//!   SSE requests — forwards to upstream, rewrites responses, tracks sessions,
-//!   and records events to SQLite store.
-//!
-//! - **CLI commands** (`commands`): Handlers for `mcpr proxy logs/slow/stats/
-//!   sessions/clients` and `mcpr store stats/vacuum`. Read-only queries
-//!   against the SQLite store — work without a running daemon.
-//!
-//! - **Widget serving** (`widgets`): Serves widget HTML pages, static assets,
-//!   and widget list endpoints from local filesystem or upstream proxy.
-//!
-//! - **Passthrough** (`passthrough`): Forwards non-MCP requests (OAuth, .well-known,
-//!   etc.) to upstream with URL rewriting.
-//!
-//! - **Event bus** (`event_bus`): Routes `ProxyEvent`s to registered sinks
-//!   (stderr, SQLite, cloud). Single pipeline replaces the old logger + emitter.
-//!
-//! - **Admin endpoints** (`admin`): Health check and readiness probe endpoints
-//!   on a separate port for orchestration (k8s, docker, etc.).
+//! All state lives under `~/.mcpr/`.
 //!
 //! ## Module Structure
 //!
 //! ```text
 //! mcpr-cli/src/
-//! +-- main.rs         # Entry point, daemon dispatch, gateway startup
+//! +-- main.rs         # Entry point, daemon/proxy dispatch
 //! +-- config.rs       # CLI args, TOML config, subcommands
-//! +-- daemon.rs       # Daemon lifecycle (fork, PID file, signals)
+//! +-- daemon.rs       # mcprd supervisor (fork, PID file, health monitor)
+//! +-- proxy_lock.rs   # Per-proxy lockfiles under ~/.mcpr/proxies/
 //! +-- commands.rs     # CLI query command handlers
 //! +-- proxy.rs        # Request dispatcher (classify -> handle)
 //! +-- mcp_handler.rs  # MCP POST/SSE handling, session tracking, store events
@@ -155,19 +128,13 @@ fn main() {
     // Daemonize before tokio starts (if needed).
     // Tokio's IO driver uses kqueue/epoll fds that don't survive fork().
     let ready_fd: Option<i32> = match &action {
-        CliAction::Start {
-            foreground: true,
-            mode: Mode::Gateway(_),
-        } => {
-            // Foreground mode — stop any existing daemon so the port is free.
+        CliAction::Start { foreground: true } => {
+            // Foreground mode — stop any existing daemon first.
             #[cfg(unix)]
             daemon::stop_daemon_if_running();
             None
         }
-        CliAction::Start {
-            foreground: false,
-            mode: Mode::Gateway(_),
-        } => {
+        CliAction::Start { foreground: false } => {
             #[cfg(unix)]
             {
                 daemon::ensure_not_running();
@@ -184,10 +151,7 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        CliAction::Restart {
-            mode: Mode::Gateway(_),
-            ..
-        } => {
+        CliAction::Restart { .. } => {
             #[cfg(unix)]
             {
                 // Collect names of currently running proxies so we can re-launch them
@@ -237,6 +201,12 @@ fn main() {
         } => {
             #[cfg(unix)]
             {
+                // Check that the daemon is running.
+                if !matches!(daemon::check_status(), daemon::DaemonStatus::Running(_)) {
+                    eprintln!("error: daemon not running — run `mcpr start` first");
+                    std::process::exit(1);
+                }
+
                 let proxy_name = &cfg.name;
 
                 // Conflict detection.
@@ -293,19 +263,16 @@ fn main() {
 
 async fn async_main(action: CliAction, ready_fd: Option<i32>) {
     match action {
-        CliAction::Start { mode, foreground } => match mode {
-            Mode::Relay(cfg) => {
-                if !foreground {
-                    // Daemon mode for relay — already forked above, just run.
-                    eprintln!("error: relay mode requires --foreground");
-                    std::process::exit(1);
-                }
-                mcpr_tunnel::relay::start_relay(cfg).await;
+        CliAction::Start { .. } => {
+            // Daemon supervisor — no config, no proxy. Already forked in main().
+            #[cfg(unix)]
+            daemon::run_supervisor(ready_fd).await;
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: daemon mode not supported on this platform");
+                std::process::exit(1);
             }
-            Mode::Gateway(cfg) => {
-                run_gateway(*cfg, ready_fd).await;
-            }
-        },
+        }
         CliAction::Stop => {
             // Stop all running proxies before stopping the daemon.
             let stopped = proxy_lock::stop_all_proxies();
@@ -320,32 +287,29 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 std::process::exit(1);
             }
         }
-        CliAction::Restart {
-            mode,
-            restart_proxies,
-        } => match mode {
-            Mode::Relay(_) => {
-                eprintln!("error: relay mode does not support daemon mode");
+        CliAction::Restart { restart_proxies } => {
+            // Spawn a background task to re-launch previously running proxies
+            // after the supervisor has had time to start up.
+            if !restart_proxies.is_empty() {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    for name in &restart_proxies {
+                        match commands::start_one_proxy(name) {
+                            Ok(_) => eprintln!("Restarted proxy \"{}\".", name),
+                            Err(e) => eprintln!("Failed to restart proxy \"{}\": {}", name, e),
+                        }
+                    }
+                });
+            }
+            // Daemonize already happened in main() before tokio started.
+            #[cfg(unix)]
+            daemon::run_supervisor(ready_fd).await;
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: daemon mode not supported on this platform");
                 std::process::exit(1);
             }
-            Mode::Gateway(cfg) => {
-                // Spawn a background task to re-launch previously running proxies
-                // after the gateway has had time to start up.
-                if !restart_proxies.is_empty() {
-                    tokio::spawn(async move {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        for name in &restart_proxies {
-                            match commands::start_one_proxy(name) {
-                                Ok(_) => eprintln!("Restarted proxy \"{}\".", name),
-                                Err(e) => eprintln!("Failed to restart proxy \"{}\": {}", name, e),
-                            }
-                        }
-                    });
-                }
-                // Daemonize already happened in main() before tokio started.
-                run_gateway(*cfg, ready_fd).await;
-            }
-        },
+        }
         CliAction::Status => {
             #[cfg(unix)]
             daemon::print_status();
@@ -417,7 +381,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
             }
             Mode::Gateway(cfg) => {
                 // Already forked in main(). Run gateway with proxy lockfile semantics.
-                run_gateway_proxy(*cfg, ready_fd, &config_path).await;
+                run_gateway_inner(*cfg, ready_fd, config_path).await;
             }
         },
         CliAction::Store(cmd) => {
@@ -426,27 +390,10 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
     }
 }
 
-/// Run the gateway proxy. If `ready_fd` is Some, we're in daemon/proxy-run mode —
-/// signal readiness after binding and write the PID/lock file.
-/// If `proxy_config_path` is Some, we're in `mcpr proxy run` mode — use lockfiles.
-/// If None, we're in daemon/foreground mode — use PID files.
+/// Run a proxy gateway process. Called from `mcpr proxy run` only.
+/// The proxy always writes a lockfile and monitors the daemon's health.
 #[allow(unused_variables)]
-async fn run_gateway(cfg: GatewayConfig, ready_fd: Option<i32>) {
-    run_gateway_inner(cfg, ready_fd, None).await;
-}
-
-/// `mcpr proxy run` mode — same as run_gateway but uses lockfiles.
-#[allow(unused_variables)]
-async fn run_gateway_proxy(cfg: GatewayConfig, ready_fd: Option<i32>, config_path: &str) {
-    run_gateway_inner(cfg, ready_fd, Some(config_path.to_string())).await;
-}
-
-#[allow(unused_variables)]
-async fn run_gateway_inner(
-    cfg: GatewayConfig,
-    ready_fd: Option<i32>,
-    proxy_config_path: Option<String>,
-) {
+async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_path: String) {
     let proxy_state_ref = proxy_state::new_shared_state();
 
     let mcp = match cfg.mcp {
@@ -483,23 +430,20 @@ async fn run_gateway_inner(
         .expect("Failed to bind");
     let actual_port = listener.local_addr().unwrap().port();
 
-    // Write PID/lock file so status commands can find this process.
+    // Read daemon PID for the lockfile.
+    #[cfg(unix)]
+    let daemon_pid = daemon::read_pid_file().map(|i| i.pid);
+    #[cfg(not(unix))]
+    let daemon_pid: Option<u32> = None;
+
+    // Write lockfile so status commands can find this process.
     #[cfg(unix)]
     {
-        if let Some(ref config_path) = proxy_config_path {
-            // Proxy-run mode: write lockfile.
-            if let Err(e) = proxy_lock::write_lock(&proxy_name, actual_port, config_path) {
-                eprintln!("error: failed to write lockfile: {e}");
-                std::process::exit(1);
-            }
-        } else {
-            // Daemon/foreground mode: write PID file.
-            if let Err(e) = daemon::write_pid_file(actual_port, &proxy_name) {
-                eprintln!("error: failed to write PID file: {e}");
-                std::process::exit(1);
-            }
+        if let Err(e) = proxy_lock::write_lock(&proxy_name, actual_port, &config_path, daemon_pid) {
+            eprintln!("error: failed to write lockfile: {e}");
+            std::process::exit(1);
         }
-        // Signal readiness to the parent process (daemon or proxy-run fork).
+        // Signal readiness to the parent process.
         if let Some(fd) = ready_fd {
             daemon::signal_ready(fd);
         }
@@ -736,6 +680,23 @@ async fn run_gateway_inner(
         let _ = shutdown_trigger.send(true);
     });
 
+    // Daemon watchdog: if the daemon dies, shut down this proxy.
+    if let Some(dpid) = daemon_pid {
+        let watchdog_shutdown = shutdown_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                #[cfg(unix)]
+                if !daemon::is_process_alive(dpid) {
+                    eprintln!("[mcpr] daemon died, shutting down...");
+                    IS_DRAINING.store(true, Ordering::SeqCst);
+                    let _ = watchdog_shutdown.send(true);
+                    break;
+                }
+            }
+        });
+    }
+
     // Wait for shutdown signal (SIGTERM/SIGINT).
     // TUI is not started here — it will be available via `mcpr proxy view`.
     let _ = shutdown_rx.changed().await;
@@ -747,15 +708,8 @@ async fn run_gateway_inner(
     // Flush all event sinks (stderr, sqlite, cloud).
     event_bus_handle.shutdown().await;
 
-    // Clean up PID/lock file.
-    #[cfg(unix)]
-    {
-        if proxy_config_path.is_some() {
-            proxy_lock::remove_lock(&proxy_name_for_shutdown);
-        } else {
-            daemon::remove_pid_file();
-        }
-    }
+    // Clean up lockfile.
+    proxy_lock::remove_lock(&proxy_name_for_shutdown);
 
     eprintln!("[mcpr] Shutdown complete.");
 }

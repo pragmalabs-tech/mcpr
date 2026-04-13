@@ -17,6 +17,9 @@ pub struct LockInfo {
     pub port: u16,
     pub started_at: i64,
     pub config_path: String,
+    /// PID of the daemon that was running when this proxy started.
+    /// `None` for lockfiles written before this field was added.
+    pub daemon_pid: Option<u32>,
 }
 
 /// Current state of a proxy lock.
@@ -82,13 +85,19 @@ pub fn check_lock(name: &str) -> LockStatus {
 }
 
 /// Write a lockfile for a proxy after successful port bind.
-pub fn write_lock(name: &str, port: u16, config_path: &str) -> std::io::Result<()> {
+pub fn write_lock(
+    name: &str,
+    port: u16,
+    config_path: &str,
+    daemon_pid: Option<u32>,
+) -> std::io::Result<()> {
     let dir = proxy_dir(name);
     fs::create_dir_all(&dir)?;
 
     let pid = std::process::id();
     let started_at = chrono::Utc::now().timestamp();
-    let content = format!("{pid}\n{port}\n{started_at}\n{config_path}\n");
+    let dpid = daemon_pid.map(|p| p.to_string()).unwrap_or_default();
+    let content = format!("{pid}\n{port}\n{started_at}\n{config_path}\n{dpid}\n");
 
     fs::write(lock_path(name), content)
 }
@@ -133,6 +142,16 @@ pub fn list_proxies() -> Vec<(String, LockStatus)> {
 
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
+}
+
+/// Check if the daemon that this proxy was started under is still alive.
+/// Returns `true` if the daemon PID is present and the process is running,
+/// or if no daemon PID is recorded (backward compat).
+pub fn check_daemon_alive(daemon_pid: Option<u32>) -> bool {
+    match daemon_pid {
+        Some(pid) => is_process_alive(pid),
+        None => true, // No daemon PID recorded — assume okay.
+    }
 }
 
 /// Stop a running proxy by name: send SIGTERM and wait for exit.
@@ -272,12 +291,15 @@ fn read_lock_file(path: &Path) -> Option<LockInfo> {
     let port: u16 = lines.next()?.parse().ok()?;
     let started_at: i64 = lines.next()?.parse().ok()?;
     let config_path: String = lines.next()?.to_string();
+    // Optional 5th line: daemon PID (backward compat with old lockfiles).
+    let daemon_pid: Option<u32> = lines.next().and_then(|s| s.parse().ok());
 
     Some(LockInfo {
         pid,
         port,
         started_at,
         config_path,
+        daemon_pid,
     })
 }
 

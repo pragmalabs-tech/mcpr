@@ -1,24 +1,27 @@
 # CLI Reference
 
-The CLI **manages the daemon process** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](CONFIGURATION.md).
+The CLI **manages the daemon and proxy processes** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](CONFIGURATION.md). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full two-process model.
 
 Two responsibilities:
-1. **Daemon lifecycle** — start, stop, restart, check status.
+1. **Lifecycle** — start/stop the daemon supervisor and individual proxies.
 2. **Query & observe** — read request logs, per-tool metrics, sessions, schema, and storage stats from SQLite. These commands work even when the daemon isn't running.
 
 ## Quick Start
 
 ```bash
-# Start the proxy daemon
+# Start the daemon supervisor
 mcpr start
 
-# Check it's running
+# Launch a proxy
+mcpr proxy run mcpr.toml
+
+# Check status
 mcpr status
 
 # View request logs
 mcpr proxy logs
 
-# Stop
+# Stop everything
 mcpr stop
 ```
 
@@ -28,16 +31,17 @@ mcpr stop
 
 | Command | Description |
 |---------|-------------|
-| `mcpr start` | Start the proxy as a background daemon |
+| `mcpr start` | Start the daemon supervisor (no config needed) |
 | `mcpr start --foreground` | Start in foreground (for Docker, systemd, debugging) |
-| `mcpr stop` | Stop the running daemon (graceful SIGTERM) |
-| `mcpr restart` | Stop + start the daemon |
-| `mcpr status` | Show PID, port, uptime, proxy name |
+| `mcpr stop` | Stop all proxies + daemon (graceful SIGTERM) |
+| `mcpr restart` | Stop + start, re-launching previously running proxies |
+| `mcpr status` | Show daemon PID/uptime + list all proxies |
 
-`mcpr start` reads `mcpr.toml` from the current directory (or parent directories), starts the proxy in the background, and exits. The daemon writes logs to `~/.local/share/mcpr/daemon.log` (Linux) or `~/Library/Application Support/mcpr/daemon.log` (macOS).
+`mcpr start` launches the daemon supervisor and exits. No config file is needed — the daemon is a pure supervisor that monitors proxy health. Logs go to `~/.mcpr/mcprd.log`.
 
 ```bash
-mcpr start              # reads mcpr.toml, starts daemon
+mcpr start              # start daemon, no config needed
+mcpr proxy run app.toml # then launch proxies
 ```
 
 ### Proxy Lifecycle
@@ -74,7 +78,7 @@ mcpr proxy start localhost-9000
 
 ### Query & Observe
 
-All `mcpr proxy` commands read the local SQLite store directly — they work even when the daemon isn't running. The `[name]` argument is optional when only one proxy is running (auto-detected from the daemon's PID file).
+All `mcpr proxy` commands read the local SQLite store directly — they work even when the daemon isn't running. Use `--proxy <name>` to scope to a specific proxy, or omit it to show data across all proxies.
 
 #### `mcpr proxy logs [name]`
 
@@ -324,10 +328,7 @@ TOOL USAGE — localhost-9000 — last 7d   2/5 unused
 
 ### Storage
 
-mcpr stores all request data in a local SQLite database. Location:
-
-- Linux: `~/.local/share/mcpr/mcpr.db`
-- macOS: `~/Library/Application Support/mcpr/mcpr.db`
+mcpr stores all request data in a local SQLite database at `~/.mcpr/store.db`.
 
 #### `mcpr store stats`
 
@@ -391,21 +392,23 @@ All `--since`, `--before`, and `--threshold` flags accept human-friendly duratio
 
 ## Proxy Name
 
-The proxy name is used in all `mcpr proxy` commands to identify which proxy's data to query. It is:
+The proxy name is used in all `mcpr proxy` commands to identify which proxy's data to query. It is derived from (in order):
 
-1. **Auto-detected** from the running daemon when omitted (single-proxy mode)
-2. Derived from the upstream MCP URL (e.g., `http://localhost:9000` becomes `localhost-9000`)
-3. Overridable via `[store] name = "api-server"` in `mcpr.toml`
+1. `name = "my-proxy"` in `mcpr.toml`
+2. The config filename stem (e.g., `search.toml` → `search`)
+3. `"default"` if the config is `mcpr.toml` or unspecified
 
-Run `mcpr status` to see the proxy name of the running daemon.
+Run `mcpr status` or `mcpr proxy list` to see proxy names.
 
 ## Files
 
-| File | Location | Purpose |
-|------|----------|---------|
-| PID file | `~/.local/share/mcpr/mcpr.pid` | Daemon process tracking |
-| Daemon log | `~/.local/share/mcpr/daemon.log` | Daemon stdout/stderr |
-| Database | `~/.local/share/mcpr/mcpr.db` | Request storage (SQLite) |
-| Config | `./mcpr.toml` (search up) | Proxy configuration |
+All state lives under `~/.mcpr/`. See [ARCHITECTURE.md](ARCHITECTURE.md) for full details.
 
-macOS uses `~/Library/Application Support/mcpr/` instead of `~/.local/share/mcpr/`.
+| File | Purpose |
+|------|---------|
+| `~/.mcpr/mcprd.pid` | Daemon process tracking |
+| `~/.mcpr/mcprd.log` | Daemon stdout/stderr |
+| `~/.mcpr/store.db` | Request storage (SQLite) |
+| `~/.mcpr/proxies/{name}/config.toml` | Config snapshot (immutable after creation) |
+| `~/.mcpr/proxies/{name}/lock` | Proxy PID, port, timestamp, daemon PID |
+| `~/.mcpr/proxies/{name}/proxy.log` | Proxy stdout/stderr |

@@ -1,22 +1,21 @@
-//! Daemon process management — start, stop, restart, status.
+//! Daemon (mcprd) supervisor process management.
 //!
-//! mcpr can run as a background daemon (like nginx). This module handles:
-//! - Daemonization via double-fork (Unix only).
-//! - PID file management for tracking the running daemon.
-//! - Readiness signaling so `mcpr start` waits until the port is bound.
-//! - Graceful stop via SIGTERM.
+//! The daemon is a pure supervisor — it owns no proxy connections, no HTTP
+//! server, and needs no config file. It:
+//! - Daemonizes via double-fork (Unix only).
+//! - Writes `~/.mcpr/mcprd.pid`.
+//! - Monitors proxy health every 10 s.
+//! - On SIGTERM: stops all proxies → removes PID → exits.
 //!
 //! # PID file format
 //!
-//! Three lines, plain text:
+//! Two lines, plain text:
 //! ```text
 //! <pid>
 //! <start_unix_timestamp>
-//! <port>
 //! ```
 //!
-//! Location: `~/.local/share/mcpr/mcpr.pid` (Linux) or
-//! `~/Library/Application Support/mcpr/mcpr.pid` (macOS).
+//! Location: `~/.mcpr/mcprd.pid`.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -28,20 +27,16 @@ use nix::sys::signal::{self, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
 
-/// Application directory name under the platform data dir.
-const APP_DIR: &str = "mcpr";
 /// PID file name.
-const PID_FILE: &str = "mcpr.pid";
+const PID_FILE: &str = "mcprd.pid";
 /// Daemon log file name (stdout/stderr redirect).
-const DAEMON_LOG: &str = "daemon.log";
+const DAEMON_LOG: &str = "mcprd.log";
 
 /// Information stored in the PID file.
 #[derive(Debug)]
 pub struct DaemonInfo {
     pub pid: u32,
     pub started_at: i64,
-    pub port: u16,
-    pub proxy_name: String,
 }
 
 /// Current state of the daemon.
@@ -56,21 +51,21 @@ pub enum DaemonStatus {
 
 // ── Path resolution ────────────────────────────────────────────────────
 
-/// Resolve the directory for PID file and daemon log.
-fn data_dir() -> PathBuf {
-    dirs::data_local_dir()
+/// Central mcpr state directory: `~/.mcpr/`.
+fn mcpr_dir() -> PathBuf {
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(APP_DIR)
+        .join(".mcpr")
 }
 
 /// Path to the PID file.
 pub fn pid_file_path() -> PathBuf {
-    data_dir().join(PID_FILE)
+    mcpr_dir().join(PID_FILE)
 }
 
 /// Path to the daemon log file (stdout/stderr redirect).
 pub fn daemon_log_path() -> PathBuf {
-    data_dir().join(DAEMON_LOG)
+    mcpr_dir().join(DAEMON_LOG)
 }
 
 // ── PID file operations ────────────────────────────────────────────────
@@ -82,25 +77,18 @@ pub fn read_pid_file() -> Option<DaemonInfo> {
 
     let pid: u32 = lines.next()?.parse().ok()?;
     let started_at: i64 = lines.next()?.parse().ok()?;
-    let port: u16 = lines.next()?.parse().ok()?;
-    let proxy_name: String = lines.next().unwrap_or("unknown").to_string();
 
-    Some(DaemonInfo {
-        pid,
-        started_at,
-        port,
-        proxy_name,
-    })
+    Some(DaemonInfo { pid, started_at })
 }
 
 /// Write the PID file with current process info.
-pub fn write_pid_file(port: u16, proxy_name: &str) -> std::io::Result<()> {
-    let dir = data_dir();
+pub fn write_pid_file() -> std::io::Result<()> {
+    let dir = mcpr_dir();
     fs::create_dir_all(&dir)?;
 
     let pid = std::process::id();
     let started_at = chrono::Utc::now().timestamp();
-    let content = format!("{pid}\n{started_at}\n{port}\n{proxy_name}\n");
+    let content = format!("{pid}\n{started_at}\n");
 
     fs::write(pid_file_path(), content)
 }
@@ -296,12 +284,9 @@ fn wait_for_readiness(read_fd: std::os::unix::io::RawFd, _timeout: Duration) {
         Ok((buf, Ok(1))) if buf[0] == b'1' => {
             // Daemon started successfully.
             if let Some(info) = read_pid_file() {
-                eprintln!(
-                    "mcpr daemon started (PID: {}, port: {})",
-                    info.pid, info.port
-                );
+                eprintln!("mcprd started (PID: {})", info.pid);
             } else {
-                eprintln!("mcpr daemon started");
+                eprintln!("mcprd started");
             }
             std::process::exit(0);
         }
@@ -361,6 +346,85 @@ pub fn signal_ready(write_fd: std::os::unix::io::RawFd) {
         eprintln!("warning: failed to signal daemon readiness: {e}");
     }
     // File is dropped here, closing the pipe.
+}
+
+// ── Supervisor ─────────────────────────────────────────────────────────
+
+/// Run the daemon supervisor loop.
+///
+/// The supervisor writes the PID file, signals readiness, then loops
+/// forever monitoring proxy health and waiting for SIGTERM/SIGINT.
+#[cfg(unix)]
+pub async fn run_supervisor(ready_fd: Option<i32>) {
+    // Write PID file.
+    if let Err(e) = write_pid_file() {
+        eprintln!("error: failed to write PID file: {e}");
+        std::process::exit(1);
+    }
+
+    // Signal readiness to the parent process.
+    if let Some(fd) = ready_fd {
+        signal_ready(fd);
+    }
+
+    eprintln!("[mcprd] supervisor started (PID: {})", std::process::id());
+
+    // Create a shutdown signal that responds to SIGTERM and SIGINT.
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Signal handler task.
+    let shutdown_trigger = shutdown_tx.clone();
+    tokio::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        let ctrl_c = tokio::signal::ctrl_c();
+        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = sigterm.recv() => {},
+        }
+        eprintln!("[mcprd] received shutdown signal");
+        let _ = shutdown_trigger.send(true);
+    });
+
+    // Health monitor task: check proxy lockfiles every 10s.
+    let health_shutdown = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        let mut rx = health_shutdown;
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {},
+                _ = rx.changed() => break,
+            }
+
+            let proxies = super::proxy_lock::list_proxies();
+            for (name, status) in &proxies {
+                if let super::proxy_lock::LockStatus::Stale(info) = status {
+                    eprintln!(
+                        "[mcprd] proxy \"{}\" (PID: {}) is dead, cleaning up lockfile",
+                        name, info.pid
+                    );
+                    super::proxy_lock::remove_lock(name);
+                }
+            }
+        }
+    });
+
+    // Wait for shutdown signal.
+    let _ = shutdown_rx.changed().await;
+
+    // Stop all proxies.
+    let stopped = super::proxy_lock::stop_all_proxies();
+    if !stopped.is_empty() {
+        eprintln!(
+            "[mcprd] stopped {} proxy(ies): {}",
+            stopped.len(),
+            stopped.join(", ")
+        );
+    }
+
+    // Clean up.
+    remove_pid_file();
+    eprintln!("[mcprd] shutdown complete.");
 }
 
 // ── Stop command ───────────────────────────────────────────────────────
@@ -430,7 +494,7 @@ fn wait_for_exit(pid: u32, timeout: Duration) {
 
 // ── Status command ─────────────────────────────────────────────────────
 
-/// Print daemon status and exit.
+/// Print daemon status and proxy listing, then exit.
 pub fn print_status() {
     match check_status() {
         DaemonStatus::Running(info) => {
@@ -439,22 +503,34 @@ pub fn print_status() {
             let minutes = (uptime % 3600) / 60;
             let seconds = uptime % 60;
 
-            println!("mcpr daemon is running");
-            println!("  Proxy:  {}", info.proxy_name);
-            println!("  PID:    {}", info.pid);
-            println!("  Port:   {}", info.port);
-            println!("  Uptime: {}h {}m {}s", hours, minutes, seconds);
+            println!(
+                "mcprd running (PID: {}, uptime: {}h {}m {}s)",
+                info.pid, hours, minutes, seconds
+            );
             println!("  PID file: {}", pid_file_path().display());
             println!("  Log file: {}", daemon_log_path().display());
-            println!();
-            println!(
-                "  Use `mcpr proxy logs {}` to view request logs.",
-                info.proxy_name
-            );
-            println!(
-                "  Use `mcpr proxy stats {}` to view metrics.",
-                info.proxy_name
-            );
+
+            // Show proxy listing.
+            let proxies = super::proxy_lock::list_proxies();
+            let running: Vec<_> = proxies
+                .iter()
+                .filter(|(_, s)| matches!(s, super::proxy_lock::LockStatus::Held(_)))
+                .collect();
+
+            if running.is_empty() {
+                println!("\n  0 proxies running.");
+                println!("  Use `mcpr proxy run <config>` to start a proxy.");
+            } else {
+                println!("\n  {} proxy(ies) running:", running.len());
+                for (name, status) in &running {
+                    if let super::proxy_lock::LockStatus::Held(lock) = status {
+                        println!("    {} (PID: {}, port: {})", name, lock.pid, lock.port);
+                    }
+                }
+                println!();
+                println!("  Use `mcpr proxy logs` to view request logs.");
+                println!("  Use `mcpr proxy stats` to view metrics.");
+            }
         }
         DaemonStatus::Stale(info) => {
             eprintln!(
@@ -475,14 +551,11 @@ pub fn print_status() {
 pub fn ensure_not_running() {
     match check_status() {
         DaemonStatus::Running(info) => {
-            eprintln!(
-                "Stopping existing mcpr daemon (PID: {}, port: {})...",
-                info.pid, info.port
-            );
+            eprintln!("Stopping existing mcprd (PID: {})...", info.pid);
             send_sigterm(info.pid);
             wait_for_exit(info.pid, Duration::from_secs(10));
             remove_pid_file();
-            eprintln!("Stopped. Starting with new configuration...");
+            eprintln!("Stopped. Starting new daemon...");
         }
         DaemonStatus::Stale(_) => {
             remove_pid_file();
@@ -502,7 +575,7 @@ mod tests {
 
         let pid = std::process::id();
         let ts = chrono::Utc::now().timestamp();
-        let content = format!("{pid}\n{ts}\n8080\ntest-proxy\n");
+        let content = format!("{pid}\n{ts}\n");
         std::fs::write(&pid_path, &content).unwrap();
 
         // Parse it the same way read_pid_file does.
@@ -510,25 +583,9 @@ mod tests {
         let mut lines = read.lines();
         let read_pid: u32 = lines.next().unwrap().parse().unwrap();
         let read_ts: i64 = lines.next().unwrap().parse().unwrap();
-        let read_port: u16 = lines.next().unwrap().parse().unwrap();
-        let read_name = lines.next().unwrap_or("unknown");
 
         assert_eq!(read_pid, pid);
         assert_eq!(read_ts, ts);
-        assert_eq!(read_port, 8080);
-        assert_eq!(read_name, "test-proxy");
-    }
-
-    #[test]
-    fn pid_file_missing_name_defaults_to_unknown() {
-        // Old 3-line format without proxy name.
-        let content = "12345\n1700000000\n3000\n";
-        let mut lines = content.lines();
-        let _pid: u32 = lines.next().unwrap().parse().unwrap();
-        let _ts: i64 = lines.next().unwrap().parse().unwrap();
-        let _port: u16 = lines.next().unwrap().parse().unwrap();
-        let name = lines.next().unwrap_or("unknown");
-        assert_eq!(name, "unknown");
     }
 
     #[test]
