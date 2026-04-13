@@ -4,11 +4,27 @@
 [![codecov](https://codecov.io/gh/cptrodgers/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/cptrodgers/mcpr)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**The proxy for MCP servers.**
+**A reverse proxy for MCP servers.** Works like nginx or Kong, but at the MCP protocol level — it parses JSON-RPC messages to route, observe, authenticate, and secure MCP traffic.
 
-mcpr is a protocol-aware proxy that sits in front of your MCP server (think nginx, kong, etc). Written in Rust with under 1ms overhead. AI clients (ChatGPT, Claude, VS Code, Cursor) connect to mcpr instead of the server directly. It parses every JSON-RPC message at the protocol level — not as raw HTTP — so it can route, observe, and secure MCP traffic in ways generic proxies can't.
+```
+AI Client (ChatGPT, Claude, Cursor)
+        │
+        ▼
+      mcpr       ← routes, observes, authenticates, secures
+        │
+        ▼
+  Your MCP Server
+```
 
-Status: actively developing but production-ready. I'm using it for my 2 MCP apps.
+```bash
+curl -fsSL https://mcpr.app/install.sh | sh
+```
+
+```toml
+# mcpr.toml
+mcp = "http://localhost:9000"
+port = 3000
+```
 
 ```bash
 mcpr start
@@ -18,147 +34,86 @@ mcpr start
 
 ---
 
-## What It Does
+## Why it exists
 
-- **Routing** — MCP-aware reverse proxy at every level: tool calls, resource reads, widget assets, session handshakes. Route to multiple upstream MCP servers (coming soon), run multiple proxies in one daemon.
-- **Per-tool care** — Each tool gets its own metrics: call count, error rate, p95/max latency, bytes in/out. Route, track, and diagnose at the individual tool level.
-- **Widgets & edge config** — Understands MCP Apps (ChatGPT Apps, Claude connectors). Rewrites CSP domain arrays per platform automatically. Change CSP, OAuth URLs, and domain settings at the proxy — no server redeploy.
-- **Auth** — OAuth 2.1 and API key support at the MCP standard level. No need to handle auth flows in your application code. *(coming soon)*
-- **Security** — Request validation, IP whitelisting, per-tool ACLs, and schema-level enforcement. Control what each client can access. *(coming soon)*
-- **Observe** — Structured events for every request: tool name, latency, status, error codes, bytes, session ID. Query locally via CLI, no external dependencies.
+General-purpose proxies like nginx and Kong operate at the HTTP level. mcpr operates at the MCP level — it parses JSON-RPC message bodies and extracts MCP-specific fields (method name, tool name, session ID, response status) from each request.
 
-## Install
+This enables per-tool metrics, schema change tracking, widget CSP rewriting, and MCP-spec OAuth — built in, not through plugins or custom configuration.
 
-```bash
-curl -fsSL https://mcpr.app/install.sh | sh
-```
+---
 
-## Routing
+## Route
 
-mcpr parses every JSON-RPC 2.0 message and classifies MCP methods for routing, observability, and CSP rewriting.
-
-### Protocol-level routing
-
-JSON-RPC requests go to your MCP backend. Everything else (HTML, JS, CSS, images) goes to your widget server. This is protocol-level detection, not path matching.
+mcpr inspects each JSON-RPC body to classify the MCP method. Requests route to the MCP backend. Non-JSON-RPC requests (HTML, JS, CSS, images) route to the widget server if configured.
 
 ```toml
 mcp = "http://localhost:9000"
-widgets = "http://localhost:4444"
+widgets = "http://localhost:4444" # For MCP Apps
 ```
 
-### Supported MCP methods
+| Category | Methods |
+|----------|---------|
+| **Lifecycle** | `initialize`, `notifications/initialized`, `ping` |
+| **Tools** | `tools/list`, `tools/call`, `notifications/tools/list_changed` |
+| **Resources** | `resources/list`, `resources/read`, `resources/subscribe`, `resources/unsubscribe` |
+| **Prompts** | `prompts/list`, `prompts/get` |
+| **Utility** | `logging/setLevel`, `completion/complete`, `notifications/cancelled`, `notifications/progress` |
 
-| Category | Methods | Proxy Behavior |
-|----------|---------|----------------|
-| **Lifecycle** | `initialize`, `notifications/initialized`, `ping` | Extracts client info (name, version, platform). Tracks session state. |
-| **Tools** | `tools/list`, `tools/call`, `notifications/tools/list_changed` | **CSP rewriting** on responses. Extracts tool name for per-tool metrics. |
-| **Resources** | `resources/list`, `resources/templates/list`, `resources/read`, `resources/subscribe`, `resources/unsubscribe` | **CSP rewriting** on responses. Extracts resource URI for logging. |
-| **Prompts** | `prompts/list`, `prompts/get` | Extracts prompt name for logging. |
-| **Utility** | `logging/setLevel`, `completion/complete`, `notifications/cancelled`, `notifications/progress` | Extracts request IDs and progress tokens. |
+Unrecognized methods pass through unchanged.
 
-Unknown methods are forwarded as-is — mcpr never blocks traffic. See [docs/SUPPORTED_MCP_METHODS.md](docs/SUPPORTED_MCP_METHODS.md) for the full reference.
+### Widget CSP
 
-## Observability
+MCP Apps (ChatGPT Apps, Claude connectors) render widgets in sandboxed iframes with CSP rules. ChatGPT reads `openai/widgetCSP`, Claude reads `ui.csp`. Each platform interprets domain lists differently.
 
-Every MCP request is recorded to a local SQLite store — tool name, latency, status, error codes, request/response sizes, session ID. Query anytime, no running daemon needed:
+mcpr rewrites CSP domain arrays in `tools/list`, `resources/list`, and `resources/read` JSON-RPC responses. It replaces localhost URLs with the proxy's public domain, adds configured extra domains, and adapts the CSP format to match the connecting platform.
 
-### Per-Tool Health Dashboard
+```toml
+[csp]
+mode = "extend"                         # "extend" (default) or "override"
+domains = ["api.stripe.com", "cdn.example.com"]
+```
+
+---
+
+## Observe
+
+mcpr records every MCP request to a local SQLite database — tool name, latency, status, error code, request/response size, session ID. All `mcpr proxy` commands read from this store and work whether or not the daemon is running.
+
+### Per-tool metrics
 
 ```bash
 $ mcpr proxy stats
 STATS — localhost-9000 — last 1h   Total: 1,284 calls   Errors: 2.3%
 
-  TOOL                    CALLS      AVG      P95      MAX   ERRORS   BYTES IN  BYTES OUT  AVG SIZE
-  get_weather               412    45ms    120ms    340ms      0%     48.2 KB    196.8 KB      610
-  search_docs               389    82ms    210ms    890ms     1.5%    92.1 KB    1.2 MB      3.4 KB
-  run_query                 156   240ms    890ms   2.40s      8.3%   128.4 KB    2.8 MB     19.2 KB
-  <initialize>              142    12ms     28ms     65ms      0%      8.1 KB     14.2 KB      157
-  <resources/read>           98    35ms     95ms    180ms      0%     12.0 KB    456.0 KB    4.8 KB
-  <prompts/get>              87    18ms     42ms     78ms      0%      4.8 KB     28.4 KB      381
+  TOOL                  CALLS      AVG      P95      MAX   ERRORS   BYTES IN  BYTES OUT
+  get_weather             412    45ms    120ms    340ms      0%     48.2 KB    196.8 KB
+  search_docs             389    82ms    210ms    890ms     1.5%    92.1 KB    1.2 MB
+  run_query               156   240ms    890ms   2.40s      8.3%   128.4 KB    2.8 MB
 ```
 
-Every tool gets its own row: call count, avg/p95/max latency, error rate, and bytes at a glance.
-
-### Request Logs
+### Request logs
 
 ```bash
-$ mcpr proxy logs
-TIME                  METHOD                       TOOL                             LATENCY       IN      OUT       ERR  STATUS
-2025-04-10 14:23:01   tools/call                   get_weather                        45ms    120 B    492 B            ok
-2025-04-10 14:23:00   tools/call                   run_query                         1.20s    2.1 KB   48 KB            ok
-2025-04-10 14:22:58   tools/call                   search_docs                       210ms    450 B    8.2 KB  -32601   error  "Method not found"
-2025-04-10 14:22:55   resources/read               —                                  35ms     64 B    1.2 KB           ok
-2025-04-10 14:22:50   initialize                   —                                  12ms    180 B    320 B            ok
+mcpr proxy logs --tool search_docs --status error    # failed calls to search_docs
+mcpr proxy logs --follow                             # live tail (polls every 500ms)
+mcpr proxy logs --session abc123                     # filter by session (prefix match)
+mcpr proxy logs --method tools/call                  # filter by MCP method
+mcpr proxy logs --since 30m --tail 100               # last 30 minutes, 100 rows
 ```
 
-Filter and live-tail:
-
-```bash
-mcpr proxy logs --follow                     # live tail (polls every 500ms)
-mcpr proxy logs --tool get_weather           # filter by tool name
-mcpr proxy logs --method tools/call          # filter by MCP method
-mcpr proxy logs --session abc123             # filter by session (prefix match)
-mcpr proxy logs --status error               # only errors
-mcpr proxy logs --error_code -32601          # filter by JSON-RPC error code
-mcpr proxy logs --since 30m --tail 100       # last 30 minutes, 100 rows
-mcpr proxy logs --json                       # newline-delimited JSON output
-```
-
-### Slow Call Detection
+### Slow calls
 
 ```bash
 $ mcpr proxy slow --threshold 500ms
-TOP SLOW CALLS — localhost-9000 — last 1h (threshold: 500ms)
-
-  TOOL                             LATENCY       SIZE   TIME                   STATUS
-  run_query                         2.40s      51 KB   2025-04-10 14:20:12    ok
-  run_query                         1.80s      38 KB   2025-04-10 14:18:45    ok
-  search_docs                        890ms     9.1 KB   2025-04-10 14:15:33    error
-  run_query                          780ms     22 KB   2025-04-10 14:12:01    ok
-
-  4 calls above threshold in last 1h (avg: 1.47s)
+  TOOL              LATENCY    TIME                   STATUS
+  run_query          2.40s     2025-04-10 14:20:12    ok
+  run_query          1.80s     2025-04-10 14:18:45    ok
+  search_docs         890ms    2025-04-10 14:15:33    error
 ```
 
-```bash
-mcpr proxy slow --threshold 1s --tool run_query   # filter by tool
-mcpr proxy slow --follow                          # live tail slow calls
-```
+### Schema capture
 
-### Sessions & Clients
-
-```bash
-$ mcpr proxy sessions
-SESSIONS — localhost-9000 — last 1h
-
-  SESSION    CLIENT                   STARTED           LAST SEEN        CALLS   ERRS
-  a1b2c3d4   claude-desktop 1.2.0 ●   Apr 10 14:20      just now           45      2
-  e5f6g7h8   cursor 0.48.0 ●          Apr 10 14:15      just now           23      0
-  i9j0k1l2   vscode 1.96.0 ○          Apr 10 13:50      Apr 10 14:10       89      5
-
-  3 sessions total   2 active
-```
-
-```bash
-$ mcpr proxy clients
-CLIENTS — localhost-9000 — last 7d
-
-  CLIENT               VERSION    PLATFORM     SESSIONS    CALLS   ERRORS
-  claude-desktop       1.2.0      claude              8      312       12
-  cursor               0.48.0     cursor              5      198        3
-  vscode               1.96.0     vscode              3      145        8
-
-  3 unique clients   16 sessions total
-```
-
-```bash
-mcpr proxy session a1b2c3d4          # drill into a session (prefix match)
-mcpr proxy sessions --active         # only active sessions
-mcpr proxy sessions --client cursor  # filter by client
-```
-
-### Server Schema
-
-mcpr passively captures what the upstream MCP server exposes — tools, resources, prompts, capabilities — by intercepting discovery responses as they flow through. No extra auth needed.
+mcpr intercepts `tools/list`, `resources/list`, and `prompts/list` responses as they pass through. It stores the server's schema and records each change.
 
 ```bash
 $ mcpr proxy schema
@@ -167,219 +122,183 @@ Capabilities: tools, resources
 Schema: complete
 Last captured: 2026-04-12 14:30:00
 
-── tools/list ──  (captured 2026-04-12 14:30:00)
+── tools/list ──
   Tools (3):
     search_products  —  Search the product catalog by keyword
     get_product      —  Get product details by ID
     create_order     —  Create a new order
-
-── resources/list ──  (captured 2026-04-12 14:30:01)
-  Resources (1):
-    products.csv  —  Full product catalog export
 ```
-
-Track schema changes over time:
 
 ```bash
 $ mcpr proxy schema --changes
-  TIME                  METHOD                       CHANGE                 ITEM
-  2026-04-12 14:30:00   tools/list                   tool_added             send_email
-  2026-04-10 09:15:00   tools/list                   tool_modified          search_products
-  2026-04-08 11:00:00   tools/list                   initial                —
+  TIME                  METHOD        CHANGE           ITEM
+  2026-04-12 14:30:00   tools/list    tool_added       send_email
+  2026-04-10 09:15:00   tools/list    tool_modified    search_products
 ```
+
+`mcpr proxy schema --unused` compares listed tools against actual call logs to find tools that are registered but never called.
+
+### Sessions and clients
 
 ```bash
-mcpr proxy schema --method tools/list   # filter by method
-mcpr proxy schema --json                # machine-readable output
+$ mcpr proxy sessions
+  SESSION    CLIENT                 STARTED         CALLS   ERRS
+  a1b2c3d4   claude-desktop 1.2.0   Apr 10 14:20      45      2
+  e5f6g7h8   cursor 0.48.0          Apr 10 14:15      23      0
+
+$ mcpr proxy clients
+  CLIENT              VERSION    PLATFORM   SESSIONS    CALLS   ERRORS
+  claude-desktop      1.2.0      claude           12    4,201        8
+  cursor              0.44.1     cursor            3      891        0
 ```
 
-See [docs/SCHEMA_CAPTURE.md](docs/SCHEMA_CAPTURE.md) for the full design: how capture works, storage schema, pagination handling, and change detection.
+---
 
-### Proxy Status Overview
+## Authenticate
 
-```bash
-$ mcpr proxy status
-STATUS — localhost-9000 — last 1h
+*Coming soon.*
 
-  Total requests:    1,284
-  Error rate:        2.3%
-  Sessions:          3 total   2 active
+mcpr will handle MCP OAuth 2.1 and API key auth at the proxy layer. The MCP server receives a verified `x-user-id` header instead of implementing its own auth flow.
 
-  TOOL                       CALLS        AVG        P95        MAX     ERR%   BYTES IN  BYTES OUT  AVG SIZE
-  get_weather                  412      45ms      120ms      340ms     0.0%     48.2 KB    196.8 KB      610
-  search_docs                  389      82ms      210ms      890ms     1.5%     92.1 KB    1.2 MB      3.4 KB
-  run_query                    156     240ms      890ms     2.40s      8.3%    128.4 KB    2.8 MB     19.2 KB
+---
 
-  ACTIVE SESSIONS:
-    a1b2c3d4 — claude-desktop 1.2.0 — 45 calls
-    e5f6g7h8 — cursor 0.48.0 — 23 calls
-```
+## Secure
 
-## Widgets & Edge Config
+*Coming soon.*
 
-MCP Apps (ChatGPT Apps, Claude connectors) render widgets in sandboxed iframes with strict CSP. Every platform enforces it differently. mcpr handles this automatically:
+mcpr will provide request validation, per-tool ACLs, and IP whitelisting at the proxy layer.
 
-- Rewrites CSP domain arrays in JSON-RPC response metadata (`tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, `resources/read`)
-- Replaces localhost/upstream URLs with the proxy (tunnel) domain
-- Adds extra domains from config to `connectDomains` and `resourceDomains`
-- Adapts format per platform (ChatGPT uses `openai/widgetCSP`, Claude uses `ui.csp`)
-- Deep-scans the entire response to catch CSP arrays in nested structures
-- Supports two modes: **extend** (keep external domains, strip localhost) or **override** (only configured domains)
+---
 
-Change CSP, OAuth URLs, and domain settings at the proxy — no server redeploy. Zero config in extend mode.
+## Comparison
+
+| | mcpr | FastMCP | mcp-proxy | Kong / Envoy |
+|---|---|---|---|---|
+| **What it is** | Reverse proxy (sits before server) | Framework for building MCP servers | Forward proxy (stdio↔HTTP bridge) | HTTP API gateway |
+| **Parses MCP JSON-RPC** | Yes | Yes (inside the server) | Transport conversion only | No |
+| **Per-tool metrics** | Built-in (SQLite + CLI) | No | No | No (sees HTTP, not tools) |
+| **Schema tracking** | Built-in | No | No | No |
+| **CSP rewriting** | Built-in | No | No | No |
+| **Auth** | OAuth 2.1 at proxy *(coming soon)* | Built-in OAuth (Python/TS servers) | No | HTTP-level auth |
+| **Language** | Rust (single binary) | Python / TypeScript | Python / TypeScript | Go / C++ |
+
+FastMCP is for building MCP servers. mcp-proxy bridges transports on the client side. Kong and Envoy are HTTP gateways. mcpr is a reverse proxy that operates at the MCP protocol level.
+
+---
 
 ## Configuration (`mcpr.toml`)
 
-`mcpr.toml` declares **what the proxy does** — where to route traffic, how to handle CSP, resource limits, tunnel settings. It is the single source of truth for proxy behavior. No CLI flags or env vars needed.
+`mcpr.toml` declares proxy behavior. The CLI manages the daemon process. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
 
 ```toml
-# mcpr.toml — minimal
+# Minimal
 mcp = "http://localhost:9000"
 port = 3000
 ```
 
 ```toml
-# mcpr.toml — full
-mcp = "http://localhost:9000"       # upstream MCP server (required)
-port = 3000                         # proxy port (default: 3000)
-widgets = "http://localhost:4444"   # widget source (URL or file path)
-drain_timeout = 30                  # graceful shutdown seconds (default: 30)
-log_format = "json"                 # "json" (default) or "pretty"
-admin_bind = "127.0.0.1:9901"      # admin API address (or "none" to disable)
-
-# Resource limits
-max_request_body_size = 5242880     # 5 MB (default)
-max_response_body_size = 10485760   # 10 MB (default)
-max_concurrent_upstream = 100       # concurrent upstream requests (default)
-connect_timeout = 5                 # TCP connect timeout seconds (default)
-request_timeout = 30                # total request timeout seconds (default)
-
-[csp]
-mode = "extend"                     # "extend" (default) or "override"
-domains = ["api.stripe.com", "cdn.example.com"]
+# Full
+mcp = "http://localhost:9000"
+widgets = "http://localhost:4444"
+port = 3000
 
 [tunnel]
-enabled = true                      # public HTTPS URL via relay (no ngrok needed)
+enabled = true
 relay_url = "https://tunnel.mcpr.app"
-subdomain = "myapp"                 # → https://myapp.tunnel.mcpr.app
+token = "your-token-here"
+subdomain = "myapp"                     # → https://myapp.tunnel.mcpr.app
+
+[csp]
+mode = "extend"
+domains = ["api.stripe.com", "cdn.example.com"]
+
+[cloud]
+token = "mcpr_xxxxxxxx"
+server = "my-server"
+
+[logging]
+file = true
+dir = "./logs"
+rotation = "daily"
+
+[store]
+# enabled = true                        # default
+# name = "api-server"                   # default: derived from mcp URL
+
+# Resource limits
+max_request_body_size = 5242880         # 5 MB (default)
+max_response_body_size = 10485760       # 10 MB (default)
+max_concurrent_upstream = 100           # default
+connect_timeout = 5                     # seconds (default)
+request_timeout = 30                    # seconds (default)
 ```
 
-See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference including relay mode, cloud sync, and token configuration.
+---
 
 ## CLI
 
-The CLI **manages the daemon process** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's `mcpr.toml`.
+The CLI manages the daemon and queries the local SQLite store. See [docs/CLI.md](docs/CLI.md) for the full reference.
 
-### Daemon lifecycle
+### Daemon
 
 ```
 mcpr start                     Start proxy daemon (background)
 mcpr start --foreground        Start in foreground (Docker/systemd)
-mcpr stop                      Stop the daemon
-mcpr restart                   Restart the daemon
-mcpr status                    Show PID, port, uptime, proxy name
+mcpr stop                      Stop daemon (graceful SIGTERM)
+mcpr restart                   Stop + start
+mcpr status                    PID, port, uptime, proxy name
 ```
 
-### Query & observe (reads local SQLite — no daemon required)
+### Observe
 
 ```
-mcpr proxy logs [name]         Request logs
-  --follow (-f)                  Live tail (poll every 500ms)
-  --tool NAME                    Filter by tool name
-  --method METHOD                Filter by MCP method (e.g. tools/call)
-  --session ID                   Filter by session ID (prefix match)
-  --status STATUS                Filter: ok | error | timeout
-  --error_code CODE              Filter by JSON-RPC error code
-  --since DURATION               Time window (default: 1h)
-  --tail N                       Number of rows (default: 50)
-  --json                         Newline-delimited JSON output
-
-mcpr proxy stats [name]        Per-tool health metrics
-  --since DURATION               Aggregation window (default: 1h)
-  --json                         JSON snapshot
-
-mcpr proxy slow [name]         Slow calls above threshold
-  --threshold DURATION           Minimum latency (default: 500ms)
-  --tool NAME                    Filter by tool
-  --follow (-f)                  Live tail (poll every 1s)
-  --since DURATION               Time window (default: 1h)
-  --limit N                      Max rows (default: 20)
-  --json                         NDJSON output
-
-mcpr proxy status [name]       Proxy overview (requests, errors, active sessions, per-tool breakdown)
-  --since DURATION               Activity window (default: 1h)
-  --json                         JSON output
-
-mcpr proxy sessions [name]     MCP sessions with client info
-  --active                       Only active sessions
-  --client NAME                  Filter by client name
-  --since DURATION               Time window (default: 1h)
-  --limit N                      Max rows (default: 50)
-  --json                         NDJSON output
-
-mcpr proxy session <id>        Drill into a single session (prefix match)
-  --json                         JSON output
-
-mcpr proxy clients [name]      AI client breakdown
-  --since DURATION               Lookback window (default: 7d)
-  --json                         NDJSON output
-
-mcpr proxy schema [name]       Captured MCP server schema (tools, resources, prompts)
-  --changes                      Show change history instead of current schema
-  --unused                       Show tool usage — listed vs actually called
-  --since DURATION               Usage lookback window (default: 7d, with --unused)
-  --method METHOD                Filter by MCP method (e.g. tools/list)
-  --limit N                      Change history rows (default: 50)
-  --json                         JSON output
+mcpr proxy stats [name]        Per-tool metrics (--since, --json)
+mcpr proxy logs [name]         Request log (--follow, --tool, --method, --session, --status, --error_code, --since, --tail, --json)
+mcpr proxy slow [name]         Slow calls (--threshold, --tool, --follow, --since, --limit, --json)
+mcpr proxy status [name]       Overview: requests, error rate, active sessions (--since, --json)
+mcpr proxy sessions [name]     Sessions (--active, --client, --since, --limit, --json)
+mcpr proxy session <id>        Single session detail (prefix match) (--json)
+mcpr proxy clients [name]      Client breakdown (--since, --json)
+mcpr proxy schema [name]       Server schema (--changes, --unused, --method, --since, --limit, --json)
 ```
 
-### Storage maintenance
+`[name]` is optional when one proxy is running — auto-detected from the daemon.
+
+### Storage
 
 ```
 mcpr store stats               Database size and row counts
-mcpr store vacuum              Delete old records, reclaim disk
-  --before DURATION              Delete records older than (required, e.g. 7d)
-  --proxy NAME                   Scope to one proxy
-  --dry-run                      Preview without deleting
+mcpr store vacuum --before 7d  Delete old records (--proxy, --dry-run)
 ```
 
 ### Utility
 
 ```
-mcpr update                    Update mcpr to the latest version
+mcpr update                    Update to latest version
 mcpr validate                  Validate mcpr.toml (--dump to print resolved config)
-mcpr version                   Print version as JSON
+mcpr version                   Print version (JSON)
 ```
 
-`[name]` is optional when one proxy is running — auto-detected from the daemon.
+All query commands support `--json` for piping into `jq` or scripts.
 
-All `--json` flags output machine-readable JSON for piping into `jq`, dashboards, or scripts.
-
-See [docs/CLI.md](docs/CLI.md) for the full reference with examples.
+---
 
 ## Roadmap
 
-Community-driven — we want to hear your feedback to adjust priorities.
-
-- [x] MCP-aware reverse proxy (JSON-RPC routing)
-- [x] MCP method parsing (tools, resources, templates, prompts, notifications, progress)
-- [x] Widget proxy (merge MCP + widget assets)
-- [x] CSP auto-detection and enrichment
-- [x] Edge config (CSP, domains, OAuth URLs)
-- [x] Per-tool health metrics (calls, error%, p95, max, bytes in/out)
-- [x] Daemon mode (`mcpr start/stop/restart/status`)
-- [x] SQLite storage engine with CLI query tools
-- [x] CLI observability (`logs/stats/slow/status/sessions/clients`)
-- [x] SIGTERM graceful drain for Kubernetes
-- [x] Built-in tunnel (public HTTPS, no ngrok)
-- [x] Schema capture — passively capture MCP server tools, resources, prompts with change tracking
-- [ ] OAuth 2.1 and Token Auth
-- [ ] ACL (per-tool access control)
-- [ ] Request validation and schema enforcement
-- [ ] IP whitelisting
-- [ ] Multi-server routing (route to multiple MCP backends)
-- [ ] Rate limiting + circuit breaker
-- [ ] SIGHUP config reload
+- [x] MCP reverse proxy with JSON-RPC routing
+- [x] Per-tool metrics (calls, error%, p50, p95, max, bytes)
+- [x] Schema capture with change tracking
+- [x] Request logs, session tracking, client tracking
+- [x] Widget CSP rewriting (auto-detection, per-platform adaptation)
+- [x] Built-in tunnel (public HTTPS for dev)
+- [x] Cloud dashboard sync ([mcpr.app](https://cloud.mcpr.app))
+- [x] Daemon mode, graceful shutdown
+- [ ] Multi-server routing (one mcpr URL, many MCP backends)
+- [ ] OAuth 2.1 at the proxy (legacy auth, oauth providers or inhouse)
+- [ ] Token API Auth at the proxy
+- [ ] Per-tool access control
+- [ ] Rate limiting and circuit breaker
+- [ ] IP whitelist
 
 ## License
 
