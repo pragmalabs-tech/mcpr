@@ -5,6 +5,7 @@
 use std::io::Write;
 
 use mcpr_core::event::{EventSink, ProxyEvent};
+use mcpr_core::time::format_latency_us;
 
 use crate::config::LogFormat;
 
@@ -35,7 +36,7 @@ impl EventSink for StderrSink {
                 let status = e.status;
                 let method = &e.method;
                 let path = &e.path;
-                let duration = format!(" {}ms", e.latency_ms);
+                let duration = format_latency_us(e.latency_us as i64);
                 let size = e
                     .response_size
                     .map(|b| {
@@ -65,7 +66,7 @@ impl EventSink for StderrSink {
                     })
                     .unwrap_or_default();
 
-                format!("{ts} {method} {status}{size}{duration}{mcp}{detail} {path}")
+                format!("{ts} {method} {status}{size} {duration}{mcp}{detail} {path}")
             }
         };
 
@@ -80,5 +81,62 @@ impl EventSink for StderrSink {
 
     fn name(&self) -> &'static str {
         "stderr"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcpr_core::event::RequestEvent;
+
+    fn make_event(latency_us: u64) -> ProxyEvent {
+        ProxyEvent::Request(RequestEvent {
+            id: "test".into(),
+            ts: 1_700_000_000_000,
+            proxy: "api".into(),
+            session_id: None,
+            method: "POST".into(),
+            path: "/mcp".into(),
+            mcp_method: Some("tools/call".into()),
+            tool: Some("search".into()),
+            status: 200,
+            latency_us,
+            upstream_us: None,
+            request_size: Some(100),
+            response_size: Some(200),
+            error_code: None,
+            error_msg: None,
+            note: "test".into(),
+        })
+    }
+
+    #[test]
+    fn pretty_format_sub_ms_latency() {
+        let sink = StderrSink::new(LogFormat::Pretty);
+        let event = make_event(200);
+        // Just verify it doesn't panic and the sink accepts the event.
+        sink.on_event(&event);
+    }
+
+    #[test]
+    fn pretty_format_ms_latency() {
+        let sink = StderrSink::new(LogFormat::Pretty);
+        let event = make_event(4_200);
+        sink.on_event(&event);
+    }
+
+    #[test]
+    fn pretty_format_seconds_latency() {
+        let sink = StderrSink::new(LogFormat::Pretty);
+        let event = make_event(1_500_000);
+        sink.on_event(&event);
+    }
+
+    #[test]
+    fn json_format_contains_latency_us() {
+        let event = make_event(200);
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"latency_us\":200"));
+        assert!(!json.contains("latency_ms"));
     }
 }

@@ -266,7 +266,7 @@ pub struct ProxySlowArgs {
     #[arg(long)]
     pub proxy: Option<String>,
 
-    /// Minimum latency to include (e.g., 500ms, 1s, 2s). Default: 500ms
+    /// Minimum latency to include (e.g., 200us, 500ms, 1s). Default: 500ms
     #[arg(long, default_value = "500ms")]
     pub threshold: String,
 

@@ -202,7 +202,7 @@ fn flush_batch(
                         r.session_id,
                         r.method,
                         r.tool,
-                        r.latency_ms,
+                        r.latency_us,
                         r.status.as_str(),
                         r.error_code,
                         r.error_msg,
@@ -485,7 +485,7 @@ mod tests {
                 session_id: Some("sess-1".into()),
                 method: "tools/call".into(),
                 tool: Some("search".into()),
-                latency_ms: 142,
+                latency_us: 142,
                 status: RequestStatus::Ok,
                 error_code: None,
                 error_msg: None,
@@ -526,6 +526,56 @@ mod tests {
             .unwrap();
         assert_eq!(calls, 1);
         assert_eq!(errors, 0);
+
+        // Verify latency_us is stored correctly
+        let latency: i64 = conn
+            .query_row(
+                "SELECT latency_us FROM requests WHERE request_id = 'req-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latency, 142, "latency_us should be stored as-is in μs");
+    }
+
+    #[test]
+    fn flush_batch_sub_ms_latency() {
+        let conn = test_db();
+        let mut batch = vec![
+            StoreEvent::Session(SessionEvent {
+                session_id: "sess-sub".into(),
+                proxy: "api".into(),
+                started_at: 1000,
+                client_name: None,
+                client_version: None,
+                client_platform: None,
+            }),
+            StoreEvent::Request(RequestEvent {
+                request_id: "req-fast".into(),
+                ts: 1001,
+                proxy: "api".into(),
+                session_id: Some("sess-sub".into()),
+                method: "tools/call".into(),
+                tool: Some("ping".into()),
+                latency_us: 200, // 200μs — sub-millisecond
+                status: RequestStatus::Ok,
+                error_code: None,
+                error_msg: None,
+                bytes_in: Some(64),
+                bytes_out: Some(32),
+            }),
+        ];
+
+        flush_batch(&conn, &mut batch, &mut HashMap::new());
+
+        let latency: i64 = conn
+            .query_row(
+                "SELECT latency_us FROM requests WHERE request_id = 'req-fast'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latency, 200, "sub-millisecond latency should be preserved");
     }
 
     #[test]
@@ -580,7 +630,7 @@ mod tests {
                 session_id: Some("sess-3".into()),
                 method: "tools/call".into(),
                 tool: Some("broken".into()),
-                latency_ms: 500,
+                latency_us: 500,
                 status: RequestStatus::Error,
                 error_code: Some("-32600".into()),
                 error_msg: Some("bad request".into()),

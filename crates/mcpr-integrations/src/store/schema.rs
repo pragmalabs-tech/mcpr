@@ -18,7 +18,7 @@
 
 /// Current schema version. Stored in the `meta` table and checked on startup.
 /// Bump this when adding migrations.
-pub const SCHEMA_VERSION: &str = "3";
+pub const SCHEMA_VERSION: &str = "4";
 
 /// Initial schema: requests table, sessions table, meta table, and all indexes.
 ///
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS requests (
     tool            TEXT,                     -- tool name for tools/call, NULL otherwise
 
     -- Outcome
-    latency_ms      INTEGER NOT NULL,         -- wall-clock ms: proxy → upstream → proxy
+    latency_ms      INTEGER NOT NULL,         -- wall-clock ms (renamed to latency_us in V4)
     status          TEXT NOT NULL              -- 'ok' | 'error' | 'timeout'
         CHECK (status IN ('ok', 'error', 'timeout')),
     error_code      TEXT,                     -- MCP error code when status = 'error'
@@ -202,6 +202,23 @@ CREATE INDEX IF NOT EXISTS idx_schema_changes_proxy
 UPDATE meta SET value = '3' WHERE key = 'schema_version';
 ";
 
+/// V3 → V4 migration: rename `latency_ms` → `latency_us` and convert
+/// existing values from milliseconds to microseconds for sub-ms precision.
+pub const V4_SCHEMA: &str = "
+-- Rename latency column from ms to μs.
+ALTER TABLE requests RENAME COLUMN latency_ms TO latency_us;
+
+-- Convert existing rows: ms → μs (multiply by 1000).
+UPDATE requests SET latency_us = latency_us * 1000;
+
+-- Recreate the slow index with the new column name.
+DROP INDEX IF EXISTS idx_requests_slow;
+CREATE INDEX IF NOT EXISTS idx_requests_slow ON requests (proxy, latency_us DESC, ts);
+
+-- Bump schema version.
+UPDATE meta SET value = '4' WHERE key = 'schema_version';
+";
+
 /// SQL to insert or update the mcpr_version meta key on every startup.
 pub const UPSERT_MCPR_VERSION: &str = "
 INSERT INTO meta (key, value) VALUES ('mcpr_version', ?1)
@@ -216,7 +233,7 @@ pub const INSERT_REQUEST_SQL: &str = "
 INSERT INTO requests (
     request_id, ts, proxy, session_id,
     method, tool,
-    latency_ms, status, error_code, error_msg,
+    latency_us, status, error_code, error_msg,
     bytes_in, bytes_out
 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);
 ";

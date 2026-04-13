@@ -49,7 +49,7 @@ fn make_request_event(
     session_id: Option<&str>,
     status: u16,
     start: Instant,
-    upstream_ms: Option<u64>,
+    upstream_us: Option<u64>,
     request_size: usize,
     response_size: Option<usize>,
     rpc_error: Option<&(i64, String)>,
@@ -71,8 +71,8 @@ fn make_request_event(
         mcp_method: Some(method_str.to_string()),
         tool,
         status,
-        latency_ms: start.elapsed().as_millis() as u64,
-        upstream_ms,
+        latency_us: start.elapsed().as_micros() as u64,
+        upstream_us,
         request_size: Some(request_size as u64),
         response_size: response_size.map(|s| s as u64),
         error_code: rpc_error.map(|(code, _)| code.to_string()),
@@ -131,7 +131,7 @@ pub async fn handle_mcp_post(
     {
         Ok(r) => r,
         Err(e) => {
-            let upstream_ms = upstream_start.elapsed().as_millis() as u64;
+            let upstream_us = upstream_start.elapsed().as_micros() as u64;
 
             // Single emit — all sinks (stderr, sqlite, cloud) receive this.
             state.event_bus.emit(make_request_event(
@@ -143,7 +143,7 @@ pub async fn handle_mcp_post(
                 req_session_id.as_deref(),
                 502,
                 start,
-                Some(upstream_ms),
+                Some(upstream_us),
                 raw_body_len,
                 None,
                 None,
@@ -207,7 +207,7 @@ pub async fn handle_mcp_post(
         Ok(b) => b,
         Err(err_resp) => return err_resp,
     };
-    let upstream_ms = upstream_start.elapsed().as_millis() as u64;
+    let upstream_us = upstream_start.elapsed().as_micros() as u64;
     let config = state.rewrite_config.read().await;
 
     // Try to parse and rewrite JSON response (may be SSE-wrapped)
@@ -243,7 +243,7 @@ pub async fn handle_mcp_post(
             log_session_id.as_deref(),
             status,
             start,
-            Some(upstream_ms),
+            Some(upstream_us),
             raw_body_len,
             Some(body.len()),
             rpc_error.as_ref(),
@@ -262,7 +262,7 @@ pub async fn handle_mcp_post(
             log_session_id.as_deref(),
             status,
             start,
-            Some(upstream_ms),
+            Some(upstream_us),
             raw_body_len,
             Some(resp_bytes.len()),
             None,
@@ -306,8 +306,8 @@ pub async fn handle_mcp_sse(
                 mcp_method: Some("SSE".to_string()),
                 tool: None,
                 status,
-                latency_ms: start.elapsed().as_millis() as u64,
-                upstream_ms: Some(upstream_start.elapsed().as_millis() as u64),
+                latency_us: start.elapsed().as_micros() as u64,
+                upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
                 request_size: None,
                 response_size: None,
                 error_code: None,
@@ -332,8 +332,8 @@ pub async fn handle_mcp_sse(
                 mcp_method: Some("SSE".to_string()),
                 tool: None,
                 status: 502,
-                latency_ms: start.elapsed().as_millis() as u64,
-                upstream_ms: Some(upstream_start.elapsed().as_millis() as u64),
+                latency_us: start.elapsed().as_micros() as u64,
+                upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
                 request_size: None,
                 response_size: None,
                 error_code: None,
@@ -374,7 +374,7 @@ async fn handle_resources_read(
     let upstream_bytes = read_body_capped(upstream_resp, state.max_response_body)
         .await
         .ok()?;
-    let upstream_ms = upstream_start.elapsed().as_millis() as u64;
+    let upstream_us = upstream_start.elapsed().as_micros() as u64;
     let json_bytes =
         extract_json_from_sse(&upstream_bytes).unwrap_or_else(|| upstream_bytes.to_vec());
     let mut json_body: Value = serde_json::from_slice(&json_bytes).ok()?;
@@ -407,8 +407,8 @@ async fn handle_resources_read(
         mcp_method: Some(jsonrpc::RESOURCES_READ.to_string()),
         tool: None,
         status: 200,
-        latency_ms: start.elapsed().as_millis() as u64,
-        upstream_ms: Some(upstream_ms),
+        latency_us: start.elapsed().as_micros() as u64,
+        upstream_us: Some(upstream_us),
         request_size: Some(raw_body.len() as u64),
         response_size: Some(body.len() as u64),
         error_code: None,

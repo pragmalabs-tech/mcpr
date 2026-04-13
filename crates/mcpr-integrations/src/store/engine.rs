@@ -219,7 +219,7 @@ mod tests {
             session_id: Some("s1".into()),
             method: "tools/call".into(),
             tool: Some("test_tool".into()),
-            latency_ms: 50,
+            latency_us: 50_000,
             status: RequestStatus::Ok,
             error_code: None,
             error_msg: None,

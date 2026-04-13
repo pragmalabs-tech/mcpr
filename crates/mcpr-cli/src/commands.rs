@@ -67,17 +67,26 @@ fn parse_since(s: &str) -> Result<i64, String> {
     Ok(store::since_to_cutoff_ms(dur))
 }
 
-/// Parse a --threshold duration string to milliseconds.
-fn parse_threshold_ms(s: &str) -> Result<i64, String> {
-    if let Some(ms_str) = s.strip_suffix("ms") {
-        return ms_str
+/// Parse a --threshold duration string to microseconds.
+///
+/// Accepts human-friendly units (500ms, 1s, 200us) and converts to μs.
+fn parse_threshold_us(s: &str) -> Result<i64, String> {
+    if let Some(us_str) = s.strip_suffix("us").or_else(|| s.strip_suffix("μs")) {
+        return us_str
             .trim()
             .parse::<i64>()
             .map_err(|_| format!("invalid threshold: {s}"));
     }
+    if let Some(ms_str) = s.strip_suffix("ms") {
+        return ms_str
+            .trim()
+            .parse::<i64>()
+            .map(|ms| ms * 1_000)
+            .map_err(|_| format!("invalid threshold: {s}"));
+    }
     let dur = store::parse_duration(s)
-        .ok_or_else(|| format!("invalid threshold: {s} (expected: 500ms, 1s, etc.)"))?;
-    Ok(dur.as_millis() as i64)
+        .ok_or_else(|| format!("invalid threshold: {s} (expected: 500ms, 1s, 200us, etc.)"))?;
+    Ok(dur.as_micros() as i64)
 }
 
 // ── Formatting helpers ─────────────────────────────────────────────────
@@ -114,13 +123,10 @@ fn format_bytes_col(bytes: Option<i64>) -> String {
     }
 }
 
-/// Format latency with comma separators for readability.
-fn format_latency(ms: i64) -> String {
-    if ms >= 1000 {
-        format!("{},{:03}ms", ms / 1000, ms % 1000)
-    } else {
-        format!("{ms}ms")
-    }
+/// Format latency (in μs) for human-readable display.
+/// Delegates to the shared implementation in `mcpr_core::time`.
+fn format_latency(us: i64) -> String {
+    mcpr_core::time::format_latency_us(us)
 }
 
 /// Print a serializable struct as a single JSON line.
@@ -400,7 +406,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
                 format_ts(row.ts),
                 row.method,
                 tool,
-                format_latency(row.latency_ms),
+                format_latency(row.latency_us),
                 in_str,
                 out_str,
                 err_str,
@@ -442,7 +448,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
                         format_ts(row.ts),
                         row.method,
                         tool,
-                        format_latency(row.latency_ms),
+                        format_latency(row.latency_us),
                         in_str,
                         out_str,
                         err_str,
@@ -466,12 +472,12 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
     let name = resolve_proxy_name(args.proxy.clone());
     let since_ts = parse_since(&args.since)?;
-    let threshold_ms = parse_threshold_ms(&args.threshold)?;
+    let threshold_us = parse_threshold_us(&args.threshold)?;
 
     let rows = engine
         .slow(&SlowParams {
             proxy: name.clone(),
-            threshold_ms,
+            threshold_us,
             since_ts,
             tool: args.tool.clone(),
             limit: args.limit,
@@ -504,7 +510,7 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
             println!(
                 "  {:<32} {:>10}  {:>9}   {:<21}  {}",
                 tool,
-                format_latency(row.latency_ms),
+                format_latency(row.latency_us),
                 size_str,
                 format_ts(row.ts),
                 row.status,
@@ -513,7 +519,7 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
         if rows.is_empty() {
             println!("  (no slow calls found)");
         } else {
-            let avg: i64 = rows.iter().map(|r| r.latency_ms).sum::<i64>() / rows.len() as i64;
+            let avg: i64 = rows.iter().map(|r| r.latency_us).sum::<i64>() / rows.len() as i64;
             println!(
                 "\n  {} calls above threshold in last {} (avg: {})",
                 rows.len(),
@@ -527,7 +533,7 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
     if args.follow {
         let params = SlowParams {
             proxy: name,
-            threshold_ms,
+            threshold_us,
             since_ts,
             tool: args.tool,
             limit: args.limit,
@@ -553,7 +559,7 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
                     println!(
                         "  {:<32} {:>10}  {:>9}   {:<21}  {}",
                         tool,
-                        format_latency(row.latency_ms),
+                        format_latency(row.latency_us),
                         size_str,
                         format_ts(row.ts),
                         row.status,
@@ -620,9 +626,9 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
                 "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}  {:>9}  {:>9}",
                 t.label,
                 t.calls,
-                format_latency(t.avg_ms as i64),
-                format_latency(t.p95_ms),
-                format_latency(t.max_ms),
+                format_latency(t.avg_us as i64),
+                format_latency(t.p95_us),
+                format_latency(t.max_us),
                 error_str,
                 in_str,
                 out_str,
@@ -852,9 +858,9 @@ fn cmd_proxy_status(args: ProxyStatusArgs) -> Result<(), String> {
                     "  {:<24} {:>8} {:>10} {:>10} {:>10} {:>7.1}% {:>9} {:>9} {:>9}",
                     t.label,
                     t.calls,
-                    format_latency(t.avg_ms as i64),
-                    format_latency(t.p95_ms),
-                    format_latency(t.max_ms),
+                    format_latency(t.avg_us as i64),
+                    format_latency(t.p95_us),
+                    format_latency(t.max_us),
                     t.error_pct,
                     in_str,
                     out_str,
@@ -930,7 +936,7 @@ fn cmd_proxy_session(args: ProxySessionArgs) -> Result<(), String> {
                     format_ts(r.ts),
                     r.method,
                     r.tool.as_deref().unwrap_or("—"),
-                    format_latency(r.latency_ms),
+                    format_latency(r.latency_us),
                     r.status,
                 );
             }
@@ -1239,35 +1245,88 @@ mod tests {
     }
 
     #[test]
-    fn parse_threshold_ms_millis() {
-        assert_eq!(parse_threshold_ms("500ms").unwrap(), 500);
-        assert_eq!(parse_threshold_ms("100ms").unwrap(), 100);
+    fn parse_threshold_us_micros() {
+        assert_eq!(parse_threshold_us("200us").unwrap(), 200);
+        assert_eq!(parse_threshold_us("500μs").unwrap(), 500);
     }
 
     #[test]
-    fn parse_threshold_ms_seconds() {
-        assert_eq!(parse_threshold_ms("1s").unwrap(), 1000);
-        assert_eq!(parse_threshold_ms("2s").unwrap(), 2000);
+    fn parse_threshold_us_millis() {
+        assert_eq!(parse_threshold_us("500ms").unwrap(), 500_000);
+        assert_eq!(parse_threshold_us("100ms").unwrap(), 100_000);
     }
 
     #[test]
-    fn parse_threshold_ms_invalid() {
-        assert!(parse_threshold_ms("bad").is_err());
-        assert!(parse_threshold_ms("ms").is_err());
+    fn parse_threshold_us_seconds() {
+        assert_eq!(parse_threshold_us("1s").unwrap(), 1_000_000);
+        assert_eq!(parse_threshold_us("2s").unwrap(), 2_000_000);
     }
 
     #[test]
-    fn format_latency_under_1s() {
-        assert_eq!(format_latency(142), "142ms");
-        assert_eq!(format_latency(0), "0ms");
-        assert_eq!(format_latency(999), "999ms");
+    fn parse_threshold_us_invalid() {
+        assert!(parse_threshold_us("bad").is_err());
+        assert!(parse_threshold_us("ms").is_err());
+    }
+
+    #[test]
+    fn format_latency_sub_ms() {
+        assert_eq!(format_latency(142), "142μs");
+        assert_eq!(format_latency(0), "0μs");
+        assert_eq!(format_latency(999), "999μs");
+    }
+
+    #[test]
+    fn format_latency_ms_range() {
+        assert_eq!(format_latency(1_000), "1.00ms");
+        assert_eq!(format_latency(4_201), "4.20ms");
+        assert_eq!(format_latency(142_000), "142.00ms");
     }
 
     #[test]
     fn format_latency_over_1s() {
-        assert_eq!(format_latency(1000), "1,000ms");
-        assert_eq!(format_latency(4201), "4,201ms");
-        assert_eq!(format_latency(12345), "12,345ms");
+        assert_eq!(format_latency(1_000_000), "1,000ms");
+        assert_eq!(format_latency(4_201_000), "4,201ms");
+        assert_eq!(format_latency(12_345_000), "12,345ms");
+    }
+
+    #[test]
+    fn format_latency_boundary_us_to_ms() {
+        // Exact boundary: 999μs → 1000μs crosses into ms display
+        assert_eq!(format_latency(999), "999μs");
+        assert_eq!(format_latency(1_000), "1.00ms");
+    }
+
+    #[test]
+    fn format_latency_boundary_ms_to_s() {
+        // Just under 1s, just at 1s
+        assert_eq!(format_latency(999_999), "1000.00ms");
+        assert_eq!(format_latency(1_000_000), "1,000ms");
+    }
+
+    #[test]
+    fn format_latency_fractional_ms() {
+        // Sub-ms precision in the ms range
+        assert_eq!(format_latency(1_500), "1.50ms");
+        assert_eq!(format_latency(10_250), "10.25ms");
+        assert_eq!(format_latency(500_000), "500.00ms");
+    }
+
+    #[test]
+    fn parse_threshold_us_zero() {
+        assert_eq!(parse_threshold_us("0us").unwrap(), 0);
+        assert_eq!(parse_threshold_us("0ms").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_threshold_us_large_values() {
+        assert_eq!(parse_threshold_us("10s").unwrap(), 10_000_000);
+        assert_eq!(parse_threshold_us("5000ms").unwrap(), 5_000_000);
+    }
+
+    #[test]
+    fn parse_threshold_us_rejects_empty_number() {
+        assert!(parse_threshold_us("us").is_err());
+        assert!(parse_threshold_us("μs").is_err());
     }
 
     #[test]

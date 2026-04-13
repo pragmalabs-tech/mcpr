@@ -32,7 +32,7 @@ pub struct LogRow {
     pub ts: i64,
     pub method: String,
     pub tool: Option<String>,
-    pub latency_ms: i64,
+    pub latency_us: i64,
     pub status: String,
     pub error_code: Option<String>,
     pub error_msg: Option<String>,
@@ -49,7 +49,7 @@ pub(crate) fn map_log_row(row: &Row<'_>) -> rusqlite::Result<LogRow> {
         ts: row.get(1)?,
         method: row.get(2)?,
         tool: row.get(3)?,
-        latency_ms: row.get(4)?,
+        latency_us: row.get(4)?,
         status: row.get(5)?,
         error_code: row.get(6)?,
         error_msg: row.get(7)?,
@@ -60,7 +60,7 @@ pub(crate) fn map_log_row(row: &Row<'_>) -> rusqlite::Result<LogRow> {
 }
 
 /// The 11 columns selected in all log/slow queries.
-pub(crate) const LOG_COLUMNS: &str = "request_id, ts, method, tool, latency_ms, status, error_code, error_msg, session_id, bytes_in, bytes_out";
+pub(crate) const LOG_COLUMNS: &str = "request_id, ts, method, tool, latency_us, status, error_code, error_msg, session_id, bytes_in, bytes_out";
 
 impl QueryEngine {
     /// Fetch recent request logs, newest first.
