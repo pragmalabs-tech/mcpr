@@ -234,7 +234,7 @@ fn cmd_proxy_restart(args: ProxyRestartArgs) -> Result<(), String> {
     restart_one_proxy(&name)
 }
 
-fn start_one_proxy(name: &str) -> Result<(), String> {
+pub(crate) fn start_one_proxy(name: &str) -> Result<(), String> {
     // Verify config snapshot exists before attempting re-launch.
     proxy_lock::read_snapshot(name)
         .map_err(|e| format!("no config snapshot for proxy \"{name}\": {e}"))?;

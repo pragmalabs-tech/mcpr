@@ -22,8 +22,11 @@ pub enum CliAction {
     },
     /// Stop the running daemon via SIGTERM.
     Stop,
-    /// Stop + start the daemon.
-    Restart(Mode),
+    /// Stop + start the daemon, re-launching previously running proxies.
+    Restart {
+        mode: Mode,
+        restart_proxies: Vec<String>,
+    },
     /// Show daemon status (PID, port, uptime, proxy name).
     Status,
     Validate(ValidateArgs),
@@ -738,7 +741,10 @@ pub fn load() -> CliAction {
     };
 
     if is_restart {
-        CliAction::Restart(mode)
+        CliAction::Restart {
+            mode,
+            restart_proxies: vec![],
+        }
     } else {
         CliAction::Start { mode, foreground }
     }
