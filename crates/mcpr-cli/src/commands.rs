@@ -141,6 +141,8 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         }
         ProxyCommand::Stop(args) => cmd_proxy_stop(args),
         ProxyCommand::Restart(args) => cmd_proxy_restart(args),
+        ProxyCommand::Start(args) => cmd_proxy_start(args),
+        ProxyCommand::List(args) => cmd_proxy_list(args),
 
         // Observability commands
         ProxyCommand::Logs(args) => cmd_proxy_logs(args),
@@ -160,6 +162,12 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
 }
 
 // ── Proxy lifecycle commands ──────────────────────────────────────────
+
+fn cmd_proxy_start(args: ProxyStartArgs) -> Result<(), String> {
+    start_one_proxy(&args.name)?;
+    eprintln!("Start proxy \"{}\".", args.name);
+    Ok(())
+}
 
 fn cmd_proxy_stop(args: ProxyStopArgs) -> Result<(), String> {
     if args.all {
@@ -220,11 +228,7 @@ fn cmd_proxy_restart(args: ProxyRestartArgs) -> Result<(), String> {
     restart_one_proxy(&name)
 }
 
-/// Restart a single proxy from its saved config snapshot.
-fn restart_one_proxy(name: &str) -> Result<(), String> {
-    // Stop old process if running.
-    proxy_lock::stop_proxy(name);
-
+fn start_one_proxy(name: &str) -> Result<(), String> {
     // Verify config snapshot exists before attempting re-launch.
     proxy_lock::read_snapshot(name)
         .map_err(|e| format!("no config snapshot for proxy \"{name}\": {e}"))?;
@@ -243,7 +247,105 @@ fn restart_one_proxy(name: &str) -> Result<(), String> {
         return Err(format!("proxy \"{name}\" failed to start"));
     }
 
+    Ok(())
+}
+
+/// Restart a single proxy from its saved config snapshot.
+fn restart_one_proxy(name: &str) -> Result<(), String> {
+    // Stop old process if running.
+    proxy_lock::stop_proxy(name);
+    start_one_proxy(name)?;
     eprintln!("Restarted proxy \"{}\".", name);
+    Ok(())
+}
+
+fn cmd_proxy_list(args: ProxyListArgs) -> Result<(), String> {
+    let proxies = proxy_lock::list_proxies();
+
+    if proxies.is_empty() {
+        if args.json {
+            println!("[]");
+        } else {
+            eprintln!("No proxies found.");
+        }
+        return Ok(());
+    }
+
+    if args.json {
+        let items: Vec<serde_json::Value> = proxies
+            .iter()
+            .map(|(name, status)| match status {
+                proxy_lock::LockStatus::Held(info) => serde_json::json!({
+                    "name": name,
+                    "status": "running",
+                    "pid": info.pid,
+                    "port": info.port,
+                    "started_at": info.started_at,
+                    "config_path": info.config_path,
+                }),
+                proxy_lock::LockStatus::Stale(info) => serde_json::json!({
+                    "name": name,
+                    "status": "stale",
+                    "pid": info.pid,
+                    "port": info.port,
+                    "started_at": info.started_at,
+                    "config_path": info.config_path,
+                }),
+                proxy_lock::LockStatus::Free => serde_json::json!({
+                    "name": name,
+                    "status": "stopped",
+                }),
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&items).unwrap_or_default());
+        return Ok(());
+    }
+
+    println!(
+        "{:<24} {:<10} {:>7}  {:>6}  {:<20}  CONFIG",
+        "NAME", "STATUS", "PID", "PORT", "STARTED"
+    );
+    for (name, status) in &proxies {
+        match status {
+            proxy_lock::LockStatus::Held(info) => {
+                println!(
+                    "{:<24} {:<10} {:>7}  {:>6}  {:<20}  {}",
+                    name,
+                    "running",
+                    info.pid,
+                    info.port,
+                    format_ts(info.started_at * 1000),
+                    info.config_path,
+                );
+            }
+            proxy_lock::LockStatus::Stale(info) => {
+                println!(
+                    "{:<24} {:<10} {:>7}  {:>6}  {:<20}  {}",
+                    name,
+                    "stale",
+                    info.pid,
+                    info.port,
+                    format_ts(info.started_at * 1000),
+                    info.config_path,
+                );
+            }
+            proxy_lock::LockStatus::Free => {
+                println!(
+                    "{:<24} {:<10} {:>7}  {:>6}  {:<20}  —",
+                    name, "stopped", "—", "—", "—"
+                );
+            }
+        }
+    }
+
+    let running = proxies
+        .iter()
+        .filter(|(_, s)| matches!(s, proxy_lock::LockStatus::Held(_)))
+        .count();
+    let total = proxies.len();
+    println!();
+    println!("{running} running, {total} total");
+
     Ok(())
 }
 

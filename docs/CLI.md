@@ -40,6 +40,38 @@ mcpr stop
 mcpr start              # reads mcpr.toml, starts daemon
 ```
 
+### Proxy Lifecycle
+
+#### `mcpr proxy list`
+
+List all known proxies and their status (running, stale, stopped).
+
+```bash
+mcpr proxy list                          # table output
+mcpr proxy list --json                   # JSON array
+```
+
+Output:
+```
+NAME                     STATUS        PID    PORT  STARTED               CONFIG
+localhost-9000           running      1234    3000  2026-04-12 14:30:00   /home/you/api/mcpr.toml
+staging-server           stale        5678    3001  2026-04-10 09:15:00   /home/you/staging/mcpr.toml
+
+1 running, 2 total
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--json` | false | Output as a JSON array |
+
+#### `mcpr proxy start <name>`
+
+Start a stopped proxy by name, using its saved config snapshot. Errors if the proxy is already running or has no saved config.
+
+```bash
+mcpr proxy start localhost-9000
+```
+
 ### Query & Observe
 
 All `mcpr proxy` commands read the local SQLite store directly — they work even when the daemon isn't running. The `[name]` argument is optional when only one proxy is running (auto-detected from the daemon's PID file).
