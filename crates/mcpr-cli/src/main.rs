@@ -400,7 +400,16 @@ async fn run_gateway_inner(
 ) {
     let proxy_state_ref = proxy_state::new_shared_state();
 
-    let mcp = cfg.mcp.expect("mcp is required in mcpr.toml");
+    let mcp = match cfg.mcp {
+        Some(url) => url,
+        None => {
+            eprintln!(
+                "{}: `mcp` is required in mcpr.toml. Set it to your upstream MCP server URL, e.g. mcp = \"http://localhost:8080\"",
+                colored::Colorize::red("error"),
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Validate MCP URL format
     validate_mcp_url(&mcp);
