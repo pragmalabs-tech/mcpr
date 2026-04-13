@@ -1032,7 +1032,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcpr"
-version = "0.4.0-alpha.3"
+version = "0.4.12"
 dependencies = [
  "axum",
  "base64",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-core"
-version = "0.4.0-alpha.3"
+version = "0.4.12"
 dependencies = [
  "mcpr-protocol",
  "serde",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-integrations"
-version = "0.4.0-alpha.3"
+version = "0.4.12"
 dependencies = [
  "chrono",
  "dirs",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-protocol"
-version = "0.4.0-alpha.3"
+version = "0.4.12"
 dependencies = [
  "chrono",
  "dashmap",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-proxy"
-version = "0.4.0-alpha.3"
+version = "0.4.12"
 dependencies = [
  "axum",
  "futures-util",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "mcpr-tunnel"
-version = "0.4.0-alpha.3"
+version = "0.4.12"
 dependencies = [
  "axum",
  "base64",
