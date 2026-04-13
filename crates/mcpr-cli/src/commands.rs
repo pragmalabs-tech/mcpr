@@ -19,29 +19,11 @@ use mcpr_integrations::store::{
 };
 
 use crate::config::*;
-#[cfg(unix)]
-use crate::daemon;
 use crate::proxy_lock;
 
 /// Display-friendly proxy name: the name itself or "all proxies".
 fn proxy_display(name: &Option<String>) -> &str {
     name.as_deref().unwrap_or("all proxies")
-}
-
-/// Resolve the proxy name — returns the explicit name if given, or None for "all proxies".
-/// Falls back to the running daemon's proxy name if neither is specified and a daemon is running.
-fn resolve_proxy_name(name: Option<String>) -> Option<String> {
-    if name.is_some() {
-        return name;
-    }
-
-    #[cfg(unix)]
-    if let Some(info) = daemon::read_pid_file() {
-        return Some(info.proxy_name);
-    }
-
-    // No filter — show all proxies.
-    None
 }
 
 /// Resolve the store database path and open a query engine.
@@ -359,7 +341,7 @@ fn cmd_proxy_list(args: ProxyListArgs) -> Result<(), String> {
 
 fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.proxy.clone());
+    let name = args.proxy.clone();
 
     // When --session is set and --since is not, show all time (no time filter).
     let since_ts = match (&args.since, &args.session) {
@@ -470,7 +452,7 @@ fn cmd_proxy_logs(args: ProxyLogsArgs) -> Result<(), String> {
 
 fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.proxy.clone());
+    let name = args.proxy.clone();
     let since_ts = parse_since(&args.since)?;
     let threshold_us = parse_threshold_us(&args.threshold)?;
 
@@ -575,7 +557,7 @@ fn cmd_proxy_slow(args: ProxySlowArgs) -> Result<(), String> {
 
 fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.proxy.clone());
+    let name = args.proxy.clone();
     let since_ts = parse_since(&args.since)?;
 
     let result = engine
@@ -645,7 +627,7 @@ fn cmd_proxy_stats(args: ProxyStatsArgs) -> Result<(), String> {
 
 fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.proxy.clone());
+    let name = args.proxy.clone();
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
@@ -707,7 +689,7 @@ fn cmd_proxy_sessions(args: ProxySessionsArgs) -> Result<(), String> {
 
 fn cmd_proxy_clients(args: ProxyClientsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.proxy.clone());
+    let name = args.proxy.clone();
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
@@ -788,7 +770,7 @@ fn cmd_proxy_status(args: ProxyStatusArgs) -> Result<(), String> {
     }
 
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.proxy.clone());
+    let name = args.proxy.clone();
     let since_ts = parse_since(&args.since)?;
 
     let stats = engine
@@ -950,7 +932,7 @@ fn cmd_proxy_session(args: ProxySessionArgs) -> Result<(), String> {
 
 fn cmd_proxy_schema(args: ProxySchemaArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = resolve_proxy_name(args.proxy.clone());
+    let name = args.proxy.clone();
 
     if args.unused {
         return cmd_proxy_schema_unused(&engine, &name, &args);
