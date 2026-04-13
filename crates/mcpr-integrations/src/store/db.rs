@@ -235,6 +235,104 @@ mod tests {
     }
 
     #[test]
+    fn v4_migration_renames_latency_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_connection(&db_path).unwrap();
+        run_migrations(&conn, "test").unwrap();
+
+        // After V4 migration, the column should be latency_us.
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, proxy, method, latency_us, status)
+             VALUES ('r1', 1000, 'api', 'tools/call', 142000, 'ok')",
+            [],
+        )
+        .unwrap();
+
+        let latency: i64 = conn
+            .query_row(
+                "SELECT latency_us FROM requests WHERE request_id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latency, 142_000);
+    }
+
+    #[test]
+    fn v4_migration_converts_existing_ms_to_us() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_connection(&db_path).unwrap();
+
+        // Simulate V3 state: run V1+V2+V3 only.
+        conn.execute_batch(schema::V1_SCHEMA).unwrap();
+        conn.execute_batch(schema::V1_META_SEED).unwrap();
+        conn.execute_batch(schema::V2_SCHEMA).unwrap();
+        conn.execute_batch(schema::V3_SCHEMA).unwrap();
+
+        // Insert data with old ms column.
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, proxy, method, latency_ms, status)
+             VALUES ('r1', 1000, 'api', 'tools/call', 42, 'ok')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO requests (request_id, ts, proxy, method, latency_ms, status)
+             VALUES ('r2', 2000, 'api', 'tools/call', 1500, 'ok')",
+            [],
+        )
+        .unwrap();
+
+        // Run V4 migration.
+        conn.execute_batch(schema::V4_SCHEMA).unwrap();
+
+        // Verify column renamed and values multiplied by 1000.
+        let latency1: i64 = conn
+            .query_row(
+                "SELECT latency_us FROM requests WHERE request_id = 'r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latency1, 42_000, "42ms should become 42,000μs");
+
+        let latency2: i64 = conn
+            .query_row(
+                "SELECT latency_us FROM requests WHERE request_id = 'r2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(latency2, 1_500_000, "1500ms should become 1,500,000μs");
+    }
+
+    #[test]
+    fn v4_migration_rebuilds_slow_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+
+        let conn = open_connection(&db_path).unwrap();
+        run_migrations(&conn, "test").unwrap();
+
+        // Verify the slow index references latency_us.
+        let idx_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_requests_slow'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            idx_sql.contains("latency_us"),
+            "slow index should reference latency_us, got: {idx_sql}"
+        );
+    }
+
+    #[test]
     fn v3_migration_default_proxy_for_existing_data() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");

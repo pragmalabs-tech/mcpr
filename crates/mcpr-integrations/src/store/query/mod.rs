@@ -576,6 +576,130 @@ mod tests {
         assert!(result.tools.is_empty());
     }
 
+    #[test]
+    fn stats_latency_us_values() {
+        let engine = seeded_engine();
+        let result = engine
+            .stats(&super::stats::StatsParams {
+                proxy: Some("api".into()),
+                since_ts: 0,
+            })
+            .unwrap();
+
+        // search tool: latencies 142, 891, 156 (in μs from seed data)
+        let search = result.tools.iter().find(|t| t.label == "search").unwrap();
+        assert_eq!(search.min_us, 142);
+        assert_eq!(search.max_us, 891);
+        // avg = (142 + 891 + 156) / 3 ≈ 396.33
+        assert!((search.avg_us - 396.33).abs() < 1.0);
+        // p95 with 3 values: should be the max
+        assert_eq!(search.p95_us, 891);
+    }
+
+    #[test]
+    fn stats_serialization_uses_us_field_names() {
+        let engine = seeded_engine();
+        let result = engine
+            .stats(&super::stats::StatsParams {
+                proxy: Some("api".into()),
+                since_ts: 0,
+            })
+            .unwrap();
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("avg_us"), "JSON should contain avg_us");
+        assert!(json.contains("min_us"), "JSON should contain min_us");
+        assert!(json.contains("max_us"), "JSON should contain max_us");
+        assert!(json.contains("p95_us"), "JSON should contain p95_us");
+        assert!(!json.contains("avg_ms"), "JSON should NOT contain avg_ms");
+    }
+
+    #[test]
+    fn log_row_latency_us_field() {
+        let engine = seeded_engine();
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: Some("api".into()),
+                since_ts: 0,
+                limit: 100,
+                tool: Some("search".into()),
+                method: None,
+                session: None,
+                status: None,
+                error_code: None,
+            })
+            .unwrap();
+        // r5 (ts=5000, search, 156μs) is the newest search row
+        assert_eq!(rows[0].latency_us, 156);
+        // r2 (ts=2000, search, 891μs)
+        assert_eq!(rows[1].latency_us, 891);
+        // r1 (ts=1000, search, 142μs)
+        assert_eq!(rows[2].latency_us, 142);
+    }
+
+    #[test]
+    fn log_row_serialization_uses_us_field() {
+        let engine = seeded_engine();
+        let rows = engine
+            .logs(&super::logs::LogsParams {
+                proxy: Some("api".into()),
+                since_ts: 0,
+                limit: 1,
+                tool: None,
+                method: None,
+                session: None,
+                status: None,
+                error_code: None,
+            })
+            .unwrap();
+        let json = serde_json::to_string(&rows[0]).unwrap();
+        assert!(
+            json.contains("latency_us"),
+            "JSON should contain latency_us"
+        );
+        assert!(
+            !json.contains("latency_ms"),
+            "JSON should NOT contain latency_ms"
+        );
+    }
+
+    #[test]
+    fn slow_threshold_us_precision() {
+        let engine = seeded_engine();
+        // threshold = 150μs should include 891, 4201, 156 but exclude 142 and 23
+        let rows = engine
+            .slow(&super::slow::SlowParams {
+                proxy: Some("api".into()),
+                tool: None,
+                threshold_us: 150,
+                since_ts: 0,
+                limit: 100,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        // Slowest first: 4201, 891, 156
+        assert_eq!(rows[0].latency_us, 4201);
+        assert_eq!(rows[1].latency_us, 891);
+        assert_eq!(rows[2].latency_us, 156);
+    }
+
+    #[test]
+    fn slow_exact_threshold_boundary() {
+        let engine = seeded_engine();
+        // threshold = 891 should include rows with latency_us >= 891
+        let rows = engine
+            .slow(&super::slow::SlowParams {
+                proxy: Some("api".into()),
+                tool: None,
+                threshold_us: 891,
+                since_ts: 0,
+                limit: 100,
+            })
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].latency_us, 4201);
+        assert_eq!(rows[1].latency_us, 891);
+    }
+
     // ── clients ─────────────────────────────────────────────────────────
 
     #[test]

@@ -8,6 +8,18 @@ use mcpr_core::event::{EventSink, ProxyEvent};
 
 use crate::config::LogFormat;
 
+/// Format latency in microseconds for stderr display.
+///
+/// - < 1ms: "200μs"
+/// - ≥ 1ms: "4.20ms"
+fn format_duration_us(us: u64) -> String {
+    if us >= 1_000 {
+        format!(" {:.2}ms", us as f64 / 1_000.0)
+    } else {
+        format!(" {}μs", us)
+    }
+}
+
 /// Sink that prints proxy events to stderr.
 pub struct StderrSink {
     format: LogFormat,
@@ -35,11 +47,7 @@ impl EventSink for StderrSink {
                 let status = e.status;
                 let method = &e.method;
                 let path = &e.path;
-                let duration = if e.latency_us >= 1_000 {
-                    format!(" {:.2}ms", e.latency_us as f64 / 1_000.0)
-                } else {
-                    format!(" {}μs", e.latency_us)
-                };
+                let duration = format_duration_us(e.latency_us);
                 let size = e
                     .response_size
                     .map(|b| {
@@ -84,5 +92,39 @@ impl EventSink for StderrSink {
 
     fn name(&self) -> &'static str {
         "stderr"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_duration_sub_ms() {
+        assert_eq!(format_duration_us(0), " 0μs");
+        assert_eq!(format_duration_us(1), " 1μs");
+        assert_eq!(format_duration_us(200), " 200μs");
+        assert_eq!(format_duration_us(999), " 999μs");
+    }
+
+    #[test]
+    fn format_duration_ms_range() {
+        assert_eq!(format_duration_us(1_000), " 1.00ms");
+        assert_eq!(format_duration_us(1_500), " 1.50ms");
+        assert_eq!(format_duration_us(42_000), " 42.00ms");
+        assert_eq!(format_duration_us(999_999), " 1000.00ms");
+    }
+
+    #[test]
+    fn format_duration_large() {
+        assert_eq!(format_duration_us(1_000_000), " 1000.00ms");
+        assert_eq!(format_duration_us(5_000_000), " 5000.00ms");
+    }
+
+    #[test]
+    fn format_duration_boundary() {
+        // Exact boundary between μs and ms display
+        assert_eq!(format_duration_us(999), " 999μs");
+        assert_eq!(format_duration_us(1_000), " 1.00ms");
     }
 }

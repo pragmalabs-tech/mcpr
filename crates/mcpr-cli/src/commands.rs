@@ -1303,6 +1303,46 @@ mod tests {
     }
 
     #[test]
+    fn format_latency_boundary_us_to_ms() {
+        // Exact boundary: 999μs → 1000μs crosses into ms display
+        assert_eq!(format_latency(999), "999μs");
+        assert_eq!(format_latency(1_000), "1.00ms");
+    }
+
+    #[test]
+    fn format_latency_boundary_ms_to_s() {
+        // Just under 1s, just at 1s
+        assert_eq!(format_latency(999_999), "1000.00ms");
+        assert_eq!(format_latency(1_000_000), "1,000ms");
+    }
+
+    #[test]
+    fn format_latency_fractional_ms() {
+        // Sub-ms precision in the ms range
+        assert_eq!(format_latency(1_500), "1.50ms");
+        assert_eq!(format_latency(10_250), "10.25ms");
+        assert_eq!(format_latency(500_000), "500.00ms");
+    }
+
+    #[test]
+    fn parse_threshold_us_zero() {
+        assert_eq!(parse_threshold_us("0us").unwrap(), 0);
+        assert_eq!(parse_threshold_us("0ms").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_threshold_us_large_values() {
+        assert_eq!(parse_threshold_us("10s").unwrap(), 10_000_000);
+        assert_eq!(parse_threshold_us("5000ms").unwrap(), 5_000_000);
+    }
+
+    #[test]
+    fn parse_threshold_us_rejects_empty_number() {
+        assert!(parse_threshold_us("us").is_err());
+        assert!(parse_threshold_us("μs").is_err());
+    }
+
+    #[test]
     fn format_bytes_units() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
