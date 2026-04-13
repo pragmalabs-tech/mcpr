@@ -78,7 +78,8 @@ pub struct RequestEvent {
 
     /// Wall-clock time from proxy receiving the request to getting the upstream response.
     /// Includes network round-trip to upstream — this is what the AI client experiences.
-    pub latency_ms: i64,
+    /// Stored in microseconds for sub-millisecond precision.
+    pub latency_us: i64,
 
     /// Whether the request succeeded, failed, or timed out.
     pub status: RequestStatus,

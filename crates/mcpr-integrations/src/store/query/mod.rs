@@ -158,7 +158,7 @@ mod tests {
         ) in requests
         {
             conn.execute(
-                "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_ms, status, error_code, error_msg, bytes_in, bytes_out)
+                "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_us, status, error_code, error_msg, bytes_in, bytes_out)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![id, ts, proxy, sid, method, tool, latency, status, err_code, err_msg, bytes_in, bytes_out],
             ).unwrap();
@@ -416,14 +416,14 @@ mod tests {
             .slow(&super::slow::SlowParams {
                 proxy: Some("api".into()),
                 tool: Some("search".into()),
-                threshold_ms: 500,
+                threshold_us: 500,
                 since_ts: 0,
                 limit: 100,
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tool.as_deref(), Some("search"));
-        assert_eq!(rows[0].latency_ms, 891);
+        assert_eq!(rows[0].latency_us, 891);
     }
 
     #[test]
@@ -433,15 +433,15 @@ mod tests {
             .slow(&super::slow::SlowParams {
                 proxy: Some("api".into()),
                 tool: None,
-                threshold_ms: 500,
+                threshold_us: 500,
                 since_ts: 0,
                 limit: 100,
             })
             .unwrap();
         assert_eq!(rows.len(), 2);
         // Slowest first
-        assert_eq!(rows[0].latency_ms, 4201);
-        assert_eq!(rows[1].latency_ms, 891);
+        assert_eq!(rows[0].latency_us, 4201);
+        assert_eq!(rows[1].latency_us, 891);
     }
 
     #[test]
@@ -451,7 +451,7 @@ mod tests {
             .slow(&super::slow::SlowParams {
                 proxy: Some("api".into()),
                 tool: None,
-                threshold_ms: 10000,
+                threshold_us: 10000,
                 since_ts: 0,
                 limit: 100,
             })
@@ -468,7 +468,7 @@ mod tests {
         // asking for ts > 1000 should return both, oldest first
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_ms: 500,
+            threshold_us: 500,
             since_ts: 0,
             tool: None,
             limit: 100,
@@ -486,7 +486,7 @@ mod tests {
         // r2 is at ts=2000; asking for ts > 2000 should exclude r2
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_ms: 500,
+            threshold_us: 500,
             since_ts: 0,
             tool: None,
             limit: 100,
@@ -502,7 +502,7 @@ mod tests {
         // All rows have ts <= 5000; asking for ts > 5000 should return nothing
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_ms: 500,
+            threshold_us: 500,
             since_ts: 0,
             tool: None,
             limit: 100,
@@ -517,14 +517,14 @@ mod tests {
         // With threshold 1000, only r3 (4201ms) qualifies
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_ms: 1000,
+            threshold_us: 1000,
             since_ts: 0,
             tool: None,
             limit: 100,
         };
         let rows = engine.slow_since(&params, 0).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].latency_ms, 4201);
+        assert_eq!(rows[0].latency_us, 4201);
     }
 
     #[test]
@@ -534,7 +534,7 @@ mod tests {
         // filtering to search should only return r2
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_ms: 500,
+            threshold_us: 500,
             since_ts: 0,
             tool: Some("search".into()),
             limit: 100,
@@ -542,7 +542,7 @@ mod tests {
         let rows = engine.slow_since(&params, 0).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tool.as_deref(), Some("search"));
-        assert_eq!(rows[0].latency_ms, 891);
+        assert_eq!(rows[0].latency_us, 891);
     }
 
     // ── stats ───────────────────────────────────────────────────────────
@@ -755,7 +755,7 @@ mod tests {
             .unwrap();
         let json = serde_json::to_string(&rows[0]).unwrap();
         assert!(json.contains("request_id"));
-        assert!(json.contains("latency_ms"));
+        assert!(json.contains("latency_us"));
     }
 
     #[test]
@@ -977,13 +977,13 @@ mod tests {
         ).unwrap();
 
         engine.conn().execute(
-            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_ms, status, error_code, error_msg, bytes_in, bytes_out)
+            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_us, status, error_code, error_msg, bytes_in, bytes_out)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params!["r-email-1", 6000i64, "email", "s-email-1", "tools/call", "send_email", 320i64, "ok", None::<&str>, None::<&str>, Some(512i64), Some(128i64)],
         ).unwrap();
 
         engine.conn().execute(
-            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_ms, status, error_code, error_msg, bytes_in, bytes_out)
+            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_us, status, error_code, error_msg, bytes_in, bytes_out)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params!["r-email-2", 7000i64, "email", "s-email-1", "tools/call", "send_email", 250i64, "ok", None::<&str>, None::<&str>, Some(512i64), Some(128i64)],
         ).unwrap();
@@ -1059,7 +1059,7 @@ mod tests {
         let rows = engine
             .slow(&super::slow::SlowParams {
                 proxy: None,
-                threshold_ms: 100,
+                threshold_us: 100,
                 since_ts: 0,
                 tool: None,
                 limit: 100,

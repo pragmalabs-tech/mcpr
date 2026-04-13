@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::QueryEngine;
 
-/// Raw aggregate row from SQL: (label, calls, avg_ms, min_ms, max_ms, error_pct, bytes_in, bytes_out).
+/// Raw aggregate row from SQL: (label, calls, avg_us, min_us, max_us, error_pct, bytes_in, bytes_out).
 type AggRow = (String, i64, f64, i64, i64, f64, i64, i64);
 
 /// Filter parameters for the stats query.
@@ -23,14 +23,14 @@ pub struct ToolStats {
     pub label: String,
     /// Total number of calls.
     pub calls: i64,
-    /// Average latency in milliseconds.
-    pub avg_ms: f64,
-    /// Minimum latency in milliseconds.
-    pub min_ms: i64,
-    /// Maximum latency in milliseconds.
-    pub max_ms: i64,
-    /// 95th percentile latency (approximate).
-    pub p95_ms: i64,
+    /// Average latency in microseconds.
+    pub avg_us: f64,
+    /// Minimum latency in microseconds.
+    pub min_us: i64,
+    /// Maximum latency in microseconds.
+    pub max_us: i64,
+    /// 95th percentile latency in microseconds (approximate).
+    pub p95_us: i64,
     /// Error percentage (0.0 to 100.0).
     pub error_pct: f64,
     /// Total request bytes.
@@ -62,9 +62,9 @@ impl QueryEngine {
             SELECT
                 COALESCE(tool, '<' || method || '>') AS label,
                 COUNT(*) AS calls,
-                AVG(latency_ms) AS avg_ms,
-                MIN(latency_ms) AS min_ms,
-                MAX(latency_ms) AS max_ms,
+                AVG(latency_us) AS avg_us,
+                MIN(latency_us) AS min_us,
+                MAX(latency_us) AS max_us,
                 SUM(CASE WHEN status != 'ok' THEN 1 ELSE 0 END) * 100.0
                     / COUNT(*) AS error_pct,
                 COALESCE(SUM(bytes_in), 0) AS total_bytes_in,
@@ -93,18 +93,18 @@ impl QueryEngine {
 
         // Step 2: Compute p95 per group by loading latency values into Rust.
         let p95_sql = "
-            SELECT latency_ms
+            SELECT latency_us
             FROM requests
             WHERE (?1 IS NULL OR proxy = ?1) AND ts >= ?2
               AND COALESCE(tool, '<' || method || '>') = ?3
-            ORDER BY latency_ms
+            ORDER BY latency_us
         ";
 
         let mut total_calls: i64 = 0;
         let mut total_errors: f64 = 0.0;
         let mut tools = Vec::with_capacity(groups.len());
 
-        for (label, calls, avg_ms, min_ms, max_ms, error_pct, bytes_in, bytes_out) in &groups {
+        for (label, calls, avg_us, min_us, max_us, error_pct, bytes_in, bytes_out) in &groups {
             // Load all latency values for this group to compute p95.
             let mut p95_stmt = self.conn().prepare(p95_sql)?;
             let latencies: Vec<i64> = p95_stmt
@@ -121,10 +121,10 @@ impl QueryEngine {
             tools.push(ToolStats {
                 label: label.clone(),
                 calls: *calls,
-                avg_ms: *avg_ms,
-                min_ms: *min_ms,
-                max_ms: *max_ms,
-                p95_ms: p95,
+                avg_us: *avg_us,
+                min_us: *min_us,
+                max_us: *max_us,
+                p95_us: p95,
                 error_pct: *error_pct,
                 total_bytes_in: *bytes_in,
                 total_bytes_out: *bytes_out,

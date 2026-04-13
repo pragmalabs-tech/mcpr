@@ -9,8 +9,8 @@ use super::logs::{LOG_COLUMNS, LogRow, map_log_row};
 pub struct SlowParams {
     /// Proxy name to filter by (None = all proxies).
     pub proxy: Option<String>,
-    /// Minimum latency in milliseconds to include.
-    pub threshold_ms: i64,
+    /// Minimum latency in microseconds to include.
+    pub threshold_us: i64,
     /// Only rows newer than this unix ms timestamp.
     pub since_ts: i64,
     /// Filter to a specific tool name.
@@ -26,10 +26,10 @@ impl QueryEngine {
             "SELECT {LOG_COLUMNS}
             FROM requests
             WHERE (?1 IS NULL OR proxy = ?1)
-              AND latency_ms >= ?2
+              AND latency_us >= ?2
               AND (?3 IS NULL OR tool = ?3)
               AND ts >= ?4
-            ORDER BY latency_ms DESC
+            ORDER BY latency_us DESC
             LIMIT ?5"
         );
 
@@ -37,7 +37,7 @@ impl QueryEngine {
         let rows = stmt.query_map(
             params![
                 params.proxy,
-                params.threshold_ms,
+                params.threshold_us,
                 params.tool,
                 params.since_ts,
                 params.limit,
@@ -58,7 +58,7 @@ impl QueryEngine {
             "SELECT {LOG_COLUMNS}
             FROM requests
             WHERE (?1 IS NULL OR proxy = ?1)
-              AND latency_ms >= ?2
+              AND latency_us >= ?2
               AND (?3 IS NULL OR tool = ?3)
               AND ts > ?4
             ORDER BY ts ASC"
@@ -66,7 +66,7 @@ impl QueryEngine {
 
         let mut stmt = self.conn().prepare(&sql)?;
         let rows = stmt.query_map(
-            params![params.proxy, params.threshold_ms, params.tool, after_ts],
+            params![params.proxy, params.threshold_us, params.tool, after_ts],
             map_log_row,
         )?;
 

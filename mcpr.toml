@@ -1,0 +1,11 @@
+# mcpr.toml
+mcp = "http://localhost:9001/mcp"
+
+# [tunnel]
+# enabled = true
+# token = "mcpr_hd1ipTvD41lexiL1zGCKyRvqq4t4Wgr9qXkEPaQA"
+# subdomain = "weather-test-local"
+
+[cloud]
+token = "mcpr_hd1ipTvD41lexiL1zGCKyRvqq4t4Wgr9qXkEPaQA"
+server = "weather-test"

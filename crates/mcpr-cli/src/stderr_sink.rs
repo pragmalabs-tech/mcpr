@@ -35,7 +35,11 @@ impl EventSink for StderrSink {
                 let status = e.status;
                 let method = &e.method;
                 let path = &e.path;
-                let duration = format!(" {}ms", e.latency_ms);
+                let duration = if e.latency_us >= 1_000 {
+                    format!(" {:.2}ms", e.latency_us as f64 / 1_000.0)
+                } else {
+                    format!(" {}μs", e.latency_us)
+                };
                 let size = e
                     .response_size
                     .map(|b| {

@@ -71,7 +71,7 @@ pub async fn forward_and_passthrough(
                 Ok(b) => b,
                 Err(err_resp) => return err_resp,
             };
-            let upstream_ms = upstream_start.elapsed().as_millis() as u64;
+            let upstream_us = upstream_start.elapsed().as_micros() as u64;
 
             // Rewrite upstream base URL → proxy URL in JSON responses
             let is_json = resp_headers
@@ -105,8 +105,8 @@ pub async fn forward_and_passthrough(
                 mcp_method: None,
                 tool: None,
                 status,
-                latency_ms: start.elapsed().as_millis() as u64,
-                upstream_ms: Some(upstream_ms),
+                latency_us: start.elapsed().as_micros() as u64,
+                upstream_us: Some(upstream_us),
                 request_size: Some(body.len() as u64),
                 response_size: Some(response_body.len() as u64),
                 error_code: None,
@@ -117,7 +117,7 @@ pub async fn forward_and_passthrough(
             build_response(status, &resp_headers, Body::from(response_body))
         }
         Err(e) => {
-            let upstream_ms = upstream_start.elapsed().as_millis() as u64;
+            let upstream_us = upstream_start.elapsed().as_micros() as u64;
             state.event_bus.emit(ProxyEvent::Request(RequestEvent {
                 id: uuid::Uuid::new_v4().to_string(),
                 ts: chrono::Utc::now().timestamp_millis(),
@@ -128,8 +128,8 @@ pub async fn forward_and_passthrough(
                 mcp_method: None,
                 tool: None,
                 status: 502,
-                latency_ms: start.elapsed().as_millis() as u64,
-                upstream_ms: Some(upstream_ms),
+                latency_us: start.elapsed().as_micros() as u64,
+                upstream_us: Some(upstream_us),
                 request_size: Some(body.len() as u64),
                 response_size: None,
                 error_code: None,

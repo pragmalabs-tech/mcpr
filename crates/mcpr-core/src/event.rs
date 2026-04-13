@@ -56,10 +56,10 @@ pub struct RequestEvent {
 
     /// HTTP response status code.
     pub status: u16,
-    /// Wall-clock latency: proxy received request → sent response (ms).
-    pub latency_ms: u64,
-    /// Time spent waiting for upstream response (ms).
-    pub upstream_ms: Option<u64>,
+    /// Wall-clock latency: proxy received request → sent response (μs).
+    pub latency_us: u64,
+    /// Time spent waiting for upstream response (μs).
+    pub upstream_us: Option<u64>,
     /// Request payload size in bytes.
     pub request_size: Option<u64>,
     /// Response payload size in bytes.
@@ -149,7 +149,7 @@ pub struct SchemaStaleEvent {
 ///     fn on_event(&self, event: &ProxyEvent) {
 ///         if let ProxyEvent::Request(e) = event {
 ///             self.request_counter.inc();
-///             self.latency_histogram.observe(e.latency_ms as f64);
+///             self.latency_histogram.observe(e.latency_us as f64);
 ///         }
 ///     }
 ///     fn name(&self) -> &'static str { "prometheus" }
