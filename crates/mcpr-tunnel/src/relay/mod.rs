@@ -682,4 +682,99 @@ mod tests {
         let decoded: TunnelRequest = serde_json::from_str(&json).unwrap();
         assert!(decoded.body.is_none());
     }
+
+    // ── build_relay_app ───────────────────────────────────────────────
+
+    fn test_relay_config() -> RelayConfig {
+        RelayConfig {
+            port: 0, // OS picks
+            relay_domain: "tunnel.test".into(),
+            auth_provider: None,
+            auth_provider_secret: None,
+            tokens: HashMap::new(),
+            max_request_body_size: None,
+            max_response_body_size: None,
+        }
+    }
+
+    #[test]
+    fn build_relay_app__returns_router_and_port() {
+        let cfg = test_relay_config();
+        let (_, port) = build_relay_app(cfg);
+        assert_eq!(port, 0);
+    }
+
+    #[test]
+    fn build_relay_app__with_static_tokens() {
+        let mut tokens = HashMap::new();
+        tokens.insert("tok_abc".to_string(), vec!["myapp".to_string()]);
+        let cfg = RelayConfig {
+            port: 9090,
+            relay_domain: "tunnel.test".into(),
+            auth_provider: None,
+            auth_provider_secret: None,
+            tokens,
+            max_request_body_size: None,
+            max_response_body_size: None,
+        };
+        let (_, port) = build_relay_app(cfg);
+        assert_eq!(port, 9090);
+    }
+
+    #[test]
+    fn build_relay_app__with_body_size_limits() {
+        let cfg = RelayConfig {
+            port: 8080,
+            relay_domain: "tunnel.test".into(),
+            auth_provider: None,
+            auth_provider_secret: None,
+            tokens: HashMap::new(),
+            max_request_body_size: Some(1024),
+            max_response_body_size: Some(2048),
+        };
+        let (_, port) = build_relay_app(cfg);
+        assert_eq!(port, 8080);
+    }
+
+    #[tokio::test]
+    async fn build_relay_app__serves_tunnel_register_endpoint() {
+        let cfg = test_relay_config();
+        let (app, _) = build_relay_app(cfg);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // A GET to /_tunnel/register without WS upgrade headers.
+        let resp = reqwest::get(format!("http://{addr}/_tunnel/register"))
+            .await
+            .unwrap();
+        // Not a 404 — route exists (likely 400 since no WS upgrade).
+        assert_ne!(resp.status().as_u16(), 404);
+    }
+
+    #[tokio::test]
+    async fn build_relay_app__fallback_returns_502_for_unknown_subdomain() {
+        let cfg = test_relay_config();
+        let (app, _) = build_relay_app(cfg);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        // With no tunnel registered, requests should return 502.
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/some-path"))
+            .header("host", "unknown.tunnel.test")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 502);
+    }
 }

@@ -1231,4 +1231,176 @@ mod tests {
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.name.as_deref(), Some("email"));
     }
+
+    // ── Relay config parsing ──────────────────────────────────────────
+
+    #[test]
+    fn file_config__relay_mode_detected() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+            domain = "tunnel.example.com"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.is_relay());
+    }
+
+    #[test]
+    fn file_config__gateway_mode_by_default() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+            port = 3000
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.is_relay());
+    }
+
+    #[test]
+    fn file_config__relay_domain_parsed() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+            domain = "tunnel.example.com"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.relay.domain.as_deref(), Some("tunnel.example.com"));
+    }
+
+    #[test]
+    fn file_config__relay_static_tokens() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+            domain = "tunnel.example.com"
+            [[relay.tokens]]
+            token = "tok_abc"
+            subdomains = ["myapp", "myapp-*"]
+            [[relay.tokens]]
+            token = "tok_xyz"
+            subdomains = ["other"]
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.relay.tokens.len(), 2);
+        assert_eq!(config.relay.tokens[0].token, "tok_abc");
+        assert_eq!(config.relay.tokens[0].subdomains, vec!["myapp", "myapp-*"]);
+        assert_eq!(config.relay.tokens[1].token, "tok_xyz");
+        assert_eq!(config.relay.tokens[1].subdomains, vec!["other"]);
+    }
+
+    #[test]
+    fn file_config__relay_auth_provider() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+            domain = "tunnel.example.com"
+            auth_provider = "https://auth.example.com"
+            auth_provider_secret = "secret123"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.relay.auth_provider.as_deref(),
+            Some("https://auth.example.com")
+        );
+        assert_eq!(
+            config.relay.auth_provider_secret.as_deref(),
+            Some("secret123")
+        );
+    }
+
+    #[test]
+    fn file_config__relay_defaults_empty() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.relay.domain.is_none());
+        assert!(config.relay.auth_provider.is_none());
+        assert!(config.relay.auth_provider_secret.is_none());
+        assert!(config.relay.tokens.is_empty());
+    }
+
+    #[test]
+    fn file_config__relay_body_size_limits() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            max_request_body_size = 1048576
+            max_response_body_size = 2097152
+            [relay]
+            domain = "tunnel.example.com"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.max_request_body_size, Some(1_048_576));
+        assert_eq!(config.max_response_body_size, Some(2_097_152));
+    }
+
+    // ── load_relay ────────────────────────────────────────────────────
+
+    #[test]
+    fn load_relay__builds_relay_config() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 9090
+            [relay]
+            domain = "tunnel.test"
+            [[relay.tokens]]
+            token = "tok_a"
+            subdomains = ["app1"]
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let runtime = RuntimeOptions {
+            drain_timeout: 30,
+            log_format: LogFormat::Json,
+            admin_bind: "127.0.0.1:9901".to_string(),
+        };
+        let mode = load_relay(file, runtime);
+        match mode {
+            Mode::Relay(cfg) => {
+                assert_eq!(cfg.port, 9090);
+                assert_eq!(cfg.relay_domain, "tunnel.test");
+                assert_eq!(cfg.tokens.len(), 1);
+                assert!(cfg.tokens.contains_key("tok_a"));
+                assert_eq!(cfg.tokens["tok_a"], vec!["app1"]);
+            }
+            Mode::Gateway(_) => panic!("expected Mode::Relay"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "port is required")]
+    fn load_relay__panics_without_port() {
+        let toml_str = r#"
+            mode = "relay"
+            [relay]
+            domain = "tunnel.test"
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let runtime = RuntimeOptions {
+            drain_timeout: 30,
+            log_format: LogFormat::Json,
+            admin_bind: "127.0.0.1:9901".to_string(),
+        };
+        load_relay(file, runtime);
+    }
+
+    #[test]
+    #[should_panic(expected = "relay.domain is required")]
+    fn load_relay__panics_without_domain() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let runtime = RuntimeOptions {
+            drain_timeout: 30,
+            log_format: LogFormat::Json,
+            admin_bind: "127.0.0.1:9901".to_string(),
+        };
+        load_relay(file, runtime);
+    }
 }

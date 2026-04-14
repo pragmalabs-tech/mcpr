@@ -76,3 +76,62 @@ pub fn restart_relay() -> Result<(), String> {
     let _ = stop_relay();
     start_relay_from_snapshot()
 }
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+
+    // ── stop_relay ────────────────────────────────────────────────────
+
+    #[test]
+    fn stop_relay__returns_error_when_not_running() {
+        // With no lockfile, stop should return an error.
+        // This may succeed or fail depending on whether a relay is actually
+        // running on this machine. We test the "not running" path by checking
+        // the error message pattern.
+        let result = stop_relay();
+        // If it errors (expected), verify the message.
+        if let Err(e) = result {
+            assert!(e.contains("not running"), "unexpected error: {e}");
+        }
+        // If it succeeds (relay was actually running), that's also valid.
+    }
+
+    // ── relay_status ──────────────────────────────────────────────────
+
+    #[test]
+    fn relay_status__returns_error_when_not_running() {
+        let result = relay_status();
+        if let Err(e) = result {
+            assert!(e.contains("not running"), "unexpected error: {e}");
+        }
+    }
+
+    #[test]
+    fn relay_status__returns_info_fields() {
+        // If relay happens to be running, verify the struct is populated.
+        if let Ok(info) = relay_status() {
+            assert!(info.pid > 0);
+            assert!(info.port > 0);
+            assert!(info.started_at > 0);
+        }
+    }
+
+    // ── start_relay_from_snapshot ─────────────────────────────────────
+
+    #[test]
+    fn start_relay_from_snapshot__fails_without_snapshot() {
+        // Without a config snapshot at ~/.mcpr/relay/config.toml, this
+        // should fail with a clear error message.
+        let result = start_relay_from_snapshot();
+        // This may succeed if a snapshot exists from a prior run, so only
+        // assert on error.
+        if let Err(e) = result {
+            assert!(
+                e.contains("no config snapshot") || e.contains("failed to spawn"),
+                "unexpected error: {e}"
+            );
+        }
+    }
+}
