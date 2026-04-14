@@ -94,7 +94,7 @@ jobs:
           cargo publish -p mcpr-core --no-verify
           cargo publish -p mcpr-tunnel --no-verify
           cargo publish -p mcpr-integrations --no-verify
-          cargo publish -p mcpr-cli --no-verify
+          cargo publish -p mcpr-proxy --no-verify
 
   docker:
     name: Docker image

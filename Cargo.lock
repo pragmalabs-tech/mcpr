@@ -1031,36 +1031,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
-name = "mcpr"
-version = "0.4.30"
-dependencies = [
- "axum",
- "base64",
- "chrono",
- "clap",
- "colored",
- "dashmap",
- "dirs",
- "futures-util",
- "http-body-util",
- "mcpr-core",
- "mcpr-integrations",
- "mcpr-tunnel",
- "nix",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "toml",
- "tower-http",
- "url",
- "uuid",
-]
-
-[[package]]
 name = "mcpr-core"
 version = "0.4.30"
 dependencies = [
@@ -1092,6 +1062,36 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "mcpr-proxy"
+version = "0.4.30"
+dependencies = [
+ "axum",
+ "base64",
+ "chrono",
+ "clap",
+ "colored",
+ "dashmap",
+ "dirs",
+ "futures-util",
+ "http-body-util",
+ "mcpr-core",
+ "mcpr-integrations",
+ "mcpr-tunnel",
+ "nix",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "toml",
+ "tower-http",
+ "url",
+ "uuid",
 ]
 
 [[package]]
