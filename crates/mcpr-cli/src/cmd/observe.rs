@@ -202,7 +202,14 @@ pub fn status(args: ProxyStatusArgs) -> Result<(), String> {
         })
         .map_err(|e| format!("query failed: {e}"))?;
 
-    render::status_overview(&stats_result, &session_rows, &name, &args.since, mode);
+    render::status_overview(
+        &stats_result,
+        &session_rows,
+        &running,
+        &name,
+        &args.since,
+        mode,
+    );
     Ok(())
 }
 

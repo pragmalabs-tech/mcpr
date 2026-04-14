@@ -62,6 +62,26 @@ pub fn log_path(name: &str) -> PathBuf {
     proxy_dir(name).join("proxy.log")
 }
 
+/// Path to the tunnel URL file for a proxy.
+fn tunnel_url_path(name: &str) -> PathBuf {
+    proxy_dir(name).join("tunnel_url")
+}
+
+/// Write the tunnel/public URL for a proxy (called after tunnel resolution).
+pub fn write_tunnel_url(name: &str, url: &str) -> std::io::Result<()> {
+    let dir = proxy_dir(name);
+    fs::create_dir_all(&dir)?;
+    fs::write(tunnel_url_path(name), url)
+}
+
+/// Read the tunnel URL for a proxy, if one was written.
+pub fn read_tunnel_url(name: &str) -> Option<String> {
+    fs::read_to_string(tunnel_url_path(name))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Read lock info for a proxy by name (used by daemon readiness check).
 pub fn read_lock_info(name: &str) -> Option<LockInfo> {
     read_lock_file(&lock_path(name))
@@ -402,5 +422,55 @@ mod tests {
 
         let info = read_lock_file(&lock).unwrap();
         assert!(is_process_alive(info.pid));
+    }
+
+    // ── tunnel URL ────────────────────────────────────────────
+
+    #[test]
+    fn tunnel_url__roundtrip() {
+        let name = "__test_tunnel_roundtrip__";
+        let url = "https://myapp.tunnel.mcpr.app";
+        write_tunnel_url(name, url).unwrap();
+        let read_back = read_tunnel_url(name);
+        // clean up
+        let _ = fs::remove_dir_all(proxy_dir(name));
+        assert_eq!(read_back, Some(url.to_string()));
+    }
+
+    #[test]
+    fn tunnel_url__localhost_roundtrip() {
+        let name = "__test_tunnel_localhost__";
+        let url = "http://localhost:3000";
+        write_tunnel_url(name, url).unwrap();
+        let read_back = read_tunnel_url(name);
+        let _ = fs::remove_dir_all(proxy_dir(name));
+        assert_eq!(read_back, Some(url.to_string()));
+    }
+
+    #[test]
+    fn tunnel_url__missing_returns_none() {
+        assert!(read_tunnel_url("__nonexistent_proxy_xyz__").is_none());
+    }
+
+    #[test]
+    fn tunnel_url__empty_file_returns_none() {
+        let name = "__test_tunnel_empty__";
+        let dir = proxy_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tunnel_url"), "").unwrap();
+        let result = read_tunnel_url(name);
+        let _ = fs::remove_dir_all(dir);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn tunnel_url__trims_whitespace() {
+        let name = "__test_tunnel_trim__";
+        let dir = proxy_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("tunnel_url"), "  https://x.tunnel.mcpr.app\n").unwrap();
+        let result = read_tunnel_url(name);
+        let _ = fs::remove_dir_all(dir);
+        assert_eq!(result, Some("https://x.tunnel.mcpr.app".to_string()));
     }
 }

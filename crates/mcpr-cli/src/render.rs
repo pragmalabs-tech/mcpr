@@ -646,6 +646,21 @@ pub fn status_running_proxies(running: &[&(String, LockStatus)]) {
                 info.pid,
                 uptime,
             );
+
+            // Show URLs with studio quick-test links.
+            let localhost_url = format!("http://localhost:{}", info.port);
+            let tunnel_url = crate::proxy_lock::read_tunnel_url(name);
+
+            println!();
+            println!("  localhost: {localhost_url}");
+            println!("  studio:   https://cloud.mcpr.app/studio?url={localhost_url}");
+            if let Some(ref turl) = tunnel_url
+                && *turl != localhost_url
+            {
+                println!();
+                println!("  tunnel:   {turl}");
+                println!("  studio:   https://cloud.mcpr.app/studio?url={turl}");
+            }
         }
     }
     println!();
@@ -655,6 +670,7 @@ pub fn status_running_proxies(running: &[&(String, LockStatus)]) {
 pub fn status_overview(
     stats_result: &StatsResult,
     session_rows: &[SessionRow],
+    running: &[&(String, LockStatus)],
     proxy: &Option<String>,
     since: &str,
     mode: OutputMode,
@@ -662,6 +678,31 @@ pub fn status_overview(
     let active_sessions = session_rows.iter().filter(|s| s.is_active).count();
 
     if mode == OutputMode::Json {
+        let proxies_json: Vec<_> = running
+            .iter()
+            .filter_map(|(name, status)| {
+                if let LockStatus::Held(info) = status {
+                    let localhost = format!("http://localhost:{}", info.port);
+                    let tunnel =
+                        crate::proxy_lock::read_tunnel_url(name).filter(|t| *t != localhost);
+                    let tunnel_studio = tunnel
+                        .as_ref()
+                        .map(|t| format!("https://cloud.mcpr.app/studio?url={t}"));
+                    Some(serde_json::json!({
+                        "name": name,
+                        "port": info.port,
+                        "pid": info.pid,
+                        "localhost_url": localhost,
+                        "studio_url": format!("https://cloud.mcpr.app/studio?url={localhost}"),
+                        "tunnel_url": tunnel,
+                        "tunnel_studio_url": tunnel_studio,
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         let snapshot = serde_json::json!({
             "proxy": proxy,
             "since": since,
@@ -669,6 +710,7 @@ pub fn status_overview(
             "error_pct": stats_result.error_pct,
             "active_sessions": active_sessions,
             "total_sessions": session_rows.len(),
+            "running_proxies": proxies_json,
             "tools": stats_result.tools,
         });
         println!("{}", serde_json::to_string(&snapshot).unwrap_or_default());
@@ -1140,5 +1182,88 @@ mod tests {
         };
         // Should not panic and should produce output.
         relay_status(&info);
+    }
+
+    // ── status_running_proxies ────────────────────────────────────────
+
+    fn held_proxy(name: &str, port: u16) -> (String, LockStatus) {
+        (
+            name.to_string(),
+            LockStatus::Held(LockInfo {
+                pid: std::process::id(),
+                port,
+                started_at: chrono::Utc::now().timestamp() - 120,
+                config_path: "/tmp/test.toml".to_string(),
+                daemon_pid: None,
+            }),
+        )
+    }
+
+    #[test]
+    fn status_running_proxies__empty_is_noop() {
+        status_running_proxies(&[]);
+    }
+
+    #[test]
+    fn status_running_proxies__shows_proxy_info() {
+        let proxy = held_proxy("test-proxy", 3000);
+        // Should not panic — writes proxy table + localhost/studio URLs.
+        status_running_proxies(&[&proxy]);
+    }
+
+    #[test]
+    fn status_running_proxies__multiple_proxies() {
+        let a = held_proxy("alpha", 3000);
+        let b = held_proxy("beta", 3001);
+        status_running_proxies(&[&a, &b]);
+    }
+
+    // ── status_overview ──────────────────────────────────────────────
+
+    fn empty_stats() -> StatsResult {
+        StatsResult {
+            total_calls: 0,
+            error_pct: 0.0,
+            tools: vec![],
+        }
+    }
+
+    #[test]
+    fn status_overview__pretty_no_sessions() {
+        let proxy = held_proxy("demo", 3000);
+        status_overview(
+            &empty_stats(),
+            &[],
+            &[&proxy],
+            &None,
+            "1h",
+            OutputMode::Pretty,
+        );
+    }
+
+    #[test]
+    fn status_overview__json_includes_running_proxies() {
+        let proxy = held_proxy("demo", 3000);
+        // JSON mode should not panic and should include running_proxies.
+        status_overview(
+            &empty_stats(),
+            &[],
+            &[&proxy],
+            &None,
+            "1h",
+            OutputMode::Json,
+        );
+    }
+
+    #[test]
+    fn status_overview__json_empty_proxies() {
+        status_overview(
+            &empty_stats(),
+            &[],
+            &[],
+            &Some("my-proxy".to_string()),
+            "24h",
+            OutputMode::Json,
+        );
     }
 }
