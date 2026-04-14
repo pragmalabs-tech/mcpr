@@ -984,51 +984,52 @@ pub fn store_vacuum(result: &VacuumResult, dry_run: bool) {
 // ── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn format_latency_sub_ms() {
+    fn format_latency__sub_ms() {
         assert_eq!(format_latency(142), "142μs");
         assert_eq!(format_latency(0), "0μs");
         assert_eq!(format_latency(999), "999μs");
     }
 
     #[test]
-    fn format_latency_ms_range() {
+    fn format_latency__ms_range() {
         assert_eq!(format_latency(1_000), "1.00ms");
         assert_eq!(format_latency(4_201), "4.20ms");
         assert_eq!(format_latency(142_000), "142.00ms");
     }
 
     #[test]
-    fn format_latency_over_1s() {
+    fn format_latency__over_1s() {
         assert_eq!(format_latency(1_000_000), "1,000ms");
         assert_eq!(format_latency(4_201_000), "4,201ms");
         assert_eq!(format_latency(12_345_000), "12,345ms");
     }
 
     #[test]
-    fn format_latency_boundary_us_to_ms() {
+    fn format_latency__boundary_us_to_ms() {
         assert_eq!(format_latency(999), "999μs");
         assert_eq!(format_latency(1_000), "1.00ms");
     }
 
     #[test]
-    fn format_latency_boundary_ms_to_s() {
+    fn format_latency__boundary_ms_to_s() {
         assert_eq!(format_latency(999_999), "1000.00ms");
         assert_eq!(format_latency(1_000_000), "1,000ms");
     }
 
     #[test]
-    fn format_latency_fractional_ms() {
+    fn format_latency__fractional_ms() {
         assert_eq!(format_latency(1_500), "1.50ms");
         assert_eq!(format_latency(10_250), "10.25ms");
         assert_eq!(format_latency(500_000), "500.00ms");
     }
 
     #[test]
-    fn format_bytes_units() {
+    fn format_bytes__units() {
         assert_eq!(format_bytes(0), "0 B");
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(1024), "1.0 KB");
@@ -1037,29 +1038,29 @@ mod tests {
     }
 
     #[test]
-    fn format_bytes_col_none() {
+    fn format_bytes_col__none() {
         assert_eq!(format_bytes_col(None), "—");
     }
 
     #[test]
-    fn format_bytes_col_zero() {
+    fn format_bytes_col__zero() {
         assert_eq!(format_bytes_col(Some(0)), "—");
     }
 
     #[test]
-    fn format_bytes_col_negative() {
+    fn format_bytes_col__negative() {
         assert_eq!(format_bytes_col(Some(-1)), "—");
     }
 
     #[test]
-    fn format_bytes_col_positive() {
+    fn format_bytes_col__positive() {
         assert_eq!(format_bytes_col(Some(512)), "512 B");
         assert_eq!(format_bytes_col(Some(2048)), "2.0 KB");
         assert_eq!(format_bytes_col(Some(1_500_000)), "1.4 MB");
     }
 
     #[test]
-    fn format_ts_valid() {
+    fn format_ts__valid() {
         let ts = 1712345678000_i64; // 2024-04-05T18:34:38Z
         let result = format_ts(ts);
         assert_ne!(result, "?");
@@ -1067,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn format_ts_zero() {
+    fn format_ts__zero() {
         let result = format_ts(0);
         assert_ne!(result, "?"); // epoch is valid
     }

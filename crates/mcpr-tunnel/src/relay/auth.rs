@@ -94,6 +94,7 @@ fn glob_match(pattern: &str, value: &str) -> bool {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use axum::routing::post;
@@ -120,18 +121,14 @@ mod tests {
         }
     }
 
-    // ── verify_token tests ──
-
     #[tokio::test]
-    async fn verify_token_valid_returns_subdomains() {
+    async fn verify_token__valid_returns_subdomains() {
         let (url, _handle) = mock_auth_provider(post(
             |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| async move {
-                // Verify relay sends the secret header
                 assert_eq!(
                     headers.get("x-relay-secret").unwrap().to_str().unwrap(),
                     "test-secret"
                 );
-                // Verify request body
                 assert_eq!(body["token"], "valid-token");
                 assert_eq!(body["subdomain"], "myapp");
 
@@ -149,7 +146,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_token_invalid_returns_error() {
+    async fn verify_token__invalid_returns_error() {
         let (url, _handle) = mock_auth_provider(post(|| async {
             (
                 axum::http::StatusCode::UNAUTHORIZED,
@@ -174,7 +171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_token_forbidden_subdomain() {
+    async fn verify_token__forbidden_subdomain() {
         let (url, _handle) = mock_auth_provider(post(|| async {
             (
                 axum::http::StatusCode::FORBIDDEN,
@@ -199,7 +196,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_token_provider_500_returns_unavailable() {
+    async fn verify_token__provider_500_unavailable() {
         let (url, _handle) = mock_auth_provider(post(|| async {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR
         }))
@@ -209,7 +206,7 @@ mod tests {
         let result = verify_token(&auth, "any-token", "myapp").await;
         match result {
             Err(AuthError::ProviderUnavailable(msg)) => {
-                assert!(msg.contains("500"), "expected '500' in msg: {msg}");
+                assert!(msg.contains("500"));
             }
             other => panic!(
                 "expected ProviderUnavailable, got {:?}",
@@ -223,7 +220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_token_provider_unreachable() {
+    async fn verify_token__provider_unreachable() {
         let auth = AuthProviderConfig {
             url: "http://127.0.0.1:1".to_string(), // nothing listening
             secret: "test-secret".to_string(),
@@ -236,10 +233,8 @@ mod tests {
         assert!(matches!(result, Err(AuthError::ProviderUnavailable(_))));
     }
 
-    // ── Full flow: verify_token + subdomain_matches ──
-
     #[tokio::test]
-    async fn full_flow_valid_token_correct_subdomain() {
+    async fn verify_token__full_flow_correct_subdomain() {
         let (url, _handle) = mock_auth_provider(post(|| async {
             Json(serde_json::json!({ "subdomains": ["myapp", "myapp-*"] }))
         }))
@@ -253,7 +248,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_flow_valid_token_wrong_subdomain() {
+    async fn verify_token__full_flow_wrong_subdomain() {
         let (url, _handle) = mock_auth_provider(post(|| async {
             Json(serde_json::json!({ "subdomains": ["myapp", "myapp-*"] }))
         }))
@@ -261,15 +256,12 @@ mod tests {
 
         let auth = test_auth_config(&url);
         let allowed = verify_token(&auth, "good-token", "other").await.unwrap();
-        // Token is valid but "other" is not in the allowed list
         assert!(!subdomain_matches(&allowed, "other"));
         assert!(!subdomain_matches(&allowed, "hijack"));
     }
 
-    // ── subdomain_matches tests ──
-
     #[test]
-    fn subdomain_matches_exact() {
+    fn subdomain_matches__exact() {
         let patterns = vec!["myapp".into(), "other".into()];
         assert!(subdomain_matches(&patterns, "myapp"));
         assert!(subdomain_matches(&patterns, "other"));
@@ -277,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_matches_prefix_wildcard() {
+    fn subdomain_matches__prefix_wildcard() {
         let patterns = vec!["myapp-*".into()];
         assert!(subdomain_matches(&patterns, "myapp-dev"));
         assert!(subdomain_matches(&patterns, "myapp-feat-123"));
@@ -287,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_matches_suffix_wildcard() {
+    fn subdomain_matches__suffix_wildcard() {
         let patterns = vec!["*-preview".into()];
         assert!(subdomain_matches(&patterns, "feat-preview"));
         assert!(subdomain_matches(&patterns, "hotfix-preview"));
@@ -296,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_matches_infix_wildcard() {
+    fn subdomain_matches__infix_wildcard() {
         let patterns = vec!["pr-*-mycompany".into()];
         assert!(subdomain_matches(&patterns, "pr-123-mycompany"));
         assert!(subdomain_matches(&patterns, "pr-abc-mycompany"));
@@ -306,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_matches_star_matches_everything() {
+    fn subdomain_matches__star_matches_everything() {
         let patterns = vec!["*".into()];
         assert!(subdomain_matches(&patterns, "anything"));
         assert!(subdomain_matches(&patterns, "myapp-dev"));
@@ -314,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_matches_mixed() {
+    fn subdomain_matches__mixed() {
         let patterns = vec!["prod".into(), "staging-*".into()];
         assert!(subdomain_matches(&patterns, "prod"));
         assert!(subdomain_matches(&patterns, "staging-v2"));
@@ -323,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn subdomain_matches_empty_patterns() {
+    fn subdomain_matches__empty_patterns() {
         let patterns: Vec<String> = vec![];
         assert!(!subdomain_matches(&patterns, "anything"));
     }

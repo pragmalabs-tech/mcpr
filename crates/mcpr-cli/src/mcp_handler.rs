@@ -534,11 +534,12 @@ fn emit_schema_stale(state: &AppState, response_body: &Value) {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn make_request_event_includes_client_info() {
+    fn make_request_event__includes_client_info() {
         let event = make_request_event(
             "proxy",
             "/mcp",
@@ -567,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn make_request_event_none_client_info() {
+    fn make_request_event__none_client_info() {
         let event = make_request_event(
             "proxy",
             "/mcp",
@@ -595,7 +596,7 @@ mod tests {
     }
 
     #[test]
-    fn make_request_event_non_tool_call_has_no_tool() {
+    fn make_request_event__non_tool_call_has_no_tool() {
         let event = make_request_event(
             "proxy",
             "/mcp",
@@ -617,14 +618,13 @@ mod tests {
         let ProxyEvent::Request(e) = event else {
             panic!("expected Request variant");
         };
-        // tool is only set for ToolsCall
         assert!(e.tool.is_none());
         assert_eq!(e.client_name.as_deref(), Some("cursor"));
         assert!(e.client_version.is_none());
     }
 
     #[test]
-    fn make_request_event_with_error() {
+    fn make_request_event__with_error() {
         let rpc_err = (-32600i64, "bad request".to_string());
         let event = make_request_event(
             "proxy",
@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn request_event_serializes_client_fields() {
+    fn make_request_event__serializes_client_fields() {
         let event = make_request_event(
             "proxy",
             "/mcp",
@@ -681,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn request_event_omits_null_client_in_json() {
+    fn make_request_event__omits_null_client_in_json() {
         let event = make_request_event(
             "proxy",
             "/mcp",
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_platform_variants() {
+    fn normalize_platform__variants() {
         assert_eq!(normalize_platform("Claude Desktop"), "claude");
         assert_eq!(normalize_platform("cursor-editor"), "cursor");
         assert_eq!(normalize_platform("ChatGPT Plugin"), "chatgpt");

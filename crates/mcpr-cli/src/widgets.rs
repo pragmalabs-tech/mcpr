@@ -209,13 +209,14 @@ pub(crate) fn rewrite_html_asset_urls(html: &str, proxy_url: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     // ── MIME type detection ──
 
     #[test]
-    fn mime_js() {
+    fn mime_from_path__js() {
         assert_eq!(
             mime_from_path(&PathBuf::from("app.js")),
             "application/javascript"
@@ -223,33 +224,33 @@ mod tests {
     }
 
     #[test]
-    fn mime_css() {
+    fn mime_from_path__css() {
         assert_eq!(mime_from_path(&PathBuf::from("style.css")), "text/css");
     }
 
     #[test]
-    fn mime_html() {
+    fn mime_from_path__html() {
         assert_eq!(mime_from_path(&PathBuf::from("index.html")), "text/html");
     }
 
     #[test]
-    fn mime_svg() {
+    fn mime_from_path__svg() {
         assert_eq!(mime_from_path(&PathBuf::from("icon.svg")), "image/svg+xml");
     }
 
     #[test]
-    fn mime_woff2() {
+    fn mime_from_path__woff2() {
         assert_eq!(mime_from_path(&PathBuf::from("font.woff2")), "font/woff2");
     }
 
     #[test]
-    fn mime_jpeg_variants() {
+    fn mime_from_path__jpeg_variants() {
         assert_eq!(mime_from_path(&PathBuf::from("photo.jpg")), "image/jpeg");
         assert_eq!(mime_from_path(&PathBuf::from("photo.jpeg")), "image/jpeg");
     }
 
     #[test]
-    fn mime_unknown_extension() {
+    fn mime_from_path__unknown_extension() {
         assert_eq!(
             mime_from_path(&PathBuf::from("file.xyz")),
             "application/octet-stream"
@@ -257,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn mime_no_extension() {
+    fn mime_from_path__no_extension() {
         assert_eq!(
             mime_from_path(&PathBuf::from("Makefile")),
             "application/octet-stream"
@@ -267,7 +268,7 @@ mod tests {
     // ── HTML asset URL rewriting ──
 
     #[test]
-    fn rewrite_double_quote_absolute_paths() {
+    fn rewrite_html_asset_urls__double_quote_absolute() {
         let html = r#"<script src="/assets/main.js"></script>"#;
         let result = rewrite_html_asset_urls(html, "https://abc.tunnel.example.com");
         assert_eq!(
@@ -277,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_single_quote_absolute_paths() {
+    fn rewrite_html_asset_urls__single_quote_absolute() {
         let html = "<link href='/styles/app.css'>";
         let result = rewrite_html_asset_urls(html, "https://abc.tunnel.example.com");
         assert_eq!(
@@ -287,14 +288,14 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_preserves_relative_paths() {
+    fn rewrite_html_asset_urls__preserves_relative() {
         let html = r#"<script src="./local.js"></script>"#;
         let result = rewrite_html_asset_urls(html, "https://abc.tunnel.example.com");
         assert_eq!(result, r#"<script src="./local.js"></script>"#);
     }
 
     #[test]
-    fn rewrite_preserves_external_urls() {
+    fn rewrite_html_asset_urls__preserves_external() {
         let html = r#"<script src="https://cdn.example.com/lib.js"></script>"#;
         let result = rewrite_html_asset_urls(html, "https://abc.tunnel.example.com");
         assert_eq!(
@@ -304,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_multiple_paths() {
+    fn rewrite_html_asset_urls__multiple_paths() {
         let html = r#"<script src="/js/a.js"></script><link href="/css/b.css">"#;
         let result = rewrite_html_asset_urls(html, "https://proxy.example.com");
         assert!(result.contains("https://proxy.example.com/js/a.js"));
@@ -312,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_strips_trailing_slash_from_proxy() {
+    fn rewrite_html_asset_urls__strips_trailing_slash() {
         let html = r#"<script src="/app.js"></script>"#;
         let result = rewrite_html_asset_urls(html, "https://proxy.example.com");
         assert!(result.contains("https://proxy.example.com/app.js"));

@@ -158,11 +158,12 @@ fn percentile(sorted_values: &[i64], pct: u8) -> i64 {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn percentile_basic() {
+    fn percentile__basic() {
         let values = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         assert_eq!(percentile(&values, 50), 5);
         assert_eq!(percentile(&values, 95), 10);
@@ -170,12 +171,12 @@ mod tests {
     }
 
     #[test]
-    fn percentile_empty() {
+    fn percentile__empty() {
         assert_eq!(percentile(&[], 95), 0);
     }
 
     #[test]
-    fn percentile_single() {
+    fn percentile__single() {
         assert_eq!(percentile(&[42], 95), 42);
     }
 }

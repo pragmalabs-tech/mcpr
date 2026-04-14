@@ -917,11 +917,12 @@ fn load_gateway(
 // ── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn subdomain_and_token_are_independent() {
+    fn resolve_tunnel_identity__subdomain_and_token_independent() {
         let (token, sub) = GatewayConfig::resolve_tunnel_identity(
             Some("myapp".into()),
             Some("mcpr_secret_token_123".into()),
@@ -931,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn no_subdomain_uses_token() {
+    fn resolve_tunnel_identity__no_subdomain_uses_token() {
         let (token, sub) =
             GatewayConfig::resolve_tunnel_identity(None, Some("my-saved-token".into()));
         assert_eq!(token, "my-saved-token");
@@ -940,12 +941,12 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "tunnel token must be set")]
-    fn no_token_panics() {
+    fn resolve_tunnel_identity__no_token_panics() {
         GatewayConfig::resolve_tunnel_identity(Some("myapp".into()), None);
     }
 
     #[test]
-    fn max_request_body_size_parses_from_toml() {
+    fn file_config__max_request_body_size() {
         let toml_str = r#"
             mcp = "http://localhost:9000"
             port = 8080
@@ -956,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn max_response_body_size_parses_from_toml() {
+    fn file_config__max_response_body_size() {
         let toml_str = r#"
             mcp = "http://localhost:9000"
             port = 8080
@@ -967,7 +968,7 @@ mod tests {
     }
 
     #[test]
-    fn body_size_defaults_to_none() {
+    fn file_config__body_size_defaults_to_none() {
         let toml_str = r#"
             mcp = "http://localhost:9000"
             port = 8080
@@ -979,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn max_concurrent_upstream_parses_from_toml() {
+    fn file_config__max_concurrent_upstream() {
         let toml_str = r#"
             mcp = "http://localhost:9000"
             port = 8080
@@ -992,7 +993,7 @@ mod tests {
     // ── Cloud config parsing tests ─────────────────────────────────────
 
     #[test]
-    fn cloud_config_parses_all_fields() {
+    fn cloud_config__parses_all_fields() {
         let toml_str = r#"
             [cloud]
             token = "mcpr_abc123"
@@ -1013,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_config_defaults_to_none() {
+    fn cloud_config__defaults_to_none() {
         let toml_str = r#"
             mcp = "http://localhost:9000"
         "#;
@@ -1026,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_config_partial_fields() {
+    fn cloud_config__partial_fields() {
         let toml_str = r#"
             [cloud]
             token = "mcpr_xyz"
@@ -1040,7 +1041,7 @@ mod tests {
     }
 
     #[test]
-    fn cloud_config_coexists_with_other_sections() {
+    fn cloud_config__coexists_with_other_sections() {
         let toml_str = r#"
             mcp = "http://localhost:9000"
             port = 8080
@@ -1063,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_cloud_section_uses_defaults() {
+    fn cloud_config__empty_section_uses_defaults() {
         let toml_str = r#"
             [cloud]
         "#;
@@ -1075,7 +1076,7 @@ mod tests {
     // ── Proxy name resolution ──────────────────────────────────────────
 
     #[test]
-    fn name_explicit_wins_over_filename() {
+    fn resolve_proxy_name__explicit_wins() {
         let name = resolve_proxy_name(
             Some("my-proxy"),
             Some(std::path::Path::new("/tmp/search.toml")),
@@ -1084,37 +1085,37 @@ mod tests {
     }
 
     #[test]
-    fn name_from_filename_stem() {
+    fn resolve_proxy_name__from_filename_stem() {
         let name = resolve_proxy_name(None, Some(std::path::Path::new("/tmp/search.toml")));
         assert_eq!(name, "search");
     }
 
     #[test]
-    fn name_mcpr_toml_becomes_default() {
+    fn resolve_proxy_name__mcpr_toml_becomes_default() {
         let name = resolve_proxy_name(None, Some(std::path::Path::new("/tmp/mcpr.toml")));
         assert_eq!(name, "default");
     }
 
     #[test]
-    fn name_no_config_path_becomes_default() {
+    fn resolve_proxy_name__no_config_becomes_default() {
         let name = resolve_proxy_name(None, None);
         assert_eq!(name, "default");
     }
 
     #[test]
-    fn name_sanitizes_special_chars() {
+    fn resolve_proxy_name__sanitizes_special_chars() {
         let name = resolve_proxy_name(Some("my proxy!@#$"), None);
         assert_eq!(name, "my-proxy----");
     }
 
     #[test]
-    fn name_preserves_hyphens_and_alphanumeric() {
+    fn resolve_proxy_name__preserves_hyphens() {
         let name = resolve_proxy_name(Some("search-v2"), None);
         assert_eq!(name, "search-v2");
     }
 
     #[test]
-    fn name_from_toml_field() {
+    fn file_config__name_from_toml() {
         let toml_str = r#"
             name = "email"
             mcp = "http://localhost:9000"

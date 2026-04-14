@@ -50,61 +50,61 @@ pub fn parse_threshold_us(s: &str) -> Result<i64, String> {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_since_valid() {
+    fn parse_since__valid() {
         let ts = parse_since("1h").unwrap();
         let now = chrono::Utc::now().timestamp_millis();
-        // Should be roughly 1 hour ago (within 1 second tolerance)
         assert!((now - ts - 3_600_000).abs() < 1000);
     }
 
     #[test]
-    fn parse_since_invalid() {
+    fn parse_since__invalid() {
         assert!(parse_since("bad").is_err());
         assert!(parse_since("").is_err());
     }
 
     #[test]
-    fn parse_threshold_us_micros() {
+    fn parse_threshold_us__micros() {
         assert_eq!(parse_threshold_us("200us").unwrap(), 200);
         assert_eq!(parse_threshold_us("500μs").unwrap(), 500);
     }
 
     #[test]
-    fn parse_threshold_us_millis() {
+    fn parse_threshold_us__millis() {
         assert_eq!(parse_threshold_us("500ms").unwrap(), 500_000);
         assert_eq!(parse_threshold_us("100ms").unwrap(), 100_000);
     }
 
     #[test]
-    fn parse_threshold_us_seconds() {
+    fn parse_threshold_us__seconds() {
         assert_eq!(parse_threshold_us("1s").unwrap(), 1_000_000);
         assert_eq!(parse_threshold_us("2s").unwrap(), 2_000_000);
     }
 
     #[test]
-    fn parse_threshold_us_invalid() {
+    fn parse_threshold_us__invalid() {
         assert!(parse_threshold_us("bad").is_err());
         assert!(parse_threshold_us("ms").is_err());
     }
 
     #[test]
-    fn parse_threshold_us_zero() {
+    fn parse_threshold_us__zero() {
         assert_eq!(parse_threshold_us("0us").unwrap(), 0);
         assert_eq!(parse_threshold_us("0ms").unwrap(), 0);
     }
 
     #[test]
-    fn parse_threshold_us_large_values() {
+    fn parse_threshold_us__large_values() {
         assert_eq!(parse_threshold_us("10s").unwrap(), 10_000_000);
         assert_eq!(parse_threshold_us("5000ms").unwrap(), 5_000_000);
     }
 
     #[test]
-    fn parse_threshold_us_rejects_empty_number() {
+    fn parse_threshold_us__rejects_empty_number() {
         assert!(parse_threshold_us("us").is_err());
         assert!(parse_threshold_us("μs").is_err());
     }

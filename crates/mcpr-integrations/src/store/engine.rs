@@ -187,12 +187,13 @@ impl std::fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use crate::store::event::{RequestEvent, RequestStatus, SessionEvent};
 
     #[test]
-    fn open_record_shutdown() {
+    fn store__open_record_shutdown() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
@@ -202,7 +203,6 @@ mod tests {
         })
         .unwrap();
 
-        // Record some events.
         store.record(StoreEvent::Session(SessionEvent {
             session_id: "s1".into(),
             proxy: "test-proxy".into(),
@@ -227,10 +227,8 @@ mod tests {
             bytes_out: Some(200),
         }));
 
-        // Shutdown flushes pending events.
         store.shutdown();
 
-        // Verify data was written by opening a read-only connection.
         let conn = db::open_connection(&db_path).unwrap();
 
         let count: i64 = conn

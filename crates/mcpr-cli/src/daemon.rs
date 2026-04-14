@@ -513,11 +513,12 @@ pub fn ensure_not_running() {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn pid_file_roundtrip() {
+    fn pid_file__roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let pid_path = dir.path().join("test.pid");
 
@@ -526,7 +527,6 @@ mod tests {
         let content = format!("{pid}\n{ts}\n");
         std::fs::write(&pid_path, &content).unwrap();
 
-        // Parse it the same way read_pid_file does.
         let read = std::fs::read_to_string(&pid_path).unwrap();
         let mut lines = read.lines();
         let read_pid: u32 = lines.next().unwrap().parse().unwrap();
@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn pid_file_malformed_parse_fails() {
+    fn pid_file__malformed_parse_fails() {
         let content = "not-a-number\ngarbage\n";
         let mut lines = content.lines();
         let result = lines.next().and_then(|s| s.parse::<u32>().ok());
@@ -546,13 +546,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn process_alive_self() {
+    fn is_process_alive__self() {
         assert!(is_process_alive(std::process::id()));
     }
 
     #[cfg(unix)]
     #[test]
-    fn process_alive_nonexistent() {
+    fn is_process_alive__nonexistent() {
         assert!(!is_process_alive(99_999_999));
     }
 }

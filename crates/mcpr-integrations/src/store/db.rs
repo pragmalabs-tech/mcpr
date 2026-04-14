@@ -116,18 +116,18 @@ fn get_schema_version(conn: &Connection) -> u32 {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn open_and_migrate_fresh_db() {
+    fn run_migrations__fresh_db() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
         run_migrations(&conn, "0.3.0-test").unwrap();
 
-        // Verify tables exist
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('requests', 'sessions', 'meta')",
@@ -135,9 +135,8 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 3, "all three tables should exist");
+        assert_eq!(count, 3);
 
-        // Verify schema version
         let version: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -147,7 +146,6 @@ mod tests {
             .unwrap();
         assert_eq!(version, "4");
 
-        // Verify mcpr version
         let mcpr_ver: String = conn
             .query_row(
                 "SELECT value FROM meta WHERE key = 'mcpr_version'",
@@ -159,13 +157,12 @@ mod tests {
     }
 
     #[test]
-    fn migrations_are_idempotent() {
+    fn run_migrations__idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
         run_migrations(&conn, "0.3.0").unwrap();
-        // Running again should not fail.
         run_migrations(&conn, "0.3.1").unwrap();
 
         let mcpr_ver: String = conn
@@ -175,18 +172,17 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(mcpr_ver, "0.3.1", "version should be updated on re-run");
+        assert_eq!(mcpr_ver, "0.3.1");
     }
 
     #[test]
-    fn v3_migration_adds_proxy_to_schema_tables() {
+    fn run_migrations__v3_adds_proxy() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
         run_migrations(&conn, "test").unwrap();
 
-        // Verify server_schema has proxy column.
         conn.execute(
             "INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash)
              VALUES ('search', 'http://localhost:9000', 'tools/list', '{}', 1000, 'abc')",
@@ -203,7 +199,6 @@ mod tests {
             .unwrap();
         assert_eq!(proxy, "search");
 
-        // Verify schema_changes has proxy column.
         conn.execute(
             "INSERT INTO schema_changes (proxy, upstream_url, method, change_type, detected_at)
              VALUES ('search', 'http://localhost:9000', 'tools/list', 'initial', 1000)",
@@ -220,7 +215,6 @@ mod tests {
             .unwrap();
         assert_eq!(proxy, "search");
 
-        // Verify UNIQUE(proxy, upstream_url, method) — same upstream+method but different proxy works.
         conn.execute(
             "INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash)
              VALUES ('email', 'http://localhost:9000', 'tools/list', '{}', 2000, 'def')",
@@ -231,18 +225,17 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM server_schema", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, 2, "two rows with same upstream but different proxy");
+        assert_eq!(count, 2);
     }
 
     #[test]
-    fn v4_migration_renames_latency_column() {
+    fn run_migrations__v4_renames_latency() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
         run_migrations(&conn, "test").unwrap();
 
-        // After V4 migration, the column should be latency_us.
         conn.execute(
             "INSERT INTO requests (request_id, ts, proxy, method, latency_us, status)
              VALUES ('r1', 1000, 'api', 'tools/call', 142000, 'ok')",
@@ -261,19 +254,17 @@ mod tests {
     }
 
     #[test]
-    fn v4_migration_converts_existing_ms_to_us() {
+    fn run_migrations__v4_converts_ms_to_us() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
 
-        // Simulate V3 state: run V1+V2+V3 only.
         conn.execute_batch(schema::V1_SCHEMA).unwrap();
         conn.execute_batch(schema::V1_META_SEED).unwrap();
         conn.execute_batch(schema::V2_SCHEMA).unwrap();
         conn.execute_batch(schema::V3_SCHEMA).unwrap();
 
-        // Insert data with old ms column.
         conn.execute(
             "INSERT INTO requests (request_id, ts, proxy, method, latency_ms, status)
              VALUES ('r1', 1000, 'api', 'tools/call', 42, 'ok')",
@@ -287,10 +278,8 @@ mod tests {
         )
         .unwrap();
 
-        // Run V4 migration.
         conn.execute_batch(schema::V4_SCHEMA).unwrap();
 
-        // Verify column renamed and values multiplied by 1000.
         let latency1: i64 = conn
             .query_row(
                 "SELECT latency_us FROM requests WHERE request_id = 'r1'",
@@ -298,7 +287,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(latency1, 42_000, "42ms should become 42,000μs");
+        assert_eq!(latency1, 42_000);
 
         let latency2: i64 = conn
             .query_row(
@@ -307,18 +296,17 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(latency2, 1_500_000, "1500ms should become 1,500,000μs");
+        assert_eq!(latency2, 1_500_000);
     }
 
     #[test]
-    fn v4_migration_rebuilds_slow_index() {
+    fn run_migrations__v4_rebuilds_slow_index() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
         run_migrations(&conn, "test").unwrap();
 
-        // Verify the slow index references latency_us.
         let idx_sql: String = conn
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_requests_slow'",
@@ -326,25 +314,20 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(
-            idx_sql.contains("latency_us"),
-            "slow index should reference latency_us, got: {idx_sql}"
-        );
+        assert!(idx_sql.contains("latency_us"));
     }
 
     #[test]
-    fn v3_migration_default_proxy_for_existing_data() {
+    fn run_migrations__v3_defaults_proxy() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
 
-        // Simulate V2 state: run V1+V2 only.
         conn.execute_batch(super::schema::V1_SCHEMA).unwrap();
         conn.execute_batch(super::schema::V1_META_SEED).unwrap();
         conn.execute_batch(super::schema::V2_SCHEMA).unwrap();
 
-        // Insert data in V2 schema (no proxy column).
         conn.execute(
             "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash)
              VALUES ('http://localhost:9000', 'tools/list', '{}', 1000, 'abc')",
@@ -352,10 +335,8 @@ mod tests {
         )
         .unwrap();
 
-        // Run V3 migration.
         conn.execute_batch(super::schema::V3_SCHEMA).unwrap();
 
-        // Existing row should have proxy = 'default'.
         let proxy: String = conn
             .query_row(
                 "SELECT proxy FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
@@ -363,9 +344,6 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(
-            proxy, "default",
-            "V3 migration should default proxy to 'default'"
-        );
+        assert_eq!(proxy, "default");
     }
 }

@@ -106,18 +106,19 @@ impl ModuleConfig for FileStoreConfig {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn default_config_is_valid() {
+    fn file_store_config__default_is_valid() {
         let config = FileStoreConfig::default();
         assert!(config.is_enabled());
         assert!(config.validate().is_empty());
     }
 
     #[test]
-    fn disabled_config_is_valid() {
+    fn file_store_config__disabled_is_valid() {
         let config = FileStoreConfig {
             enabled: Some(false),
             path: None,
@@ -128,7 +129,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_path_is_error() {
+    fn file_store_config__empty_path_is_error() {
         let config = FileStoreConfig {
             enabled: None,
             path: Some("".into()),
@@ -141,7 +142,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_name_is_error() {
+    fn file_store_config__empty_name_is_error() {
         let config = FileStoreConfig {
             enabled: None,
             path: None,
@@ -153,7 +154,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_from_toml() {
+    fn file_store_config__parses_from_toml() {
         let toml_str = r#"
             enabled = false
             path = "/tmp/mcpr.db"

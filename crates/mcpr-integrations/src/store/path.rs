@@ -52,30 +52,27 @@ pub fn ensure_parent_dir(path: &std::path::Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn explicit_config_path_wins() {
+    fn resolve_db_path__explicit_config_wins() {
         let result = resolve_db_path(Some("/custom/path/my.db"));
         assert_eq!(result, Some(PathBuf::from("/custom/path/my.db")));
     }
 
     #[test]
-    fn platform_default_returns_some() {
-        // Should return Some on any system with $HOME set.
+    fn resolve_db_path__platform_default_returns_some() {
         let result = resolve_db_path(None);
-        assert!(
-            result.is_some(),
-            "platform default should resolve on dev machines"
-        );
+        assert!(result.is_some());
         let path = result.unwrap();
         assert!(path.to_str().unwrap().contains(".mcpr"));
         assert!(path.to_str().unwrap().ends_with("store.db"));
     }
 
     #[test]
-    fn ensure_parent_dir_creates_dirs() {
+    fn ensure_parent_dir__creates_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("sub").join("dir").join("mcpr.db");
         assert!(!db_path.parent().unwrap().exists());

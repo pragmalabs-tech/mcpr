@@ -576,50 +576,45 @@ fn relay_log(
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
-    // ── Subdomain derivation ──
-
     #[test]
-    fn token_to_subdomain_deterministic() {
+    fn token_to_subdomain__deterministic() {
         let a = token_to_subdomain("my-token");
         let b = token_to_subdomain("my-token");
-        assert_eq!(a, b, "same token must produce same subdomain");
+        assert_eq!(a, b);
     }
 
     #[test]
-    fn token_to_subdomain_different_tokens_differ() {
+    fn token_to_subdomain__different_tokens_differ() {
         let a = token_to_subdomain("token-a");
         let b = token_to_subdomain("token-b");
         assert_ne!(a, b);
     }
 
     #[test]
-    fn token_to_subdomain_is_12_hex_chars() {
+    fn token_to_subdomain__is_12_hex_chars() {
         let sub = token_to_subdomain("test");
         assert_eq!(sub.len(), 12);
         assert!(sub.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    // ── Hex encoding ──
-
     #[test]
-    fn hex_encode_empty() {
+    fn hex_encode__empty() {
         assert_eq!(hex::encode(&[]), "");
     }
 
     #[test]
-    fn hex_encode_known_values() {
+    fn hex_encode__known_values() {
         assert_eq!(hex::encode(&[0x00]), "00");
         assert_eq!(hex::encode(&[0xff]), "ff");
         assert_eq!(hex::encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
     }
 
-    // ── Tunnel protocol serialization ──
-
     #[test]
-    fn tunnel_request_roundtrip() {
+    fn tunnel_request__roundtrip() {
         let req = TunnelRequest {
             id: "req-1".into(),
             method: "POST".into(),
@@ -639,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_response_roundtrip() {
+    fn tunnel_response__roundtrip() {
         let resp = TunnelResponse {
             id: "req-1".into(),
             status: 200,
@@ -654,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn register_ack_roundtrip() {
+    fn register_ack__roundtrip() {
         let ack = RegisterAck {
             subdomain: "abc123".into(),
             url: "https://abc123.tunnel.example.com".into(),
@@ -666,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn tunnel_request_no_body() {
+    fn tunnel_request__no_body() {
         let req = TunnelRequest {
             id: "req-2".into(),
             method: "GET".into(),

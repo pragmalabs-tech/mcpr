@@ -85,6 +85,7 @@ impl EventSink for StderrSink {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use mcpr_core::event::RequestEvent;
@@ -113,29 +114,28 @@ mod tests {
     }
 
     #[test]
-    fn pretty_format_sub_ms_latency() {
+    fn stderr_sink__pretty_sub_ms_latency() {
         let sink = StderrSink::new(LogFormat::Pretty);
         let event = make_event(200);
-        // Just verify it doesn't panic and the sink accepts the event.
         sink.on_event(&event);
     }
 
     #[test]
-    fn pretty_format_ms_latency() {
+    fn stderr_sink__pretty_ms_latency() {
         let sink = StderrSink::new(LogFormat::Pretty);
         let event = make_event(4_200);
         sink.on_event(&event);
     }
 
     #[test]
-    fn pretty_format_seconds_latency() {
+    fn stderr_sink__pretty_seconds_latency() {
         let sink = StderrSink::new(LogFormat::Pretty);
         let event = make_event(1_500_000);
         sink.on_event(&event);
     }
 
     #[test]
-    fn json_format_contains_latency_us() {
+    fn stderr_sink__json_contains_latency_us() {
         let event = make_event(200);
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"latency_us\":200"));

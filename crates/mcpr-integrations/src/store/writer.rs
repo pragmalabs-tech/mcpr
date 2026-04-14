@@ -453,6 +453,7 @@ fn sha256_hex(input: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use crate::store::db;
@@ -467,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_batch_inserts_session_and_request() {
+    fn flush_batch__inserts_session_and_request() {
         let conn = test_db();
         let mut batch = vec![
             StoreEvent::Session(SessionEvent {
@@ -496,7 +497,6 @@ mod tests {
 
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Verify session was inserted
         let client: String = conn
             .query_row(
                 "SELECT client_name FROM sessions WHERE session_id = 'sess-1'",
@@ -506,7 +506,6 @@ mod tests {
             .unwrap();
         assert_eq!(client, "claude-desktop");
 
-        // Verify request was inserted
         let tool: String = conn
             .query_row(
                 "SELECT tool FROM requests WHERE request_id = 'req-1'",
@@ -516,7 +515,6 @@ mod tests {
             .unwrap();
         assert_eq!(tool, "search");
 
-        // Verify session counters were updated
         let (calls, errors): (i64, i64) = conn
             .query_row(
                 "SELECT total_calls, total_errors FROM sessions WHERE session_id = 'sess-1'",
@@ -527,7 +525,6 @@ mod tests {
         assert_eq!(calls, 1);
         assert_eq!(errors, 0);
 
-        // Verify latency_us is stored correctly
         let latency: i64 = conn
             .query_row(
                 "SELECT latency_us FROM requests WHERE request_id = 'req-1'",
@@ -535,11 +532,11 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(latency, 142, "latency_us should be stored as-is in μs");
+        assert_eq!(latency, 142);
     }
 
     #[test]
-    fn flush_batch_sub_ms_latency() {
+    fn flush_batch__sub_ms_latency() {
         let conn = test_db();
         let mut batch = vec![
             StoreEvent::Session(SessionEvent {
@@ -575,14 +572,13 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(latency, 200, "sub-millisecond latency should be preserved");
+        assert_eq!(latency, 200);
     }
 
     #[test]
-    fn flush_batch_session_closed() {
+    fn flush_batch__session_closed() {
         let conn = test_db();
 
-        // Insert a session first.
         let mut batch = vec![StoreEvent::Session(SessionEvent {
             session_id: "sess-2".into(),
             proxy: "api".into(),
@@ -593,7 +589,6 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Close it.
         let mut batch = vec![StoreEvent::SessionClosed {
             session_id: "sess-2".into(),
             ended_at: 3000,
@@ -611,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_batch_error_increments_counter() {
+    fn flush_batch__error_increments_counter() {
         let conn = test_db();
 
         let mut batch = vec![
@@ -664,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn flush_batch_inserts_schema_initial() {
+    fn flush_batch__inserts_schema_initial() {
         let conn = test_db();
         let payload = tools_payload(&["search", "create"]);
         let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
@@ -677,7 +672,6 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Verify server_schema row.
         let (method, hash): (String, String) = conn
             .query_row(
                 "SELECT method, schema_hash FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
@@ -688,7 +682,6 @@ mod tests {
         assert_eq!(method, "tools/list");
         assert!(!hash.is_empty());
 
-        // Verify "initial" change.
         let change_type: String = conn
             .query_row(
                 "SELECT change_type FROM schema_changes WHERE upstream_url = 'http://localhost:9000'",
@@ -700,11 +693,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_batch_schema_unchanged_no_new_change() {
+    fn flush_batch__schema_unchanged_no_new_change() {
         let conn = test_db();
         let payload = tools_payload(&["search"]);
 
-        // First capture.
         let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
             proxy: "api".into(),
@@ -715,7 +707,6 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Same payload again.
         let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 2000,
             proxy: "api".into(),
@@ -726,13 +717,11 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Only 1 change record (the initial one).
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_changes", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 1);
 
-        // But captured_at was updated.
         let captured_at: i64 = conn
             .query_row(
                 "SELECT captured_at FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
@@ -744,10 +733,9 @@ mod tests {
     }
 
     #[test]
-    fn flush_batch_schema_diff_records_changes() {
+    fn flush_batch__schema_diff_records_changes() {
         let conn = test_db();
 
-        // Initial: tools a, b.
         let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
             proxy: "api".into(),
@@ -758,7 +746,6 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Changed: tools a, c (b removed, c added).
         let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 2000,
             proxy: "api".into(),
@@ -769,7 +756,6 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Should have: initial + tool_removed(b) + tool_added(c).
         let mut stmt = conn
             .prepare("SELECT change_type, item_name FROM schema_changes ORDER BY id")
             .unwrap();
@@ -786,10 +772,9 @@ mod tests {
     }
 
     #[test]
-    fn flush_batch_schema_stale() {
+    fn flush_batch__schema_stale() {
         let conn = test_db();
 
-        // Insert initial schema first.
         let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
             proxy: "api".into(),
@@ -800,7 +785,6 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Mark as stale.
         let mut batch = vec![StoreEvent::SchemaStale {
             proxy: "api".into(),
             upstream_url: "http://localhost:9000".into(),
@@ -809,7 +793,6 @@ mod tests {
         }];
         flush_batch(&conn, &mut batch, &mut HashMap::new());
 
-        // Should have "initial" + "stale" changes.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_changes", [], |row| row.get(0))
             .unwrap();
@@ -826,11 +809,10 @@ mod tests {
     }
 
     #[test]
-    fn flush_batch_pagination_merges() {
+    fn flush_batch__pagination_merges() {
         let conn = test_db();
         let mut page_buffer = HashMap::new();
 
-        // First page.
         let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 1000,
             proxy: "api".into(),
@@ -841,13 +823,11 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut page_buffer);
 
-        // Not written yet — still buffering.
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM server_schema", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0);
 
-        // Last page.
         let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
             ts: 2000,
             proxy: "api".into(),
@@ -858,7 +838,6 @@ mod tests {
         })];
         flush_batch(&conn, &mut batch, &mut page_buffer);
 
-        // Now written — merged payload should have both tools.
         let payload: String = conn
             .query_row(
                 "SELECT payload FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
@@ -872,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn sha256_hex_deterministic() {
+    fn sha256_hex__deterministic() {
         let h1 = sha256_hex("hello");
         let h2 = sha256_hex("hello");
         assert_eq!(h1, h2);

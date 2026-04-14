@@ -64,31 +64,32 @@ pub fn since_to_cutoff_ms(duration: Duration) -> i64 {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn parse_seconds() {
+    fn parse_duration__seconds() {
         assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
     }
 
     #[test]
-    fn parse_minutes() {
+    fn parse_duration__minutes() {
         assert_eq!(parse_duration("15m"), Some(Duration::from_secs(15 * 60)));
     }
 
     #[test]
-    fn parse_hours() {
+    fn parse_duration__hours() {
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(2 * 3600)));
     }
 
     #[test]
-    fn parse_days() {
+    fn parse_duration__days() {
         assert_eq!(parse_duration("7d"), Some(Duration::from_secs(7 * 86400)));
     }
 
     #[test]
-    fn parse_weeks() {
+    fn parse_duration__weeks() {
         assert_eq!(
             parse_duration("2w"),
             Some(Duration::from_secs(2 * 7 * 86400))
@@ -96,22 +97,22 @@ mod tests {
     }
 
     #[test]
-    fn invalid_suffix() {
+    fn parse_duration__invalid_suffix() {
         assert_eq!(parse_duration("10x"), None);
     }
 
     #[test]
-    fn invalid_number() {
+    fn parse_duration__invalid_number() {
         assert_eq!(parse_duration("abch"), None);
     }
 
     #[test]
-    fn empty_string() {
+    fn parse_duration__empty_string() {
         assert_eq!(parse_duration(""), None);
     }
 
     #[test]
-    fn whitespace_handling() {
+    fn parse_duration__whitespace_handling() {
         assert_eq!(parse_duration(" 5m "), Some(Duration::from_secs(5 * 60)));
     }
 }
