@@ -356,6 +356,8 @@ mcpr relay start relay.toml       # relay server
 
 ### Using Docker
 
+The standard mcpr image works for both proxy and relay — override the command:
+
 ```bash
 docker run -d \
   --name mcpr-relay \
@@ -364,18 +366,6 @@ docker run -d \
   -v ./relay.toml:/app/relay.toml \
   ghcr.io/cptrodgers/mcpr:latest \
   relay run /app/relay.toml
-```
-
-With the `Relay.Dockerfile` (bakes the binary into a smaller image):
-
-```bash
-docker build -f Relay.Dockerfile --build-arg VERSION=v0.4.12 -t mcpr-relay .
-docker run -d \
-  --name mcpr-relay \
-  --restart unless-stopped \
-  -p 8080:8080 \
-  -v ./relay.toml:/app/relay.toml \
-  mcpr-relay
 ```
 
 Update:
