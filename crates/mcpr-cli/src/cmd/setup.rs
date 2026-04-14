@@ -17,15 +17,26 @@ const CREATE_NEW: &str = "+ Create new";
 struct ExistingConfig {
     mcp: Option<String>,
     name: Option<String>,
+    cloud_token: Option<String>,
+    cloud_server: Option<String>,
 }
 
 /// Try to load defaults from an existing config file.
 fn load_existing_config(path: &str) -> Option<ExistingConfig> {
     let content = std::fs::read_to_string(path).ok()?;
     let table: toml::Table = content.parse().ok()?;
+    let cloud = table.get("cloud").and_then(|v| v.as_table());
     Some(ExistingConfig {
         mcp: table.get("mcp").and_then(|v| v.as_str()).map(String::from),
         name: table.get("name").and_then(|v| v.as_str()).map(String::from),
+        cloud_token: cloud
+            .and_then(|c| c.get("token"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        cloud_server: cloud
+            .and_then(|c| c.get("server"))
+            .and_then(|v| v.as_str())
+            .map(String::from),
     })
 }
 
@@ -191,14 +202,38 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         None
     };
 
-    // ── 6. Create project token ────────────────────────────────────────
+    // ── 6. Create or reuse project token ─────────────────────────────
     println!("\n  Setting up...");
-    let token_name = format!("cli-setup-{}", server.slug);
-    let token = client
-        .create_project_token(&project.id, Some(&token_name))
-        .await
-        .map_err(|e| format!("failed to create token: {e}"))?;
-    println!("    {} Created project token", "✓".green());
+
+    // If the existing config has a token for the same server, offer to reuse it.
+    let token_value = if let Some(ref existing_token) = defaults.cloud_token
+        && defaults.cloud_server.as_deref() == Some(&server.slug)
+    {
+        let reuse = Confirm::new("Reuse existing project token?")
+            .with_default(true)
+            .prompt()
+            .map_err(|e| format!("prompt error: {e}"))?;
+        if reuse {
+            println!("    {} Reusing existing project token", "✓".green());
+            existing_token.clone()
+        } else {
+            let token_name = format!("cli-setup-{}", server.slug);
+            let token = client
+                .create_project_token(&project.id, Some(&token_name))
+                .await
+                .map_err(|e| format!("failed to create token: {e}"))?;
+            println!("    {} Created project token", "✓".green());
+            token.token
+        }
+    } else {
+        let token_name = format!("cli-setup-{}", server.slug);
+        let token = client
+            .create_project_token(&project.id, Some(&token_name))
+            .await
+            .map_err(|e| format!("failed to create token: {e}"))?;
+        println!("    {} Created project token", "✓".green());
+        token.token
+    };
 
     // ── 7. Write config ────────────────────────────────────────────────
     let config_path = match output {
@@ -209,7 +244,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         &mcp_url,
         &server,
         endpoint.as_ref(),
-        &token.token,
+        &token_value,
         cloud_url,
         port,
     );
@@ -230,7 +265,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
     }
 
     println!(
-        "  {} https://mcpr.app/projects/{}/servers/{}",
+        "  {} https://cloud.mcpr.app/projects/{}/servers/{}",
         "Dashboard: ".bold(),
         project.slug,
         server.slug
@@ -750,13 +785,15 @@ mod tests {
         let path = dir.path().join("mcpr.toml");
         std::fs::write(
             &path,
-            "name = \"my-server\"\nmcp = \"http://localhost:8080\"\n",
+            "name = \"my-server\"\nmcp = \"http://localhost:8080\"\n\n[cloud]\ntoken = \"mcpr_abc\"\nserver = \"my-server\"\n",
         )
         .unwrap();
 
         let cfg = load_existing_config(path.to_str().unwrap()).unwrap();
         assert_eq!(cfg.mcp.as_deref(), Some("http://localhost:8080"));
         assert_eq!(cfg.name.as_deref(), Some("my-server"));
+        assert_eq!(cfg.cloud_token.as_deref(), Some("mcpr_abc"));
+        assert_eq!(cfg.cloud_server.as_deref(), Some("my-server"));
     }
 
     #[test]

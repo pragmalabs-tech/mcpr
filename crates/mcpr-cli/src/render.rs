@@ -135,7 +135,7 @@ pub fn log_startup(
 
     // Dashboard link — requires cloud server slug.
     if let Some(server) = cloud_server {
-        eprintln!("  dashboard: https://mcpr.app/servers/{server}");
+        eprintln!("  dashboard: https://cloud.mcpr.app/servers/{server}");
     }
 
     eprintln!();

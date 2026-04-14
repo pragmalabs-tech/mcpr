@@ -148,7 +148,10 @@ fn main() {
         CliAction::Start { foreground: false } => {
             #[cfg(unix)]
             {
-                daemon::ensure_not_running();
+                if daemon::ensure_not_running() {
+                    // Daemon already running — nothing to do.
+                    std::process::exit(0);
+                }
                 let fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
                     eprintln!("error: {e}");
                     std::process::exit(1);

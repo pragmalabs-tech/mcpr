@@ -317,6 +317,28 @@ fn wait_for_proxy_readiness(
                     "proxy \"{}\" started (PID: {}, port: {})",
                     proxy_name, info.pid, info.port
                 );
+                // Show tunnel and dashboard URLs from config snapshot.
+                if let Ok(snapshot) = super::proxy_lock::read_snapshot(proxy_name)
+                    && let Ok(table) = snapshot.parse::<toml::Table>()
+                {
+                    if let Some(subdomain) = table
+                        .get("tunnel")
+                        .and_then(|t| t.as_table())
+                        .filter(|t| t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
+                        .and_then(|t| t.get("subdomain"))
+                        .and_then(|v| v.as_str())
+                    {
+                        eprintln!("  tunnel:    https://{subdomain}.tunnel.mcpr.app");
+                    }
+                    if let Some(server) = table
+                        .get("cloud")
+                        .and_then(|t| t.as_table())
+                        .and_then(|t| t.get("server"))
+                        .and_then(|v| v.as_str())
+                    {
+                        eprintln!("  dashboard: https://cloud.mcpr.app/servers/{server}");
+                    }
+                }
             } else {
                 eprintln!("proxy \"{}\" started", proxy_name);
             }
@@ -585,20 +607,19 @@ fn wait_for_exit(pid: u32, timeout: Duration) {
 // ── Status command ─────────────────────────────────────────────────────
 
 /// Print daemon status and proxy listing, then exit.
-/// If a daemon is already running, stop it first so the new one can take over.
-pub fn ensure_not_running() {
+/// If a daemon is already running, skip starting a new one.
+/// Returns `true` if a daemon is already running (caller should skip startup).
+pub fn ensure_not_running() -> bool {
     match check_status() {
         DaemonStatus::Running(info) => {
-            eprintln!("Stopping existing mcprd (PID: {})...", info.pid);
-            send_sigterm(info.pid);
-            wait_for_exit(info.pid, Duration::from_secs(10));
-            remove_pid_file();
-            eprintln!("Stopped. Starting new daemon...");
+            eprintln!("Daemon already running (PID: {}).", info.pid);
+            true
         }
         DaemonStatus::Stale(_) => {
             remove_pid_file();
+            false
         }
-        DaemonStatus::NotRunning => {}
+        DaemonStatus::NotRunning => false,
     }
 }
 
