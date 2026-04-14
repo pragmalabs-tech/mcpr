@@ -90,7 +90,7 @@ mod tests {
     use mcpr_core::event::RequestEvent;
 
     fn make_event(latency_us: u64) -> ProxyEvent {
-        ProxyEvent::Request(RequestEvent {
+        ProxyEvent::Request(Box::new(RequestEvent {
             id: "test".into(),
             ts: 1_700_000_000_000,
             proxy: "api".into(),
@@ -106,8 +106,10 @@ mod tests {
             response_size: Some(200),
             error_code: None,
             error_msg: None,
+            client_name: None,
+            client_version: None,
             note: "test".into(),
-        })
+        }))
     }
 
     #[test]

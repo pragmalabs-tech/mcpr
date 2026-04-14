@@ -47,6 +47,8 @@ fn make_request_event(
     mcp_method: &McpMethod,
     call_detail: &Option<String>,
     session_id: Option<&str>,
+    client_name: Option<String>,
+    client_version: Option<String>,
     status: u16,
     start: Instant,
     upstream_us: Option<u64>,
@@ -61,7 +63,7 @@ fn make_request_event(
         None
     };
 
-    ProxyEvent::Request(RequestEvent {
+    ProxyEvent::Request(Box::new(RequestEvent {
         id: uuid::Uuid::new_v4().to_string(),
         ts: chrono::Utc::now().timestamp_millis(),
         proxy: proxy.to_string(),
@@ -77,8 +79,10 @@ fn make_request_event(
         response_size: response_size.map(|s| s as u64),
         error_code: rpc_error.map(|(code, _)| code.to_string()),
         error_msg: rpc_error.map(|(_, msg)| msg.chars().take(512).collect()),
+        client_name,
+        client_version,
         note: note.to_string(),
-    })
+    }))
 }
 
 /// Handle MCP JSON-RPC POST — intercept resources/read, forward, rewrite response.
@@ -134,6 +138,15 @@ pub async fn handle_mcp_post(
             let upstream_us = upstream_start.elapsed().as_micros() as u64;
 
             // Single emit — all sinks (stderr, sqlite, cloud) receive this.
+            // Look up client info for error path (before session id merging)
+            let (err_client_name, err_client_version) = if let Some(ref sid) = req_session_id
+                && let Some(info) = state.sessions.get(sid).await
+                && let Some(ci) = info.client_info
+            {
+                (Some(ci.name), ci.version)
+            } else {
+                (None, None)
+            };
             state.event_bus.emit(make_request_event(
                 &state.proxy_name,
                 path,
@@ -141,6 +154,8 @@ pub async fn handle_mcp_post(
                 &mcp_method,
                 &call_detail,
                 req_session_id.as_deref(),
+                err_client_name,
+                err_client_version,
                 502,
                 start,
                 Some(upstream_us),
@@ -202,6 +217,16 @@ pub async fn handle_mcp_post(
 
     let log_session_id = resp_session_id.or(req_session_id);
 
+    // Look up client info from session store
+    let (session_client_name, session_client_version) = if let Some(ref sid) = log_session_id
+        && let Some(info) = state.sessions.get(sid).await
+        && let Some(ci) = info.client_info
+    {
+        (Some(ci.name), ci.version)
+    } else {
+        (None, None)
+    };
+
     // Collect full body for rewriting (POST SSE is finite), capped to prevent OOM
     let resp_bytes = match read_body_capped(resp, state.max_response_body).await {
         Ok(b) => b,
@@ -241,6 +266,8 @@ pub async fn handle_mcp_post(
             &mcp_method,
             &call_detail,
             log_session_id.as_deref(),
+            session_client_name.clone(),
+            session_client_version.clone(),
             status,
             start,
             Some(upstream_us),
@@ -260,6 +287,8 @@ pub async fn handle_mcp_post(
             &mcp_method,
             &call_detail,
             log_session_id.as_deref(),
+            session_client_name,
+            session_client_version,
             status,
             start,
             Some(upstream_us),
@@ -296,24 +325,28 @@ pub async fn handle_mcp_sse(
             let status = resp.status().as_u16();
             let resp_headers = resp.headers().clone();
 
-            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                session_id: None,
-                method: "GET".to_string(),
-                path: path.to_string(),
-                mcp_method: Some("SSE".to_string()),
-                tool: None,
-                status,
-                latency_us: start.elapsed().as_micros() as u64,
-                upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
-                request_size: None,
-                response_size: None,
-                error_code: None,
-                error_msg: None,
-                note: "sse".to_string(),
-            }));
+            state
+                .event_bus
+                .emit(ProxyEvent::Request(Box::new(RequestEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    proxy: state.proxy_name.clone(),
+                    session_id: None,
+                    method: "GET".to_string(),
+                    path: path.to_string(),
+                    mcp_method: Some("SSE".to_string()),
+                    tool: None,
+                    status,
+                    latency_us: start.elapsed().as_micros() as u64,
+                    upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
+                    request_size: None,
+                    response_size: None,
+                    error_code: None,
+                    error_msg: None,
+                    client_name: None,
+                    client_version: None,
+                    note: "sse".to_string(),
+                })));
 
             build_response(
                 status,
@@ -322,24 +355,28 @@ pub async fn handle_mcp_sse(
             )
         }
         Err(e) => {
-            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                session_id: None,
-                method: "GET".to_string(),
-                path: path.to_string(),
-                mcp_method: Some("SSE".to_string()),
-                tool: None,
-                status: 502,
-                latency_us: start.elapsed().as_micros() as u64,
-                upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
-                request_size: None,
-                response_size: None,
-                error_code: None,
-                error_msg: Some(format!("{e}").chars().take(512).collect()),
-                note: "upstream error".to_string(),
-            }));
+            state
+                .event_bus
+                .emit(ProxyEvent::Request(Box::new(RequestEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    proxy: state.proxy_name.clone(),
+                    session_id: None,
+                    method: "GET".to_string(),
+                    path: path.to_string(),
+                    mcp_method: Some("SSE".to_string()),
+                    tool: None,
+                    status: 502,
+                    latency_us: start.elapsed().as_micros() as u64,
+                    upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
+                    request_size: None,
+                    response_size: None,
+                    error_code: None,
+                    error_msg: Some(format!("{e}").chars().take(512).collect()),
+                    client_name: None,
+                    client_version: None,
+                    note: "upstream error".to_string(),
+                })));
 
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }
@@ -397,24 +434,28 @@ async fn handle_resources_read(
 
     let body = serde_json::to_vec(&json_body).unwrap_or_default();
 
-    state.event_bus.emit(ProxyEvent::Request(RequestEvent {
-        id: uuid::Uuid::new_v4().to_string(),
-        ts: chrono::Utc::now().timestamp_millis(),
-        proxy: state.proxy_name.clone(),
-        session_id: None,
-        method: "POST".to_string(),
-        path: "/*".to_string(),
-        mcp_method: Some(jsonrpc::RESOURCES_READ.to_string()),
-        tool: None,
-        status: 200,
-        latency_us: start.elapsed().as_micros() as u64,
-        upstream_us: Some(upstream_us),
-        request_size: Some(raw_body.len() as u64),
-        response_size: Some(body.len() as u64),
-        error_code: None,
-        error_msg: None,
-        note: "intercepted".to_string(),
-    }));
+    state
+        .event_bus
+        .emit(ProxyEvent::Request(Box::new(RequestEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            ts: chrono::Utc::now().timestamp_millis(),
+            proxy: state.proxy_name.clone(),
+            session_id: None,
+            method: "POST".to_string(),
+            path: "/*".to_string(),
+            mcp_method: Some(jsonrpc::RESOURCES_READ.to_string()),
+            tool: None,
+            status: 200,
+            latency_us: start.elapsed().as_micros() as u64,
+            upstream_us: Some(upstream_us),
+            request_size: Some(raw_body.len() as u64),
+            response_size: Some(body.len() as u64),
+            error_code: None,
+            error_msg: None,
+            client_name: None,
+            client_version: None,
+            note: "intercepted".to_string(),
+        })));
 
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
