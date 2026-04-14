@@ -271,6 +271,12 @@ mcpr relay restart [config]    Restart relay (uses saved config if omitted)
 mcpr relay status              Show relay PID, port, uptime
 ```
 
+### Setup
+
+```
+mcpr proxy setup               Interactive wizard — auth, project, server, token, writes mcpr.toml
+```
+
 ### Observe
 
 ```

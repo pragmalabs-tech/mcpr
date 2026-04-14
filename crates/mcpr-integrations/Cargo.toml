@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "External integrations for mcpr: event emitters, metrics, feature flags, and analytics"
+description = "External integrations for mcpr: cloud event sink, API client, and SQLite request storage"
 
 [dependencies]
 mcpr-core = { workspace = true }

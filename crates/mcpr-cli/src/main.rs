@@ -1,10 +1,12 @@
 //! # mcpr (CLI binary)
 //!
-//! Two-process architecture:
+//! Multi-process architecture:
 //! - **mcprd** (daemon/supervisor): `mcpr start` — no config needed, just manages
-//!   proxy lifecycles and monitors health.
+//!   proxy and relay lifecycles and monitors health.
 //! - **proxy** (standalone): `mcpr proxy run <config>` — snapshots config, forks to
 //!   background, runs the MCP gateway. Self-terminates if the daemon dies.
+//! - **relay** (singleton): `mcpr relay start <config>` — tunnel relay server that
+//!   accepts WebSocket connections and assigns subdomains. One per machine.
 //!
 //! All state lives under `~/.mcpr/`.
 //!
@@ -21,13 +23,17 @@
 //! +-- logic/            # Core business logic (no printing)
 //! |   +-- daemon.rs     #   Daemon status queries
 //! |   +-- proxy.rs      #   Proxy lifecycle (start/stop/restart)
+//! |   +-- relay.rs      #   Relay lifecycle (stop/restart/status)
 //! |   +-- query.rs      #   DB engine, time parsing, threshold parsing
 //! +-- cmd/              # Thin command handlers (logic → render)
 //! |   +-- proxy.rs      #   Proxy lifecycle commands
+//! |   +-- relay.rs      #   Relay lifecycle commands
 //! |   +-- observe.rs    #   Observability commands (logs, stats, sessions, …)
 //! |   +-- store.rs      #   Store maintenance commands
+//! |   +-- setup.rs      #   Interactive setup wizard (mcpr proxy setup)
 //! +-- daemon.rs         # mcprd supervisor (fork, PID file, health monitor)
 //! +-- proxy_lock.rs     # Per-proxy lockfiles under ~/.mcpr/proxies/
+//! +-- relay_lock.rs     # Singleton relay lockfile under ~/.mcpr/relay/
 //! +-- proxy.rs          # Request dispatcher (classify → handle)
 //! +-- mcp_handler.rs    # MCP POST/SSE handling, session tracking, store events
 //! +-- widgets.rs        # Widget HTML serving, asset proxying

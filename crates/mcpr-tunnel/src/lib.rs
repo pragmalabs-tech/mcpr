@@ -36,7 +36,8 @@
 //!
 //! ## Dependencies
 //!
-//! `axum`, `tokio`, `tokio-tungstenite`, `reqwest`, `serde`, `dashmap`, `uuid`.
+//! `axum`, `tokio`, `tokio-tungstenite`, `reqwest`, `serde`, `dashmap`, `uuid`,
+//! `base64`, `sha2`, `chrono`, `colored`.
 //! Completely standalone — no dependency on other mcpr crates.
 
 pub mod client;
