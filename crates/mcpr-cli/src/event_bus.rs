@@ -160,7 +160,7 @@ mod tests {
     }
 
     fn test_request(note: &str) -> ProxyEvent {
-        ProxyEvent::Request(RequestEvent {
+        ProxyEvent::Request(Box::new(RequestEvent {
             id: uuid::Uuid::new_v4().to_string(),
             ts: chrono::Utc::now().timestamp_millis(),
             proxy: "test".into(),
@@ -176,8 +176,10 @@ mod tests {
             response_size: Some(200),
             error_code: None,
             error_msg: None,
+            client_name: None,
+            client_version: None,
             note: note.into(),
-        })
+        }))
     }
 
     #[tokio::test]

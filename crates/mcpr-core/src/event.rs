@@ -20,7 +20,7 @@ use serde::Serialize;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProxyEvent {
     /// An MCP request completed (success or error).
-    Request(RequestEvent),
+    Request(Box<RequestEvent>),
     /// A new MCP session established via `initialize` handshake.
     SessionStart(SessionStartEvent),
     /// A session was closed (clean transport disconnect).
@@ -69,6 +69,11 @@ pub struct RequestEvent {
     pub error_code: Option<String>,
     /// Error message (truncated to 512 chars).
     pub error_msg: Option<String>,
+
+    /// Client name from session `clientInfo.name` (e.g., "claude-desktop").
+    pub client_name: Option<String>,
+    /// Client version from session `clientInfo.version` (e.g., "1.2.0").
+    pub client_version: Option<String>,
 
     /// Classification note: "rewritten", "passthrough", "error", "sse", etc.
     pub note: String,

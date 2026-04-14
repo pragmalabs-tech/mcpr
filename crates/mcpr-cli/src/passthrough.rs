@@ -95,47 +95,55 @@ pub async fn forward_and_passthrough(
                 (bytes.to_vec(), "passthrough")
             };
 
-            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                session_id: None,
-                method: method.to_string(),
-                path: log_path.to_string(),
-                mcp_method: None,
-                tool: None,
-                status,
-                latency_us: start.elapsed().as_micros() as u64,
-                upstream_us: Some(upstream_us),
-                request_size: Some(body.len() as u64),
-                response_size: Some(response_body.len() as u64),
-                error_code: None,
-                error_msg: None,
-                note: note.to_string(),
-            }));
+            state
+                .event_bus
+                .emit(ProxyEvent::Request(Box::new(RequestEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    proxy: state.proxy_name.clone(),
+                    session_id: None,
+                    method: method.to_string(),
+                    path: log_path.to_string(),
+                    mcp_method: None,
+                    tool: None,
+                    status,
+                    latency_us: start.elapsed().as_micros() as u64,
+                    upstream_us: Some(upstream_us),
+                    request_size: Some(body.len() as u64),
+                    response_size: Some(response_body.len() as u64),
+                    error_code: None,
+                    error_msg: None,
+                    client_name: None,
+                    client_version: None,
+                    note: note.to_string(),
+                })));
 
             build_response(status, &resp_headers, Body::from(response_body))
         }
         Err(e) => {
             let upstream_us = upstream_start.elapsed().as_micros() as u64;
-            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                session_id: None,
-                method: method.to_string(),
-                path: log_path.to_string(),
-                mcp_method: None,
-                tool: None,
-                status: 502,
-                latency_us: start.elapsed().as_micros() as u64,
-                upstream_us: Some(upstream_us),
-                request_size: Some(body.len() as u64),
-                response_size: None,
-                error_code: None,
-                error_msg: Some(format!("{e}").chars().take(512).collect()),
-                note: "upstream error".to_string(),
-            }));
+            state
+                .event_bus
+                .emit(ProxyEvent::Request(Box::new(RequestEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    proxy: state.proxy_name.clone(),
+                    session_id: None,
+                    method: method.to_string(),
+                    path: log_path.to_string(),
+                    mcp_method: None,
+                    tool: None,
+                    status: 502,
+                    latency_us: start.elapsed().as_micros() as u64,
+                    upstream_us: Some(upstream_us),
+                    request_size: Some(body.len() as u64),
+                    response_size: None,
+                    error_code: None,
+                    error_msg: Some(format!("{e}").chars().take(512).collect()),
+                    client_name: None,
+                    client_version: None,
+                    note: "upstream error".to_string(),
+                })));
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }
     }

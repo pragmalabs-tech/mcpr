@@ -47,6 +47,8 @@ fn make_request_event(
     mcp_method: &McpMethod,
     call_detail: &Option<String>,
     session_id: Option<&str>,
+    client_name: Option<String>,
+    client_version: Option<String>,
     status: u16,
     start: Instant,
     upstream_us: Option<u64>,
@@ -61,7 +63,7 @@ fn make_request_event(
         None
     };
 
-    ProxyEvent::Request(RequestEvent {
+    ProxyEvent::Request(Box::new(RequestEvent {
         id: uuid::Uuid::new_v4().to_string(),
         ts: chrono::Utc::now().timestamp_millis(),
         proxy: proxy.to_string(),
@@ -77,8 +79,10 @@ fn make_request_event(
         response_size: response_size.map(|s| s as u64),
         error_code: rpc_error.map(|(code, _)| code.to_string()),
         error_msg: rpc_error.map(|(_, msg)| msg.chars().take(512).collect()),
+        client_name,
+        client_version,
         note: note.to_string(),
-    })
+    }))
 }
 
 /// Handle MCP JSON-RPC POST — intercept resources/read, forward, rewrite response.
@@ -134,6 +138,15 @@ pub async fn handle_mcp_post(
             let upstream_us = upstream_start.elapsed().as_micros() as u64;
 
             // Single emit — all sinks (stderr, sqlite, cloud) receive this.
+            // Look up client info for error path (before session id merging)
+            let (err_client_name, err_client_version) = if let Some(ref sid) = req_session_id
+                && let Some(info) = state.sessions.get(sid).await
+                && let Some(ci) = info.client_info
+            {
+                (Some(ci.name), ci.version)
+            } else {
+                (None, None)
+            };
             state.event_bus.emit(make_request_event(
                 &state.proxy_name,
                 path,
@@ -141,6 +154,8 @@ pub async fn handle_mcp_post(
                 &mcp_method,
                 &call_detail,
                 req_session_id.as_deref(),
+                err_client_name,
+                err_client_version,
                 502,
                 start,
                 Some(upstream_us),
@@ -202,6 +217,16 @@ pub async fn handle_mcp_post(
 
     let log_session_id = resp_session_id.or(req_session_id);
 
+    // Look up client info from session store
+    let (session_client_name, session_client_version) = if let Some(ref sid) = log_session_id
+        && let Some(info) = state.sessions.get(sid).await
+        && let Some(ci) = info.client_info
+    {
+        (Some(ci.name), ci.version)
+    } else {
+        (None, None)
+    };
+
     // Collect full body for rewriting (POST SSE is finite), capped to prevent OOM
     let resp_bytes = match read_body_capped(resp, state.max_response_body).await {
         Ok(b) => b,
@@ -241,6 +266,8 @@ pub async fn handle_mcp_post(
             &mcp_method,
             &call_detail,
             log_session_id.as_deref(),
+            session_client_name.clone(),
+            session_client_version.clone(),
             status,
             start,
             Some(upstream_us),
@@ -260,6 +287,8 @@ pub async fn handle_mcp_post(
             &mcp_method,
             &call_detail,
             log_session_id.as_deref(),
+            session_client_name,
+            session_client_version,
             status,
             start,
             Some(upstream_us),
@@ -296,24 +325,28 @@ pub async fn handle_mcp_sse(
             let status = resp.status().as_u16();
             let resp_headers = resp.headers().clone();
 
-            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                session_id: None,
-                method: "GET".to_string(),
-                path: path.to_string(),
-                mcp_method: Some("SSE".to_string()),
-                tool: None,
-                status,
-                latency_us: start.elapsed().as_micros() as u64,
-                upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
-                request_size: None,
-                response_size: None,
-                error_code: None,
-                error_msg: None,
-                note: "sse".to_string(),
-            }));
+            state
+                .event_bus
+                .emit(ProxyEvent::Request(Box::new(RequestEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    proxy: state.proxy_name.clone(),
+                    session_id: None,
+                    method: "GET".to_string(),
+                    path: path.to_string(),
+                    mcp_method: Some("SSE".to_string()),
+                    tool: None,
+                    status,
+                    latency_us: start.elapsed().as_micros() as u64,
+                    upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
+                    request_size: None,
+                    response_size: None,
+                    error_code: None,
+                    error_msg: None,
+                    client_name: None,
+                    client_version: None,
+                    note: "sse".to_string(),
+                })));
 
             build_response(
                 status,
@@ -322,24 +355,28 @@ pub async fn handle_mcp_sse(
             )
         }
         Err(e) => {
-            state.event_bus.emit(ProxyEvent::Request(RequestEvent {
-                id: uuid::Uuid::new_v4().to_string(),
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                session_id: None,
-                method: "GET".to_string(),
-                path: path.to_string(),
-                mcp_method: Some("SSE".to_string()),
-                tool: None,
-                status: 502,
-                latency_us: start.elapsed().as_micros() as u64,
-                upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
-                request_size: None,
-                response_size: None,
-                error_code: None,
-                error_msg: Some(format!("{e}").chars().take(512).collect()),
-                note: "upstream error".to_string(),
-            }));
+            state
+                .event_bus
+                .emit(ProxyEvent::Request(Box::new(RequestEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    proxy: state.proxy_name.clone(),
+                    session_id: None,
+                    method: "GET".to_string(),
+                    path: path.to_string(),
+                    mcp_method: Some("SSE".to_string()),
+                    tool: None,
+                    status: 502,
+                    latency_us: start.elapsed().as_micros() as u64,
+                    upstream_us: Some(upstream_start.elapsed().as_micros() as u64),
+                    request_size: None,
+                    response_size: None,
+                    error_code: None,
+                    error_msg: Some(format!("{e}").chars().take(512).collect()),
+                    client_name: None,
+                    client_version: None,
+                    note: "upstream error".to_string(),
+                })));
 
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }
@@ -397,24 +434,28 @@ async fn handle_resources_read(
 
     let body = serde_json::to_vec(&json_body).unwrap_or_default();
 
-    state.event_bus.emit(ProxyEvent::Request(RequestEvent {
-        id: uuid::Uuid::new_v4().to_string(),
-        ts: chrono::Utc::now().timestamp_millis(),
-        proxy: state.proxy_name.clone(),
-        session_id: None,
-        method: "POST".to_string(),
-        path: "/*".to_string(),
-        mcp_method: Some(jsonrpc::RESOURCES_READ.to_string()),
-        tool: None,
-        status: 200,
-        latency_us: start.elapsed().as_micros() as u64,
-        upstream_us: Some(upstream_us),
-        request_size: Some(raw_body.len() as u64),
-        response_size: Some(body.len() as u64),
-        error_code: None,
-        error_msg: None,
-        note: "intercepted".to_string(),
-    }));
+    state
+        .event_bus
+        .emit(ProxyEvent::Request(Box::new(RequestEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            ts: chrono::Utc::now().timestamp_millis(),
+            proxy: state.proxy_name.clone(),
+            session_id: None,
+            method: "POST".to_string(),
+            path: "/*".to_string(),
+            mcp_method: Some(jsonrpc::RESOURCES_READ.to_string()),
+            tool: None,
+            status: 200,
+            latency_us: start.elapsed().as_micros() as u64,
+            upstream_us: Some(upstream_us),
+            request_size: Some(raw_body.len() as u64),
+            response_size: Some(body.len() as u64),
+            error_code: None,
+            error_msg: None,
+            client_name: None,
+            client_version: None,
+            note: "intercepted".to_string(),
+        })));
 
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
@@ -489,5 +530,190 @@ fn emit_schema_stale(state: &AppState, response_body: &Value) {
                 upstream_url: state.mcp_upstream.clone(),
                 method: "tools/list".to_string(),
             }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_request_event_includes_client_info() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &Some("search".into()),
+            Some("sess-1"),
+            Some("claude-desktop".into()),
+            Some("1.2.0".into()),
+            200,
+            Instant::now(),
+            Some(1000),
+            128,
+            Some(256),
+            None,
+            "rewritten",
+        );
+
+        let ProxyEvent::Request(e) = event else {
+            panic!("expected Request variant");
+        };
+        assert_eq!(e.client_name.as_deref(), Some("claude-desktop"));
+        assert_eq!(e.client_version.as_deref(), Some("1.2.0"));
+        assert_eq!(e.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(e.tool.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn make_request_event_none_client_info() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &Some("search".into()),
+            None,
+            None,
+            None,
+            200,
+            Instant::now(),
+            None,
+            64,
+            None,
+            None,
+            "passthrough",
+        );
+
+        let ProxyEvent::Request(e) = event else {
+            panic!("expected Request variant");
+        };
+        assert!(e.client_name.is_none());
+        assert!(e.client_version.is_none());
+        assert!(e.session_id.is_none());
+    }
+
+    #[test]
+    fn make_request_event_non_tool_call_has_no_tool() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "resources/read",
+            &McpMethod::ResourcesRead,
+            &Some("file://readme.md".into()),
+            Some("sess-2"),
+            Some("cursor".into()),
+            None,
+            200,
+            Instant::now(),
+            Some(500),
+            100,
+            Some(200),
+            None,
+            "rewritten",
+        );
+
+        let ProxyEvent::Request(e) = event else {
+            panic!("expected Request variant");
+        };
+        // tool is only set for ToolsCall
+        assert!(e.tool.is_none());
+        assert_eq!(e.client_name.as_deref(), Some("cursor"));
+        assert!(e.client_version.is_none());
+    }
+
+    #[test]
+    fn make_request_event_with_error() {
+        let rpc_err = (-32600i64, "bad request".to_string());
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &Some("broken_tool".into()),
+            Some("sess-3"),
+            Some("vscode-copilot".into()),
+            Some("0.9.0".into()),
+            500,
+            Instant::now(),
+            Some(100),
+            50,
+            Some(80),
+            Some(&rpc_err),
+            "upstream error",
+        );
+
+        let ProxyEvent::Request(e) = event else {
+            panic!("expected Request variant");
+        };
+        assert_eq!(e.error_code.as_deref(), Some("-32600"));
+        assert_eq!(e.error_msg.as_deref(), Some("bad request"));
+        assert_eq!(e.client_name.as_deref(), Some("vscode-copilot"));
+        assert_eq!(e.client_version.as_deref(), Some("0.9.0"));
+        assert_eq!(e.status, 500);
+    }
+
+    #[test]
+    fn request_event_serializes_client_fields() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &Some("search".into()),
+            Some("sess-1"),
+            Some("claude-desktop".into()),
+            Some("1.2.0".into()),
+            200,
+            Instant::now(),
+            None,
+            64,
+            None,
+            None,
+            "test",
+        );
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"client_name\":\"claude-desktop\""));
+        assert!(json.contains("\"client_version\":\"1.2.0\""));
+        assert!(json.contains("\"type\":\"request\""));
+    }
+
+    #[test]
+    fn request_event_omits_null_client_in_json() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &None,
+            None,
+            None,
+            None,
+            200,
+            Instant::now(),
+            None,
+            0,
+            None,
+            None,
+            "test",
+        );
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"client_name\":null"));
+        assert!(json.contains("\"client_version\":null"));
+    }
+
+    #[test]
+    fn normalize_platform_variants() {
+        assert_eq!(normalize_platform("Claude Desktop"), "claude");
+        assert_eq!(normalize_platform("cursor-editor"), "cursor");
+        assert_eq!(normalize_platform("ChatGPT Plugin"), "chatgpt");
+        assert_eq!(normalize_platform("OpenAI Agent"), "chatgpt");
+        assert_eq!(normalize_platform("GitHub Copilot"), "vscode");
+        assert_eq!(normalize_platform("VS-Code Extension"), "vscode");
+        assert_eq!(normalize_platform("Windsurf IDE"), "windsurf");
+        assert_eq!(normalize_platform("my-custom-client"), "unknown");
     }
 }
