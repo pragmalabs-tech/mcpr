@@ -532,3 +532,188 @@ fn emit_schema_stale(state: &AppState, response_body: &Value) {
             }));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn make_request_event_includes_client_info() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &Some("search".into()),
+            Some("sess-1"),
+            Some("claude-desktop".into()),
+            Some("1.2.0".into()),
+            200,
+            Instant::now(),
+            Some(1000),
+            128,
+            Some(256),
+            None,
+            "rewritten",
+        );
+
+        let ProxyEvent::Request(e) = event else {
+            panic!("expected Request variant");
+        };
+        assert_eq!(e.client_name.as_deref(), Some("claude-desktop"));
+        assert_eq!(e.client_version.as_deref(), Some("1.2.0"));
+        assert_eq!(e.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(e.tool.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn make_request_event_none_client_info() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &Some("search".into()),
+            None,
+            None,
+            None,
+            200,
+            Instant::now(),
+            None,
+            64,
+            None,
+            None,
+            "passthrough",
+        );
+
+        let ProxyEvent::Request(e) = event else {
+            panic!("expected Request variant");
+        };
+        assert!(e.client_name.is_none());
+        assert!(e.client_version.is_none());
+        assert!(e.session_id.is_none());
+    }
+
+    #[test]
+    fn make_request_event_non_tool_call_has_no_tool() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "resources/read",
+            &McpMethod::ResourcesRead,
+            &Some("file://readme.md".into()),
+            Some("sess-2"),
+            Some("cursor".into()),
+            None,
+            200,
+            Instant::now(),
+            Some(500),
+            100,
+            Some(200),
+            None,
+            "rewritten",
+        );
+
+        let ProxyEvent::Request(e) = event else {
+            panic!("expected Request variant");
+        };
+        // tool is only set for ToolsCall
+        assert!(e.tool.is_none());
+        assert_eq!(e.client_name.as_deref(), Some("cursor"));
+        assert!(e.client_version.is_none());
+    }
+
+    #[test]
+    fn make_request_event_with_error() {
+        let rpc_err = (-32600i64, "bad request".to_string());
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &Some("broken_tool".into()),
+            Some("sess-3"),
+            Some("vscode-copilot".into()),
+            Some("0.9.0".into()),
+            500,
+            Instant::now(),
+            Some(100),
+            50,
+            Some(80),
+            Some(&rpc_err),
+            "upstream error",
+        );
+
+        let ProxyEvent::Request(e) = event else {
+            panic!("expected Request variant");
+        };
+        assert_eq!(e.error_code.as_deref(), Some("-32600"));
+        assert_eq!(e.error_msg.as_deref(), Some("bad request"));
+        assert_eq!(e.client_name.as_deref(), Some("vscode-copilot"));
+        assert_eq!(e.client_version.as_deref(), Some("0.9.0"));
+        assert_eq!(e.status, 500);
+    }
+
+    #[test]
+    fn request_event_serializes_client_fields() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &Some("search".into()),
+            Some("sess-1"),
+            Some("claude-desktop".into()),
+            Some("1.2.0".into()),
+            200,
+            Instant::now(),
+            None,
+            64,
+            None,
+            None,
+            "test",
+        );
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"client_name\":\"claude-desktop\""));
+        assert!(json.contains("\"client_version\":\"1.2.0\""));
+        assert!(json.contains("\"type\":\"request\""));
+    }
+
+    #[test]
+    fn request_event_omits_null_client_in_json() {
+        let event = make_request_event(
+            "proxy",
+            "/mcp",
+            "tools/call",
+            &McpMethod::ToolsCall,
+            &None,
+            None,
+            None,
+            None,
+            200,
+            Instant::now(),
+            None,
+            0,
+            None,
+            None,
+            "test",
+        );
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"client_name\":null"));
+        assert!(json.contains("\"client_version\":null"));
+    }
+
+    #[test]
+    fn normalize_platform_variants() {
+        assert_eq!(normalize_platform("Claude Desktop"), "claude");
+        assert_eq!(normalize_platform("cursor-editor"), "cursor");
+        assert_eq!(normalize_platform("ChatGPT Plugin"), "chatgpt");
+        assert_eq!(normalize_platform("OpenAI Agent"), "chatgpt");
+        assert_eq!(normalize_platform("GitHub Copilot"), "vscode");
+        assert_eq!(normalize_platform("VS-Code Extension"), "vscode");
+        assert_eq!(normalize_platform("Windsurf IDE"), "windsurf");
+        assert_eq!(normalize_platform("my-custom-client"), "unknown");
+    }
+}
