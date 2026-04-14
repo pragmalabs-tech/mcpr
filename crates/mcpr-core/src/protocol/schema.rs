@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::McpMethod;
+use super::McpMethod;
 
 // ── Types ────────────────────────────────────────────────────────────
 

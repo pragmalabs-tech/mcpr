@@ -1,8 +1,8 @@
+use crate::protocol as jsonrpc;
 use axum::{
     body::Bytes,
     http::{HeaderMap, Method, header},
 };
-use mcpr_protocol as jsonrpc;
 
 /// Classified request type for type-separate dispatch.
 pub enum ClassifiedRequest {

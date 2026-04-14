@@ -14,9 +14,9 @@ use crate::mcp_handler::{handle_mcp_post, handle_mcp_sse};
 use crate::passthrough::{forward_and_passthrough, serve_oauth_callback_relay};
 use crate::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
 use mcpr_core::event::{ProxyEvent, SessionEndEvent};
-use mcpr_protocol::session::SessionStore;
-use mcpr_proxy::router::{ClassifiedRequest, classify};
-use mcpr_proxy::sse::split_upstream;
+use mcpr_core::protocol::session::SessionStore;
+use mcpr_core::proxy::router::{ClassifiedRequest, classify};
+use mcpr_core::proxy::sse::split_upstream;
 
 /// Convenience wrapper: forward a request using this app's state.
 pub(crate) async fn forward_request(
@@ -27,7 +27,7 @@ pub(crate) async fn forward_request(
     body: &Bytes,
     is_streaming: bool,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    mcpr_proxy::forwarding::forward_request(
+    mcpr_core::proxy::forwarding::forward_request(
         &state.upstream,
         url,
         method,
@@ -110,14 +110,14 @@ mod tests {
         crate::AppState {
             mcp_upstream: upstream_url.to_string(),
             widget_source: None,
-            rewrite_config: Arc::new(RwLock::new(mcpr_proxy::RewriteConfig {
+            rewrite_config: Arc::new(RwLock::new(mcpr_core::proxy::RewriteConfig {
                 proxy_url: "http://localhost:0".to_string(),
                 proxy_domain: "localhost".to_string(),
                 mcp_upstream: upstream_url.to_string(),
                 extra_csp_domains: vec![],
-                csp_mode: mcpr_proxy::CspMode::default(),
+                csp_mode: mcpr_core::proxy::CspMode::default(),
             })),
-            upstream: mcpr_proxy::forwarding::UpstreamClient {
+            upstream: mcpr_core::proxy::forwarding::UpstreamClient {
                 http_client: reqwest::Client::builder()
                     .connect_timeout(std::time::Duration::from_secs(5))
                     .build()
@@ -125,9 +125,9 @@ mod tests {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(100)),
                 request_timeout: std::time::Duration::from_secs(30),
             },
-            proxy_state_ref: mcpr_proxy::new_shared_state(),
+            proxy_state_ref: mcpr_core::proxy::new_shared_state(),
             event_bus: crate::event_bus::EventBus::start(vec![]).bus,
-            sessions: mcpr_protocol::session::MemorySessionStore::new(),
+            sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
             max_request_body: max_request,
             max_response_body: max_response,
             proxy_name: "test".to_string(),

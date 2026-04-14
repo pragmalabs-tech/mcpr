@@ -36,7 +36,7 @@ use std::time::{Duration, Instant};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-use mcpr_protocol::schema::{self as proto_schema, PageStatus};
+use mcpr_core::protocol::schema::{self as proto_schema, PageStatus};
 
 use super::event::{RequestStatus, StoreEvent};
 use super::schema;

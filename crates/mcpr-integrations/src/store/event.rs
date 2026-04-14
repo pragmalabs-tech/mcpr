@@ -141,7 +141,7 @@ pub struct SchemaCaptureEvent {
     /// JSON string of the `result` field.
     pub payload: String,
     /// Pagination state.
-    pub page_status: mcpr_protocol::schema::PageStatus,
+    pub page_status: mcpr_core::protocol::schema::PageStatus,
 }
 
 /// Outcome of a single MCP request.

@@ -1045,8 +1045,6 @@ dependencies = [
  "http-body-util",
  "mcpr-core",
  "mcpr-integrations",
- "mcpr-protocol",
- "mcpr-proxy",
  "mcpr-tunnel",
  "nix",
  "reqwest",
@@ -1066,8 +1064,14 @@ dependencies = [
 name = "mcpr-core"
 version = "0.4.12"
 dependencies = [
- "mcpr-protocol",
+ "axum",
+ "chrono",
+ "dashmap",
+ "futures-util",
+ "reqwest",
  "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1077,7 +1081,6 @@ dependencies = [
  "chrono",
  "dirs",
  "mcpr-core",
- "mcpr-protocol",
  "reqwest",
  "rusqlite",
  "serde",
@@ -1089,28 +1092,6 @@ dependencies = [
  "tracing",
  "uuid",
  "wiremock",
-]
-
-[[package]]
-name = "mcpr-protocol"
-version = "0.4.12"
-dependencies = [
- "chrono",
- "dashmap",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "mcpr-proxy"
-version = "0.4.12"
-dependencies = [
- "axum",
- "futures-util",
- "mcpr-protocol",
- "reqwest",
- "serde_json",
- "tokio",
 ]
 
 [[package]]

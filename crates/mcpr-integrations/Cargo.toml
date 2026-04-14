@@ -8,7 +8,6 @@ description = "External integrations for mcpr: event emitters, metrics, feature 
 
 [dependencies]
 mcpr-core = { workspace = true }
-mcpr-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

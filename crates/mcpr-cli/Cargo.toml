@@ -30,11 +30,9 @@ toml = "0.8"
 dashmap = { workspace = true }
 url = { workspace = true }
 mcpr-core = { workspace = true }
-mcpr-protocol = { workspace = true }
 
 mcpr-tunnel = { workspace = true }
 mcpr-integrations = { workspace = true }
-mcpr-proxy = { workspace = true }
 
 # Platform-specific default paths for PID file and daemon log.
 dirs = "6"

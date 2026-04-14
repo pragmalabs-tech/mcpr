@@ -55,7 +55,7 @@ Capture happens **after** the response is forwarded to the client and **before**
 
 ## Where It Happens in Code
 
-### Protocol Layer (`mcpr-protocol/src/schema.rs`)
+### Protocol Layer (`mcpr-core/src/protocol/schema.rs`)
 
 Pure MCP protocol logic with no HTTP or storage dependencies:
 
@@ -90,7 +90,7 @@ The SQLite writer thread (single OS thread, same as request/session storage) han
 
 1. **Hash** the payload (SHA-256)
 2. **Compare** against the stored hash for that `(upstream_url, method)` pair
-3. **Diff** if changed — calls `mcpr_protocol::schema::diff_schema()` to detect added/removed/modified items
+3. **Diff** if changed — calls `mcpr_core::protocol::schema::diff_schema()` to detect added/removed/modified items
 4. **Write** — UPSERT the snapshot, INSERT change records
 
 ## Storage Schema

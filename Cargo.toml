@@ -2,8 +2,6 @@
 members = [
     "crates/mcpr-cli",
     "crates/mcpr-core",
-    "crates/mcpr-protocol",
-    "crates/mcpr-proxy",
     "crates/mcpr-integrations",
     "crates/mcpr-tunnel",
 ]
@@ -32,8 +30,6 @@ base64 = "0.22"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
 mcpr-core = { path = "crates/mcpr-core", version = "0.4.12" }
-mcpr-protocol = { path = "crates/mcpr-protocol", version = "0.4.12" }
-mcpr-proxy = { path = "crates/mcpr-proxy", version = "0.4.12" }
 mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.12" }
 mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.12" }
 

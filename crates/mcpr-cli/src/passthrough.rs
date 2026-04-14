@@ -9,8 +9,8 @@ use axum::{
 use crate::AppState;
 use crate::proxy::forward_request;
 use mcpr_core::event::{ProxyEvent, RequestEvent};
-use mcpr_proxy::forwarding::{build_response, read_body_capped};
-use mcpr_proxy::sse::split_upstream;
+use mcpr_core::proxy::forwarding::{build_response, read_body_capped};
+use mcpr_core::proxy::sse::split_upstream;
 
 /// Serve the OAuth callback relay page.
 pub async fn serve_oauth_callback_relay() -> Response {

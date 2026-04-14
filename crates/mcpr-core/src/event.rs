@@ -7,7 +7,7 @@
 //! - Emit events (proxy engine)
 //! - Consume events (sinks: stderr, sqlite, cloud, prometheus, etc.)
 
-use mcpr_protocol::schema::PageStatus;
+use crate::protocol::schema::PageStatus;
 use serde::Serialize;
 
 // ── Event types ────────────────────────────────────────────────────────

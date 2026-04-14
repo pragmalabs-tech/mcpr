@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 
 use crate::IS_DRAINING;
-use mcpr_proxy::state::{ConnectionStatus, SharedProxyState};
+use mcpr_core::proxy::state::{ConnectionStatus, SharedProxyState};
 
 #[derive(Clone)]
 struct AdminState {
@@ -79,7 +79,7 @@ async fn ready(State(state): State<AdminState>) -> impl IntoResponse {
     }
 
     let mcp_connected = {
-        let s = mcpr_proxy::lock_state(&state.proxy_state);
+        let s = mcpr_core::proxy::lock_state(&state.proxy_state);
         matches!(s.mcp_status, ConnectionStatus::Connected)
     };
 

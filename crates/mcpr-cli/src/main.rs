@@ -47,7 +47,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
-use mcpr_proxy::forwarding::UpstreamClient;
+use mcpr_core::proxy::forwarding::UpstreamClient;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -55,9 +55,9 @@ use tower_http::cors::{Any, CorsLayer};
 
 use config::{CliAction, GatewayConfig, Mode};
 use display::log_startup;
-use mcpr_protocol::session::MemorySessionStore;
-use mcpr_proxy::RewriteConfig;
-use mcpr_proxy::state::{self as proxy_state, SharedProxyState};
+use mcpr_core::protocol::session::MemorySessionStore;
+use mcpr_core::proxy::RewriteConfig;
+use mcpr_core::proxy::state::{self as proxy_state, SharedProxyState};
 use proxy::proxy_routes;
 use widgets::WidgetSource;
 

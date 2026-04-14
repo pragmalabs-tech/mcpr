@@ -13,12 +13,12 @@ use crate::widgets::fetch_widget_html;
 use mcpr_core::event::{
     ProxyEvent, RequestEvent, SchemaCaptureEvent, SchemaStaleEvent, SessionStartEvent,
 };
-use mcpr_protocol::schema as proto_schema;
-use mcpr_protocol::session::{self as session, SessionState, SessionStore};
-use mcpr_protocol::{self as jsonrpc, McpMethod};
-use mcpr_proxy::forwarding::{build_response, read_body_capped};
-use mcpr_proxy::rewrite_response;
-use mcpr_proxy::sse::{extract_json_from_sse, wrap_as_sse};
+use mcpr_core::protocol::schema as proto_schema;
+use mcpr_core::protocol::session::{self as session, SessionState, SessionStore};
+use mcpr_core::protocol::{self as jsonrpc, McpMethod};
+use mcpr_core::proxy::forwarding::{build_response, read_body_capped};
+use mcpr_core::proxy::rewrite_response;
+use mcpr_core::proxy::sse::{extract_json_from_sse, wrap_as_sse};
 
 /// Normalize a client name to a platform identifier.
 fn normalize_platform(client_name: &str) -> &'static str {
@@ -179,7 +179,7 @@ pub async fn handle_mcp_post(
         .map(String::from);
 
     if mcp_method == McpMethod::Initialize && status < 400 {
-        mcpr_proxy::lock_state(&state.proxy_state_ref).confirm_mcp_connected();
+        mcpr_core::proxy::lock_state(&state.proxy_state_ref).confirm_mcp_connected();
     }
 
     // On successful initialize, emit SessionStart event
