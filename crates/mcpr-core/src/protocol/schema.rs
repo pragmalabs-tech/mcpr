@@ -223,6 +223,7 @@ fn extract_named_items(payload: &Value, array_key: &str) -> HashMap<String, Stri
 // ── Tests ────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -230,7 +231,7 @@ mod tests {
     // ── is_schema_method ─────────────────────────────────────────────
 
     #[test]
-    fn is_schema_method_matches_discovery_methods() {
+    fn is_schema_method__matches_discovery() {
         assert!(is_schema_method(&McpMethod::Initialize));
         assert!(is_schema_method(&McpMethod::ToolsList));
         assert!(is_schema_method(&McpMethod::ResourcesList));
@@ -239,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn is_schema_method_rejects_non_discovery() {
+    fn is_schema_method__rejects_non_discovery() {
         assert!(!is_schema_method(&McpMethod::ToolsCall));
         assert!(!is_schema_method(&McpMethod::ResourcesRead));
         assert!(!is_schema_method(&McpMethod::PromptsGet));
@@ -251,28 +252,28 @@ mod tests {
     // ── detect_page_status ───────────────────────────────────────────
 
     #[test]
-    fn page_status_complete() {
+    fn detect_page_status__complete() {
         let req = json!({"method": "tools/list"});
         let resp = json!({"result": {"tools": []}});
         assert_eq!(detect_page_status(&req, &resp), PageStatus::Complete);
     }
 
     #[test]
-    fn page_status_first_page() {
+    fn detect_page_status__first_page() {
         let req = json!({"method": "tools/list"});
         let resp = json!({"result": {"tools": [], "nextCursor": "abc"}});
         assert_eq!(detect_page_status(&req, &resp), PageStatus::FirstPage);
     }
 
     #[test]
-    fn page_status_middle_page() {
+    fn detect_page_status__middle_page() {
         let req = json!({"method": "tools/list", "params": {"cursor": "abc"}});
         let resp = json!({"result": {"tools": [], "nextCursor": "def"}});
         assert_eq!(detect_page_status(&req, &resp), PageStatus::MiddlePage);
     }
 
     #[test]
-    fn page_status_last_page() {
+    fn detect_page_status__last_page() {
         let req = json!({"method": "tools/list", "params": {"cursor": "abc"}});
         let resp = json!({"result": {"tools": []}});
         assert_eq!(detect_page_status(&req, &resp), PageStatus::LastPage);
@@ -281,14 +282,14 @@ mod tests {
     // ── merge_pages ──────────────────────────────────────────────────
 
     #[test]
-    fn merge_pages_single() {
+    fn merge_pages__single() {
         let page = json!({"tools": [{"name": "a"}]});
         let result = merge_pages("tools/list", &[page.clone()]);
         assert_eq!(result, Some(page));
     }
 
     #[test]
-    fn merge_pages_two_pages() {
+    fn merge_pages__two_pages() {
         let p1 = json!({"tools": [{"name": "a"}]});
         let p2 = json!({"tools": [{"name": "b"}]});
         let result = merge_pages("tools/list", &[p1, p2]).unwrap();
@@ -299,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_pages_resources() {
+    fn merge_pages__resources() {
         let p1 = json!({"resources": [{"name": "r1", "uri": "file://a"}]});
         let p2 = json!({"resources": [{"name": "r2", "uri": "file://b"}]});
         let result = merge_pages("resources/list", &[p1, p2]).unwrap();
@@ -307,22 +308,20 @@ mod tests {
     }
 
     #[test]
-    fn merge_pages_empty() {
+    fn merge_pages__empty() {
         let result = merge_pages("tools/list", &[]);
         assert_eq!(result, None);
     }
 
     #[test]
-    fn merge_pages_unknown_method_single_returns_as_is() {
-        // Single page always returns as-is, even for non-list methods.
+    fn merge_pages__unknown_method_single_returns_as_is() {
         let p1 = json!({"serverInfo": {"name": "test"}});
         let result = merge_pages("initialize", &[p1.clone()]);
         assert_eq!(result, Some(p1));
     }
 
     #[test]
-    fn merge_pages_unknown_method_multi_returns_none() {
-        // Multiple pages for a non-list method can't be merged.
+    fn merge_pages__unknown_method_multi_returns_none() {
         let p1 = json!({"serverInfo": {"name": "v1"}});
         let p2 = json!({"serverInfo": {"name": "v2"}});
         let result = merge_pages("initialize", &[p1, p2]);
@@ -332,7 +331,7 @@ mod tests {
     // ── diff_schema ──────────────────────────────────────────────────
 
     #[test]
-    fn diff_schema_tool_added() {
+    fn diff_schema__tool_added() {
         let old = json!({"tools": [{"name": "a", "description": "tool a"}]});
         let new = json!({"tools": [
             {"name": "a", "description": "tool a"},
@@ -345,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_schema_tool_removed() {
+    fn diff_schema__tool_removed() {
         let old = json!({"tools": [
             {"name": "a", "description": "tool a"},
             {"name": "b", "description": "tool b"}
@@ -358,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_schema_tool_modified() {
+    fn diff_schema__tool_modified() {
         let old = json!({"tools": [{"name": "a", "description": "old desc"}]});
         let new = json!({"tools": [{"name": "a", "description": "new desc"}]});
         let diffs = diff_schema("tools/list", &old, &new);
@@ -368,19 +367,16 @@ mod tests {
     }
 
     #[test]
-    fn diff_schema_no_change() {
+    fn diff_schema__no_change() {
         let payload = json!({"tools": [{"name": "a", "description": "tool a"}]});
         let diffs = diff_schema("tools/list", &payload, &payload);
-        // Identical payloads — falls through to "updated" because hash differs
-        // upstream but names match. Actually, with identical JSON, extract_named_items
-        // produces identical maps, so no add/remove/modify → returns "updated".
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].change_type, "updated");
         assert_eq!(diffs[0].item_name, None);
     }
 
     #[test]
-    fn diff_schema_multiple_changes() {
+    fn diff_schema__multiple_changes() {
         let old = json!({"tools": [
             {"name": "a", "description": "old a"},
             {"name": "b", "description": "tool b"}
@@ -398,7 +394,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_schema_initialize_returns_updated() {
+    fn diff_schema__initialize_returns_updated() {
         let old = json!({"serverInfo": {"name": "test", "version": "1.0"}});
         let new = json!({"serverInfo": {"name": "test", "version": "2.0"}});
         let diffs = diff_schema("initialize", &old, &new);
@@ -408,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_schema_prompts() {
+    fn diff_schema__prompts() {
         let old = json!({"prompts": [{"name": "summarize"}]});
         let new = json!({"prompts": [{"name": "summarize"}, {"name": "translate"}]});
         let diffs = diff_schema("prompts/list", &old, &new);
@@ -418,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_schema_resources() {
+    fn diff_schema__resources() {
         let old = json!({"resources": [
             {"name": "file1", "uri": "file://a"},
             {"name": "file2", "uri": "file://b"}
@@ -433,7 +429,7 @@ mod tests {
     // ── method_array_key ─────────────────────────────────────────────
 
     #[test]
-    fn method_array_key_mapping() {
+    fn method_array_key__mapping() {
         assert_eq!(method_array_key("tools/list"), Some("tools"));
         assert_eq!(method_array_key("resources/list"), Some("resources"));
         assert_eq!(

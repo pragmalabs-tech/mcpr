@@ -31,11 +31,12 @@ pub fn format_latency_us(us: i64) -> String {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     #[test]
-    fn sub_ms() {
+    fn format_latency_us__sub_ms() {
         assert_eq!(format_latency_us(0), "0μs");
         assert_eq!(format_latency_us(1), "1μs");
         assert_eq!(format_latency_us(200), "200μs");
@@ -43,7 +44,7 @@ mod tests {
     }
 
     #[test]
-    fn ms_range() {
+    fn format_latency_us__ms_range() {
         assert_eq!(format_latency_us(1_000), "1.00ms");
         assert_eq!(format_latency_us(1_500), "1.50ms");
         assert_eq!(format_latency_us(4_200), "4.20ms");
@@ -53,7 +54,7 @@ mod tests {
     }
 
     #[test]
-    fn seconds_range() {
+    fn format_latency_us__seconds_range() {
         assert_eq!(format_latency_us(1_000_000), "1,000ms");
         assert_eq!(format_latency_us(1_500_000), "1,500ms");
         assert_eq!(format_latency_us(4_201_000), "4,201ms");
@@ -61,13 +62,13 @@ mod tests {
     }
 
     #[test]
-    fn boundary_us_to_ms() {
+    fn format_latency_us__boundary_us_to_ms() {
         assert_eq!(format_latency_us(999), "999μs");
         assert_eq!(format_latency_us(1_000), "1.00ms");
     }
 
     #[test]
-    fn boundary_ms_to_s() {
+    fn format_latency_us__boundary_ms_to_s() {
         assert_eq!(format_latency_us(999_999), "1000.00ms");
         assert_eq!(format_latency_us(1_000_000), "1,000ms");
     }

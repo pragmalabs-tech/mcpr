@@ -118,13 +118,14 @@ fn is_widget_asset(path: &str, headers: &HeaderMap) -> bool {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     // ── parse_mcp_body (JSON-RPC 2.0 detection) ──
 
     #[test]
-    fn detect_mcp_jsonrpc_request() {
+    fn parse_mcp_body__jsonrpc_request() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let parsed = parse_mcp_body(&Bytes::from_static(body));
         assert!(parsed.is_some());
@@ -134,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_mcp_jsonrpc_notification() {
+    fn parse_mcp_body__jsonrpc_notification() {
         let body = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
         let parsed = parse_mcp_body(&Bytes::from_static(body));
         assert!(parsed.is_some());
@@ -142,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_mcp_jsonrpc_batch() {
+    fn parse_mcp_body__jsonrpc_batch() {
         let body = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list"},{"jsonrpc":"2.0","id":2,"method":"resources/list"}]"#;
         let parsed = parse_mcp_body(&Bytes::from_static(body));
         assert!(parsed.is_some());
@@ -150,24 +151,24 @@ mod tests {
     }
 
     #[test]
-    fn reject_oauth_register_json() {
+    fn parse_mcp_body__rejects_oauth_register() {
         let body = br#"{"client_name":"My App","redirect_uris":["https://example.com/cb"]}"#;
         assert!(parse_mcp_body(&Bytes::from_static(body)).is_none());
     }
 
     #[test]
-    fn reject_form_encoded() {
+    fn parse_mcp_body__rejects_form_encoded() {
         let body = b"grant_type=client_credentials&client_id=abc";
         assert!(parse_mcp_body(&Bytes::from_static(body)).is_none());
     }
 
     #[test]
-    fn reject_empty_body() {
+    fn parse_mcp_body__rejects_empty() {
         assert!(parse_mcp_body(&Bytes::new()).is_none());
     }
 
     #[test]
-    fn reject_wrong_jsonrpc_version() {
+    fn parse_mcp_body__rejects_wrong_version() {
         let body = br#"{"jsonrpc":"1.0","id":1,"method":"test"}"#;
         assert!(parse_mcp_body(&Bytes::from_static(body)).is_none());
     }
@@ -175,21 +176,21 @@ mod tests {
     // ── is_mcp_sse ──
 
     #[test]
-    fn is_mcp_sse_accept() {
+    fn is_mcp_sse__accepts_event_stream() {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
         assert!(is_mcp_sse(&headers));
     }
 
     #[test]
-    fn is_not_mcp_sse_html() {
+    fn is_mcp_sse__rejects_html() {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "text/html".parse().unwrap());
         assert!(!is_mcp_sse(&headers));
     }
 
     #[test]
-    fn is_not_mcp_sse_no_accept() {
+    fn is_mcp_sse__rejects_no_accept() {
         let headers = HeaderMap::new();
         assert!(!is_mcp_sse(&headers));
     }
@@ -197,52 +198,52 @@ mod tests {
     // ── is_widget_asset ──
 
     #[test]
-    fn widget_asset_by_js_ext() {
+    fn is_widget_asset__js_extension() {
         let headers = HeaderMap::new();
         assert!(is_widget_asset("/assets/main.js", &headers));
     }
 
     #[test]
-    fn widget_asset_by_css_ext() {
+    fn is_widget_asset__css_extension() {
         let headers = HeaderMap::new();
         assert!(is_widget_asset("/styles/app.css", &headers));
     }
 
     #[test]
-    fn widget_asset_by_woff2_ext() {
+    fn is_widget_asset__woff2_extension() {
         let headers = HeaderMap::new();
         assert!(is_widget_asset("/fonts/inter.woff2", &headers));
     }
 
     #[test]
-    fn widget_asset_by_svg_ext() {
+    fn is_widget_asset__svg_extension() {
         let headers = HeaderMap::new();
         assert!(is_widget_asset("/icons/logo.svg", &headers));
     }
 
     #[test]
-    fn widget_asset_by_accept_html() {
+    fn is_widget_asset__accept_html() {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "text/html".parse().unwrap());
         assert!(is_widget_asset("/some-path", &headers));
     }
 
     #[test]
-    fn widget_asset_by_accept_image() {
+    fn is_widget_asset__accept_image() {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "image/png".parse().unwrap());
         assert!(is_widget_asset("/logo", &headers));
     }
 
     #[test]
-    fn widget_asset_by_accept_javascript() {
+    fn is_widget_asset__accept_javascript() {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "application/javascript".parse().unwrap());
         assert!(is_widget_asset("/bundle", &headers));
     }
 
     #[test]
-    fn not_widget_asset_well_known() {
+    fn is_widget_asset__rejects_well_known() {
         let headers = HeaderMap::new();
         assert!(!is_widget_asset(
             "/.well-known/oauth-authorization-server",
@@ -251,38 +252,38 @@ mod tests {
     }
 
     #[test]
-    fn not_widget_asset_mcp() {
+    fn is_widget_asset__rejects_mcp() {
         let headers = HeaderMap::new();
         assert!(!is_widget_asset("/mcp", &headers));
     }
 
     #[test]
-    fn not_widget_asset_token() {
+    fn is_widget_asset__rejects_token() {
         let headers = HeaderMap::new();
         assert!(!is_widget_asset("/token", &headers));
     }
 
     #[test]
-    fn not_widget_asset_authorize() {
+    fn is_widget_asset__rejects_authorize() {
         let headers = HeaderMap::new();
         assert!(!is_widget_asset("/authorize", &headers));
     }
 
     #[test]
-    fn not_widget_asset_register() {
+    fn is_widget_asset__rejects_register() {
         let headers = HeaderMap::new();
         assert!(!is_widget_asset("/register", &headers));
     }
 
     #[test]
-    fn not_widget_asset_json_accept() {
+    fn is_widget_asset__rejects_json_accept() {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "application/json".parse().unwrap());
         assert!(!is_widget_asset("/some-path", &headers));
     }
 
     #[test]
-    fn not_widget_asset_sse_accept() {
+    fn is_widget_asset__rejects_sse_accept() {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
         assert!(!is_widget_asset("/mcp", &headers));

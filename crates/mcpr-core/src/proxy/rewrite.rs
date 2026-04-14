@@ -187,6 +187,7 @@ fn rewrite_csp_object(parent: &mut Value, obj_key: &str, array_key: &str, config
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -204,7 +205,7 @@ mod tests {
     // ── Standalone proxy mode: resources/read must NOT touch HTML text ──
 
     #[test]
-    fn resources_read_preserves_html_text() {
+    fn rewrite_response__resources_read_preserves_html() {
         let config = test_config();
         let mut body = json!({
             "jsonrpc": "2.0",
@@ -226,14 +227,11 @@ mod tests {
 
         // HTML text must be untouched — rewrite only applies to meta
         let html = body["result"]["contents"][0]["text"].as_str().unwrap();
-        assert_eq!(
-            html, original_html,
-            "resources/read must not rewrite HTML text content"
-        );
+        assert_eq!(html, original_html);
     }
 
     #[test]
-    fn resources_read_rewrites_meta_but_not_text() {
+    fn rewrite_response__resources_read_rewrites_meta_not_text() {
         let config = test_config();
         let mut body = json!({
             "jsonrpc": "2.0",
@@ -280,7 +278,7 @@ mod tests {
     // ── tools/list: rewrite widget meta on tools ──
 
     #[test]
-    fn tools_list_rewrites_widget_domain() {
+    fn rewrite_response__tools_list_rewrites_widget_domain() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -319,7 +317,7 @@ mod tests {
     // ── tools/call: rewrite meta ──
 
     #[test]
-    fn tools_call_rewrites_meta() {
+    fn rewrite_response__tools_call_rewrites_meta() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -351,7 +349,7 @@ mod tests {
     // ── resources/list: rewrite meta on each resource ──
 
     #[test]
-    fn resources_list_rewrites_meta() {
+    fn rewrite_response__resources_list_rewrites_meta() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -378,7 +376,7 @@ mod tests {
     // ── resources/templates/list: rewrite meta on each template ──
 
     #[test]
-    fn resources_templates_list_rewrites_meta() {
+    fn rewrite_response__resources_templates_list_rewrites_meta() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -416,7 +414,7 @@ mod tests {
     // ── CSP rewriting details ──
 
     #[test]
-    fn csp_strips_localhost_and_upstream() {
+    fn rewrite_response__csp_strips_localhost() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -452,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn csp_extra_domains_appended() {
+    fn rewrite_response__csp_extra_domains_appended() {
         let mut config = test_config();
         config.extra_csp_domains = vec!["https://extra.example.com".into()];
 
@@ -482,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn csp_no_duplicate_proxy_url() {
+    fn rewrite_response__csp_no_duplicate_proxy() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -510,13 +508,13 @@ mod tests {
             .iter()
             .filter(|d| **d == "https://abc.tunnel.example.com")
             .count();
-        assert_eq!(proxy_count, 1, "proxy URL should not be duplicated");
+        assert_eq!(proxy_count, 1);
     }
 
     // ── Claude format (ui.csp) ──
 
     #[test]
-    fn claude_csp_format_rewritten() {
+    fn rewrite_response__claude_csp_format() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -558,7 +556,7 @@ mod tests {
     // ── Deep CSP injection ──
 
     #[test]
-    fn deep_csp_injection_finds_nested_arrays() {
+    fn rewrite_response__deep_csp_injection() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -589,7 +587,7 @@ mod tests {
     // ── Unknown methods are passthrough ──
 
     #[test]
-    fn unknown_method_passthrough() {
+    fn rewrite_response__unknown_method_passthrough() {
         let config = test_config();
         let mut body = json!({
             "result": {
@@ -615,7 +613,7 @@ mod tests {
     // ── Override mode ──
 
     #[test]
-    fn override_mode_ignores_upstream_domains() {
+    fn rewrite_response__override_mode_ignores_upstream() {
         let mut config = test_config();
         config.csp_mode = CspMode::Override;
         config.extra_csp_domains = vec!["https://allowed.example.com".into()];
@@ -676,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn override_mode_claude_format() {
+    fn rewrite_response__override_mode_claude_format() {
         let mut config = test_config();
         config.csp_mode = CspMode::Override;
 

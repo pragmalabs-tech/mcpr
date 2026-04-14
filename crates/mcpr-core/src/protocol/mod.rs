@@ -424,6 +424,7 @@ pub fn parse_body(body: &[u8]) -> Option<ParsedBody> {
 // ── Tests ──
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -431,7 +432,7 @@ mod tests {
     // ── parse_message ──
 
     #[test]
-    fn parse_request() {
+    fn parse_message__request() {
         let val = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "get_weather"}});
         let msg = parse_message(&val).unwrap();
         match msg {
@@ -445,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_request_string_id() {
+    fn parse_message__request_string_id() {
         let val = json!({"jsonrpc": "2.0", "id": "abc-123", "method": "initialize"});
         let msg = parse_message(&val).unwrap();
         match msg {
@@ -458,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_notification() {
+    fn parse_message__notification() {
         let val = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
         let msg = parse_message(&val).unwrap();
         match msg {
@@ -471,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_result() {
+    fn parse_message__response_result() {
         let val = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}});
         let msg = parse_message(&val).unwrap();
         match msg {
@@ -485,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_response_error() {
+    fn parse_message__response_error() {
         let val = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "Method not found"}});
         let msg = parse_message(&val).unwrap();
         match msg {
@@ -501,32 +502,31 @@ mod tests {
     }
 
     #[test]
-    fn reject_wrong_jsonrpc_version() {
+    fn parse_message__rejects_wrong_version() {
         let val = json!({"jsonrpc": "1.0", "id": 1, "method": "test"});
         assert!(parse_message(&val).is_none());
     }
 
     #[test]
-    fn reject_missing_jsonrpc() {
+    fn parse_message__rejects_missing_jsonrpc() {
         let val = json!({"id": 1, "method": "test"});
         assert!(parse_message(&val).is_none());
     }
 
     #[test]
-    fn reject_no_method_no_id() {
+    fn parse_message__rejects_no_method_no_id() {
         let val = json!({"jsonrpc": "2.0"});
         assert!(parse_message(&val).is_none());
     }
 
     #[test]
-    fn reject_non_object() {
+    fn parse_message__rejects_non_object() {
         let val = json!("hello");
         assert!(parse_message(&val).is_none());
     }
 
     #[test]
-    fn reject_oauth_register_body() {
-        // OAuth dynamic client registration — valid JSON, but not JSON-RPC
+    fn parse_message__rejects_oauth_register() {
         let val = json!({
             "client_name": "My App",
             "redirect_uris": ["https://example.com/callback"],
@@ -538,7 +538,7 @@ mod tests {
     // ── parse_body ──
 
     #[test]
-    fn parse_single_request() {
+    fn parse_body__single_request() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let parsed = parse_body(body).unwrap();
         assert!(!parsed.is_batch);
@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_batch_requests() {
+    fn parse_body__batch_requests() {
         let body = br#"[
             {"jsonrpc":"2.0","id":1,"method":"tools/list"},
             {"jsonrpc":"2.0","id":2,"method":"resources/list"}
@@ -556,12 +556,11 @@ mod tests {
         let parsed = parse_body(body).unwrap();
         assert!(parsed.is_batch);
         assert_eq!(parsed.messages.len(), 2);
-        // method_str returns first request's method
         assert_eq!(parsed.method_str(), "tools/list");
     }
 
     #[test]
-    fn parse_notification_only() {
+    fn parse_body__notification_only() {
         let body = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
         let parsed = parse_body(body).unwrap();
         assert!(parsed.is_notification_only());
@@ -569,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_mixed_batch() {
+    fn parse_body__mixed_batch() {
         let body = br#"[
             {"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}},
             {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_weather"}}
@@ -577,30 +576,28 @@ mod tests {
         let parsed = parse_body(body).unwrap();
         assert!(parsed.is_batch);
         assert!(!parsed.is_notification_only());
-        // first_request_id skips the notification, finds the request
         assert_eq!(parsed.first_request_id(), Some(&JsonRpcId::Number(2)));
     }
 
     #[test]
-    fn reject_empty_batch() {
+    fn parse_body__rejects_empty_batch() {
         let body = b"[]";
         assert!(parse_body(body).is_none());
     }
 
     #[test]
-    fn reject_invalid_json() {
+    fn parse_body__rejects_invalid_json() {
         assert!(parse_body(b"not json").is_none());
     }
 
     #[test]
-    fn reject_non_jsonrpc_json() {
-        // Valid JSON but not JSON-RPC — e.g. an OAuth token request body
+    fn parse_body__rejects_non_jsonrpc() {
         let body = br#"{"grant_type":"client_credentials","client_id":"abc"}"#;
         assert!(parse_body(body).is_none());
     }
 
     #[test]
-    fn reject_batch_of_non_jsonrpc() {
+    fn parse_body__rejects_batch_of_non_jsonrpc() {
         let body = br#"[{"foo":"bar"},{"baz":1}]"#;
         assert!(parse_body(body).is_none());
     }
@@ -608,7 +605,7 @@ mod tests {
     // ── McpMethod ──
 
     #[test]
-    fn mcp_method_known() {
+    fn mcp_method__known_methods() {
         assert_eq!(McpMethod::parse("initialize"), McpMethod::Initialize);
         assert_eq!(McpMethod::parse("tools/call"), McpMethod::ToolsCall);
         assert_eq!(McpMethod::parse("tools/list"), McpMethod::ToolsList);
@@ -644,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_method_notification() {
+    fn mcp_method__notifications() {
         assert_eq!(
             McpMethod::parse("notifications/initialized"),
             McpMethod::Initialized
@@ -670,7 +667,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_method_unknown() {
+    fn mcp_method__unknown() {
         assert_eq!(
             McpMethod::parse("custom/method"),
             McpMethod::Unknown("custom/method".into())
@@ -678,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_method_as_str_roundtrip() {
+    fn mcp_method__as_str_roundtrip() {
         let methods = [
             "initialize",
             "notifications/initialized",
@@ -704,7 +701,7 @@ mod tests {
     // ── JsonRpcId display ──
 
     #[test]
-    fn id_display() {
+    fn jsonrpc_id__display() {
         assert_eq!(JsonRpcId::Number(42).to_string(), "42");
         assert_eq!(JsonRpcId::String("abc".into()).to_string(), "abc");
     }
@@ -712,7 +709,7 @@ mod tests {
     // ── ParsedBody helpers ──
 
     #[test]
-    fn first_params_from_request() {
+    fn parsed_body__first_params_from_request() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#;
         let parsed = parse_body(body).unwrap();
         let params = parsed.first_params().unwrap();
@@ -720,14 +717,14 @@ mod tests {
     }
 
     #[test]
-    fn first_params_none_for_response() {
+    fn parsed_body__first_params_none_for_response() {
         let body = br#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
         let parsed = parse_body(body).unwrap();
         assert!(parsed.first_params().is_none());
     }
 
     #[test]
-    fn method_str_defaults_to_unknown_for_responses() {
+    fn parsed_body__method_str_defaults_to_unknown() {
         let body = br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
         let parsed = parse_body(body).unwrap();
         assert_eq!(parsed.method_str(), "unknown");
@@ -736,7 +733,7 @@ mod tests {
     // ── ParsedBody::detail ──
 
     #[test]
-    fn detail_tools_call() {
+    fn parsed_body__detail_tools_call() {
         let body =
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#;
         let parsed = parse_body(body).unwrap();
@@ -744,28 +741,28 @@ mod tests {
     }
 
     #[test]
-    fn detail_resources_read() {
+    fn parsed_body__detail_resources_read() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"ui://widget/clock.html"}}"#;
         let parsed = parse_body(body).unwrap();
         assert_eq!(parsed.detail().as_deref(), Some("ui://widget/clock.html"));
     }
 
     #[test]
-    fn detail_none_for_tools_list() {
+    fn parsed_body__detail_none_for_tools_list() {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
         let parsed = parse_body(body).unwrap();
         assert!(parsed.detail().is_none());
     }
 
     #[test]
-    fn detail_notifications_cancelled() {
+    fn parsed_body__detail_notifications_cancelled() {
         let body = br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"req-42","reason":"timeout"}}"#;
         let parsed = parse_body(body).unwrap();
         assert_eq!(parsed.detail().as_deref(), Some("req-42"));
     }
 
     #[test]
-    fn detail_notifications_cancelled_numeric_id() {
+    fn parsed_body__detail_cancelled_numeric_id() {
         let body =
             br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":7}}"#;
         let parsed = parse_body(body).unwrap();
@@ -773,14 +770,14 @@ mod tests {
     }
 
     #[test]
-    fn detail_notifications_progress() {
+    fn parsed_body__detail_notifications_progress() {
         let body = br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"tok-1","progress":50,"total":100}}"#;
         let parsed = parse_body(body).unwrap();
         assert_eq!(parsed.detail().as_deref(), Some("tok-1"));
     }
 
     #[test]
-    fn detail_notifications_progress_numeric_token() {
+    fn parsed_body__detail_progress_numeric_token() {
         let body = br#"{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":99,"progress":10}}"#;
         let parsed = parse_body(body).unwrap();
         assert_eq!(parsed.detail().as_deref(), Some("99"));
@@ -789,7 +786,7 @@ mod tests {
     // ── error_code ──
 
     #[test]
-    fn error_code_labels() {
+    fn error_code__labels() {
         assert_eq!(error_code::label(error_code::PARSE_ERROR), "Parse error");
         assert_eq!(
             error_code::label(error_code::METHOD_NOT_FOUND),
@@ -811,7 +808,7 @@ mod tests {
     // ── error_response ──
 
     #[test]
-    fn error_response_with_numeric_id() {
+    fn error_response__numeric_id() {
         let body = error_response(&json!(1), error_code::METHOD_NOT_FOUND, "Method not found");
         let parsed: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["jsonrpc"], "2.0");
@@ -821,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn error_response_with_null_id() {
+    fn error_response__null_id() {
         let body = error_response(&Value::Null, error_code::PARSE_ERROR, "Parse error");
         let parsed: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["id"], Value::Null);
@@ -831,7 +828,7 @@ mod tests {
     // ── extract_error_code ──
 
     #[test]
-    fn extract_error_from_response() {
+    fn extract_error_code__from_error_response() {
         let val = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32601, "message": "Method not found"}});
         let (code, msg) = extract_error_code(&val).unwrap();
         assert_eq!(code, -32601);
@@ -839,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_no_error_from_success() {
+    fn extract_error_code__none_for_success() {
         let val = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}});
         assert!(extract_error_code(&val).is_none());
     }

@@ -45,13 +45,14 @@ pub fn split_upstream(url: &str) -> (&str, &str) {
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     // ── SSE extraction ──
 
     #[test]
-    fn extract_json_from_sse_single_event() {
+    fn extract_json_from_sse__single_event() {
         let input = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
         let result = extract_json_from_sse(input).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&result).unwrap();
@@ -59,25 +60,25 @@ mod tests {
     }
 
     #[test]
-    fn extract_json_from_sse_with_leading_whitespace_returns_none() {
+    fn extract_json_from_sse__indented_data_line_returns_none() {
         let input = b"  data: {\"id\":1}\n\n";
         assert!(extract_json_from_sse(input).is_none());
     }
 
     #[test]
-    fn extract_json_from_sse_not_sse() {
+    fn extract_json_from_sse__non_sse_input() {
         let input = b"{\"jsonrpc\":\"2.0\",\"id\":1}";
         assert!(extract_json_from_sse(input).is_none());
     }
 
     #[test]
-    fn extract_json_from_sse_multiple_events_returns_none() {
+    fn extract_json_from_sse__multiple_events_returns_none() {
         let input = b"data: {\"id\":1}\n\ndata: {\"id\":2}\n\n";
         assert!(extract_json_from_sse(input).is_none());
     }
 
     #[test]
-    fn extract_json_from_sse_empty_data_skipped() {
+    fn extract_json_from_sse__empty_data_skipped() {
         let input = b"data: \ndata: {\"id\":1}\n\n";
         let result = extract_json_from_sse(input);
         assert!(result.is_some());
@@ -86,14 +87,14 @@ mod tests {
     // ── SSE wrapping ──
 
     #[test]
-    fn wrap_as_sse_format() {
+    fn wrap_as_sse__correct_format() {
         let json = b"{\"id\":1}";
         let wrapped = wrap_as_sse(json);
         assert_eq!(wrapped, b"data: {\"id\":1}\n\n");
     }
 
     #[test]
-    fn sse_roundtrip() {
+    fn sse__roundtrip() {
         let original = b"{\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{\"content\":[]}}";
         let wrapped = wrap_as_sse(original);
         let extracted = extract_json_from_sse(&wrapped).unwrap();
@@ -103,28 +104,28 @@ mod tests {
     // ── split_upstream ──
 
     #[test]
-    fn split_upstream_with_path() {
+    fn split_upstream__with_path() {
         let (base, path) = split_upstream("http://localhost:9000/mcp");
         assert_eq!(base, "http://localhost:9000");
         assert_eq!(path, "/mcp");
     }
 
     #[test]
-    fn split_upstream_no_path() {
+    fn split_upstream__no_path() {
         let (base, path) = split_upstream("http://localhost:9000");
         assert_eq!(base, "http://localhost:9000");
         assert_eq!(path, "");
     }
 
     #[test]
-    fn split_upstream_deep_path() {
+    fn split_upstream__deep_path() {
         let (base, path) = split_upstream("https://api.example.com/v1/mcp");
         assert_eq!(base, "https://api.example.com");
         assert_eq!(path, "/v1/mcp");
     }
 
     #[test]
-    fn split_upstream_trailing_slash() {
+    fn split_upstream__trailing_slash() {
         let (base, path) = split_upstream("http://localhost:9000/");
         assert_eq!(base, "http://localhost:9000");
         assert_eq!(path, "/");
