@@ -28,7 +28,7 @@ futures-util = "0.3"
 url = "2"
 base64 = "0.22"
 sha2 = "0.10"
-tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-webpki-roots"] }
 mcpr-core = { path = "crates/mcpr-core", version = "0.4.33" }
 mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.33" }
 mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.33" }
