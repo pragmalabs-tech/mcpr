@@ -10,35 +10,46 @@
 //!
 //! ## Module Structure
 //!
+//! Three-layer architecture: **render** (terminal output), **logic** (data operations),
+//! **cmd** (thin command dispatch).
+//!
 //! ```text
 //! mcpr-cli/src/
-//! +-- main.rs         # Entry point, daemon/proxy dispatch
-//! +-- config.rs       # CLI args, TOML config, subcommands
-//! +-- daemon.rs       # mcprd supervisor (fork, PID file, health monitor)
-//! +-- proxy_lock.rs   # Per-proxy lockfiles under ~/.mcpr/proxies/
-//! +-- commands.rs     # CLI query command handlers
-//! +-- proxy.rs        # Request dispatcher (classify -> handle)
-//! +-- mcp_handler.rs  # MCP POST/SSE handling, session tracking, store events
-//! +-- widgets.rs      # Widget HTML serving, asset proxying
-//! +-- passthrough.rs  # Non-MCP request forwarding
-//! +-- admin.rs        # Health/readiness admin server
-//! +-- display.rs      # Startup info formatting
-//! +-- event_bus.rs    # EventBus — routes ProxyEvents to sinks
-//! +-- stderr_sink.rs  # StderrSink — console output
+//! +-- main.rs           # Entry point, daemon bootstrap, gateway runtime
+//! +-- config.rs         # CLI args (clap), TOML config, subcommands
+//! +-- render.rs         # All terminal output — tables, colors, formatting
+//! +-- logic/            # Core business logic (no printing)
+//! |   +-- daemon.rs     #   Daemon status queries
+//! |   +-- proxy.rs      #   Proxy lifecycle (start/stop/restart)
+//! |   +-- query.rs      #   DB engine, time parsing, threshold parsing
+//! +-- cmd/              # Thin command handlers (logic → render)
+//! |   +-- proxy.rs      #   Proxy lifecycle commands
+//! |   +-- observe.rs    #   Observability commands (logs, stats, sessions, …)
+//! |   +-- store.rs      #   Store maintenance commands
+//! +-- daemon.rs         # mcprd supervisor (fork, PID file, health monitor)
+//! +-- proxy_lock.rs     # Per-proxy lockfiles under ~/.mcpr/proxies/
+//! +-- proxy.rs          # Request dispatcher (classify → handle)
+//! +-- mcp_handler.rs    # MCP POST/SSE handling, session tracking, store events
+//! +-- widgets.rs        # Widget HTML serving, asset proxying
+//! +-- passthrough.rs    # Non-MCP request forwarding
+//! +-- admin.rs          # Health/readiness admin server
+//! +-- event_bus.rs      # EventBus — routes ProxyEvents to sinks
+//! +-- stderr_sink.rs    # StderrSink — console output
 //! ```
 
 mod admin;
-mod commands;
+mod cmd;
 mod config;
 #[cfg(unix)]
 mod daemon;
-mod display;
 mod event_bus;
+mod logic;
 mod mcp_handler;
 mod passthrough;
 mod proxy;
 #[allow(dead_code)]
 mod proxy_lock;
+mod render;
 mod stderr_sink;
 mod widgets;
 
@@ -54,7 +65,6 @@ use axum::extract::DefaultBodyLimit;
 use tower_http::cors::{Any, CorsLayer};
 
 use config::{CliAction, GatewayConfig, Mode};
-use display::log_startup;
 use mcpr_core::protocol::session::MemorySessionStore;
 use mcpr_core::proxy::RewriteConfig;
 use mcpr_core::proxy::state::{self as proxy_state, SharedProxyState};
@@ -294,7 +304,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     for name in &restart_proxies {
-                        match commands::start_one_proxy(name) {
+                        match logic::proxy::start_proxy(name) {
                             Ok(_) => eprintln!("Restarted proxy \"{}\".", name),
                             Err(e) => eprintln!("Failed to restart proxy \"{}\": {}", name, e),
                         }
@@ -312,7 +322,13 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
         }
         CliAction::Status => {
             #[cfg(unix)]
-            daemon::print_status();
+            {
+                let status = logic::daemon::get_status();
+                let exit_code = render::daemon_status(status);
+                if exit_code != 0 {
+                    std::process::exit(exit_code);
+                }
+            }
             #[cfg(not(unix))]
             {
                 eprintln!("error: daemon management not supported on this platform");
@@ -321,31 +337,12 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
         }
         CliAction::Validate(args) => {
             let issues = config::validate_config(args.config.as_deref());
-            let mut has_error = false;
-            for (severity, msg) in &issues {
-                match *severity {
-                    "error" => {
-                        has_error = true;
-                        eprintln!("  {} {msg}", colored::Colorize::red("error"),);
-                    }
-                    "warn" => {
-                        eprintln!("  {} {msg}", colored::Colorize::yellow("warn"),);
-                    }
-                    _ => {
-                        eprintln!("  {} {msg}", colored::Colorize::green("ok"),);
-                    }
-                }
-            }
+            let has_error = issues.iter().any(|(s, _)| *s == "error");
+            render::validate_issues(&issues);
             std::process::exit(if has_error { 1 } else { 0 });
         }
         CliAction::Version => {
-            println!(
-                "{}",
-                serde_json::json!({
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "target": option_env!("TARGET").unwrap_or("unknown"),
-                })
-            );
+            render::version_info();
         }
         CliAction::Update => {
             eprintln!("Updating mcpr to the latest version...");
@@ -370,7 +367,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
             }
         }
         CliAction::Proxy(cmd) => {
-            commands::handle_proxy_command(cmd);
+            cmd::handle_proxy_command(cmd);
         }
         CliAction::ProxyRun {
             mode, config_path, ..
@@ -385,7 +382,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
             }
         },
         CliAction::Store(cmd) => {
-            commands::handle_store_command(cmd);
+            cmd::handle_store_command(cmd);
         }
     }
 }
@@ -615,7 +612,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
 
     let app = build_app(state);
 
-    log_startup(
+    render::log_startup(
         &proxy_state_ref,
         actual_port,
         &public_url,

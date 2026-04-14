@@ -13,7 +13,7 @@ license = "Apache-2.0"
 version = "0.4.12"
 repository = "https://github.com/cptrodgers/mcpr"
 homepage = "https://mcpr.app"
-description = "Open-source proxy for MCP Apps — fixes CSP, handles auth, observes every tool call."
+description = "MCPR is a reverse proxy for MCP servers — operating at the JSON-RPC layer to route, authenticate, observe, and secure MCP traffic."
 
 [workspace.dependencies]
 axum = { version = "0.8", features = ["ws"] }

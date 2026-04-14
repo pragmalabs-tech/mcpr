@@ -495,58 +495,6 @@ fn wait_for_exit(pid: u32, timeout: Duration) {
 // ── Status command ─────────────────────────────────────────────────────
 
 /// Print daemon status and proxy listing, then exit.
-pub fn print_status() {
-    match check_status() {
-        DaemonStatus::Running(info) => {
-            let uptime = chrono::Utc::now().timestamp() - info.started_at;
-            let hours = uptime / 3600;
-            let minutes = (uptime % 3600) / 60;
-            let seconds = uptime % 60;
-
-            println!(
-                "mcprd running (PID: {}, uptime: {}h {}m {}s)",
-                info.pid, hours, minutes, seconds
-            );
-            println!("  PID file: {}", pid_file_path().display());
-            println!("  Log file: {}", daemon_log_path().display());
-
-            // Show proxy listing.
-            let proxies = super::proxy_lock::list_proxies();
-            let running: Vec<_> = proxies
-                .iter()
-                .filter(|(_, s)| matches!(s, super::proxy_lock::LockStatus::Held(_)))
-                .collect();
-
-            if running.is_empty() {
-                println!("\n  0 proxies running.");
-                println!("  Use `mcpr proxy run <config>` to start a proxy.");
-            } else {
-                println!("\n  {} proxy(ies) running:", running.len());
-                for (name, status) in &running {
-                    if let super::proxy_lock::LockStatus::Held(lock) = status {
-                        println!("    {} (PID: {}, port: {})", name, lock.pid, lock.port);
-                    }
-                }
-                println!();
-                println!("  Use `mcpr proxy logs` to view request logs.");
-                println!("  Use `mcpr proxy stats` to view metrics.");
-            }
-        }
-        DaemonStatus::Stale(info) => {
-            eprintln!(
-                "Daemon is not running (stale PID file for PID: {})",
-                info.pid
-            );
-            remove_pid_file();
-            std::process::exit(1);
-        }
-        DaemonStatus::NotRunning => {
-            eprintln!("No daemon is running.");
-            std::process::exit(1);
-        }
-    }
-}
-
 /// If a daemon is already running, stop it first so the new one can take over.
 pub fn ensure_not_running() {
     match check_status() {
