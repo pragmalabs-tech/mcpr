@@ -319,18 +319,66 @@ Rules: one `*` per pattern, case-sensitive, no `?` or `**`.
 
 ## 5. Run the Relay
 
-All configuration is in `mcpr.toml` (see section 4). Mount it into the container:
+### Using mcpr
+
+Run in foreground (useful for debugging, Docker, systemd):
+
+```bash
+mcpr relay run relay.toml
+```
+
+Run as a background process under the daemon:
+
+```bash
+mcpr start                    # start daemon
+mcpr relay start relay.toml   # start relay in background
+```
+
+Other lifecycle commands:
+
+```bash
+mcpr relay status             # show PID, port, uptime
+mcpr relay stop               # send SIGTERM, clean up lockfile
+mcpr relay restart             # stop + start from saved config
+```
+
+`mcpr relay` commands do not require `mode = "relay"` in the config file — the mode is implicit.
+
+Running a relay and proxy on the same machine:
+
+```bash
+mcpr start                        # daemon
+mcpr proxy run gateway.toml       # MCP proxy
+mcpr relay start relay.toml       # relay server
+```
+
+`mcpr stop` stops both. `mcpr restart` re-launches both. The relay exits automatically if the daemon dies.
+
+### Using Docker
 
 ```bash
 docker run -d \
   --name mcpr-relay \
   --restart unless-stopped \
   -p 8080:8080 \
-  -v ./mcpr.toml:/app/mcpr.toml \
-  ghcr.io/cptrodgers/mcpr:latest
+  -v ./relay.toml:/app/relay.toml \
+  ghcr.io/cptrodgers/mcpr:latest \
+  relay run /app/relay.toml
 ```
 
-### Update
+With the `Relay.Dockerfile` (bakes the binary into a smaller image):
+
+```bash
+docker build -f Relay.Dockerfile --build-arg VERSION=v0.4.12 -t mcpr-relay .
+docker run -d \
+  --name mcpr-relay \
+  --restart unless-stopped \
+  -p 8080:8080 \
+  -v ./relay.toml:/app/relay.toml \
+  mcpr-relay
+```
+
+Update:
 
 ```bash
 docker pull ghcr.io/cptrodgers/mcpr:latest
@@ -362,12 +410,15 @@ mcpr start
 ## 7. Verify
 
 ```bash
-# Check relay is reachable
+# Check relay is reachable (expects 400 "missing token" — means relay is running)
 curl -s https://tunnel.yourdomain.com/_tunnel/register
-# Expected: "missing token" (400) -- means relay is running
 
-# Full test: start mcpr client with mcpr.toml configured, then
+# If running via mcpr CLI
+mcpr relay status
+
+# Full test: start a client proxy with tunnel enabled
 mcpr start
+mcpr proxy run mcpr.toml
 mcpr status
 ```
 
