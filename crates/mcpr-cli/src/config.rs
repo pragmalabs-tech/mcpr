@@ -44,6 +44,11 @@ pub enum CliAction {
         /// Absolute path to the original config file.
         config_path: String,
     },
+    /// Interactive setup wizard (needs async for cloud API calls).
+    ProxySetup {
+        cloud_url: String,
+        output: Option<String>,
+    },
     /// Store maintenance commands.
     Store(StoreCommand),
     /// Relay subcommands (stop, restart, status — no config needed).
@@ -179,6 +184,10 @@ pub enum ProxyCommand {
     Session(ProxySessionArgs),
     /// Show captured MCP server schema (tools, resources, prompts)
     Schema(ProxySchemaArgs),
+
+    // ── Onboarding ──────────────────────────────────────────────────
+    /// Interactive setup wizard — authenticate, pick project, generate config
+    Setup(ProxySetupArgs),
 }
 
 // ── Proxy lifecycle args ──────────────────────────────────────────────
@@ -425,6 +434,18 @@ pub struct ProxySchemaArgs {
     /// Output as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+/// Arguments for `mcpr proxy setup`.
+#[derive(Parser, Clone)]
+pub struct ProxySetupArgs {
+    /// Cloud API base URL (default: https://api.mcpr.app)
+    #[arg(long, default_value = "https://api.mcpr.app")]
+    pub cloud_url: String,
+
+    /// Output config path (default: ./mcpr.toml)
+    #[arg(long, short)]
+    pub output: Option<String>,
 }
 
 // ── Store subcommands ──────────────────────────────────────────────────
@@ -758,6 +779,12 @@ pub fn load() -> CliAction {
                 config_path: config_path_str,
             }
         }
+        Some(Commands::Proxy(ProxyArgs {
+            command: ProxyCommand::Setup(setup_args),
+        })) => CliAction::ProxySetup {
+            cloud_url: setup_args.cloud_url,
+            output: setup_args.output,
+        },
         Some(Commands::Proxy(args)) => CliAction::Proxy(args.command),
         Some(Commands::Store(args)) => CliAction::Store(args.command),
         Some(Commands::Relay(RelayArgs {

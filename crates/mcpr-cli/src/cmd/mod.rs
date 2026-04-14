@@ -3,6 +3,7 @@
 mod observe;
 mod proxy;
 mod relay;
+pub mod setup;
 mod store;
 
 use crate::config::{ProxyCommand, RelayCommand, StoreCommand};
@@ -12,6 +13,9 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         // Lifecycle commands
         ProxyCommand::Run(_) => {
             unreachable!("`mcpr proxy run` is handled before async dispatch");
+        }
+        ProxyCommand::Setup(_) => {
+            unreachable!("`mcpr proxy setup` is handled in async dispatch");
         }
         ProxyCommand::Stop(args) => proxy::stop(args),
         ProxyCommand::Restart(args) => proxy::restart(args),
