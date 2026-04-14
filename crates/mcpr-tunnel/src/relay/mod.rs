@@ -71,8 +71,10 @@ mod hex {
     }
 }
 
-/// Start the relay server.
-pub async fn start_relay(cfg: RelayConfig) {
+/// Build the relay Axum app without binding or serving.
+///
+/// Returns `(router, port)` — the caller controls the TCP listener and shutdown.
+pub fn build_relay_app(cfg: RelayConfig) -> (Router, u16) {
     let auth = if !cfg.tokens.is_empty() {
         let count = cfg.tokens.len();
         println!(
@@ -126,6 +128,13 @@ pub async fn start_relay(cfg: RelayConfig) {
         .layer(DefaultBodyLimit::max(max_body));
 
     let port = cfg.port;
+    (app, port)
+}
+
+/// Start the relay server (binds and serves until process exits).
+pub async fn start_relay(cfg: RelayConfig) {
+    let (app, port) = build_relay_app(cfg);
+
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .expect("Failed to bind relay");

@@ -45,6 +45,18 @@ pub enum CliAction {
     },
     /// Store maintenance commands.
     Store(StoreCommand),
+    /// Relay subcommands (stop, restart, status — no config needed).
+    Relay(RelayCommand),
+    /// Run the relay server (foreground or daemonized).
+    RelayRun {
+        relay_config: RelayConfig,
+        /// Raw TOML content for config snapshot.
+        config_content: String,
+        /// Absolute path to the original config file.
+        config_path: String,
+        /// `true` for `relay run` (foreground), `false` for `relay start` (daemonize).
+        foreground: bool,
+    },
 }
 
 // ── Log format ──────────────────────────────────────────────────────────
@@ -114,6 +126,8 @@ enum Commands {
     Proxy(ProxyArgs),
     /// Storage maintenance (stats, vacuum)
     Store(StoreArgs),
+    /// Relay server lifecycle (run, start, stop, restart, status)
+    Relay(RelayArgs),
 }
 
 /// Arguments for `mcpr start`.
@@ -445,6 +459,43 @@ pub struct StoreVacuumArgs {
     pub dry_run: bool,
 }
 
+// ── Relay subcommands ─────────────────────────────────────────────────
+
+#[derive(Parser)]
+pub struct RelayArgs {
+    #[command(subcommand)]
+    pub command: RelayCommand,
+}
+
+/// Relay server lifecycle commands.
+#[derive(Subcommand, Clone)]
+pub enum RelayCommand {
+    /// Run relay server in the foreground
+    Run(RelayRunArgs),
+    /// Start relay server in the background
+    Start(RelayRunArgs),
+    /// Stop the running relay server
+    Stop,
+    /// Restart the relay server
+    Restart(RelayRestartArgs),
+    /// Show relay server status
+    Status,
+}
+
+/// Arguments for `mcpr relay run` and `mcpr relay start`.
+#[derive(Parser, Clone)]
+pub struct RelayRunArgs {
+    /// Config file path
+    pub config: Option<String>,
+}
+
+/// Arguments for `mcpr relay restart`.
+#[derive(Parser, Clone)]
+pub struct RelayRestartArgs {
+    /// New config file (omit to reuse saved config)
+    pub config: Option<String>,
+}
+
 /// Arguments for the `validate` subcommand.
 #[derive(Parser, Clone)]
 pub struct ValidateArgs {
@@ -708,6 +759,13 @@ pub fn load() -> CliAction {
         }
         Some(Commands::Proxy(args)) => CliAction::Proxy(args.command),
         Some(Commands::Store(args)) => CliAction::Store(args.command),
+        Some(Commands::Relay(RelayArgs {
+            command: RelayCommand::Run(run_args),
+        })) => load_relay_run(run_args, cli.config.as_deref(), true),
+        Some(Commands::Relay(RelayArgs {
+            command: RelayCommand::Start(run_args),
+        })) => load_relay_run(run_args, cli.config.as_deref(), false),
+        Some(Commands::Relay(args)) => CliAction::Relay(args.command),
         Some(Commands::Stop) => CliAction::Stop,
         Some(Commands::Status) => CliAction::Status,
         Some(Commands::Start(args)) => CliAction::Start {
@@ -718,6 +776,54 @@ pub fn load() -> CliAction {
         },
         // No subcommand — default to starting the daemon.
         None => CliAction::Start { foreground: false },
+    }
+}
+
+/// Load config for `mcpr relay run` / `mcpr relay start`.
+/// The `mode = "relay"` field is not required — it is implicit from the command.
+fn load_relay_run(args: RelayRunArgs, global_config: Option<&str>, foreground: bool) -> CliAction {
+    let explicit_path = args.config.as_deref().or(global_config);
+    let (file, cfg_path) = FileConfig::load(explicit_path);
+    let config_content = cfg_path
+        .as_ref()
+        .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+        .unwrap_or_default();
+    let config_path_str = cfg_path
+        .as_ref()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+
+    let port = file
+        .port
+        .expect("port is required for relay mode in config");
+    let relay_domain = file
+        .relay
+        .domain
+        .expect("relay.domain is required for relay mode in config");
+
+    let tokens = file
+        .relay
+        .tokens
+        .into_iter()
+        .map(|e| (e.token, e.subdomains))
+        .collect();
+
+    let relay_config = RelayConfig {
+        port,
+        relay_domain,
+        auth_provider: file.relay.auth_provider,
+        auth_provider_secret: file.relay.auth_provider_secret,
+        tokens,
+        max_request_body_size: file.max_request_body_size,
+        max_response_body_size: file.max_response_body_size,
+    };
+
+    CliAction::RelayRun {
+        relay_config,
+        config_content,
+        config_path: config_path_str,
+        foreground,
     }
 }
 

@@ -49,6 +49,7 @@ mod passthrough;
 mod proxy;
 #[allow(dead_code)]
 mod proxy_lock;
+mod relay_lock;
 mod render;
 mod stderr_sink;
 mod widgets;
@@ -260,6 +261,45 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        CliAction::RelayRun {
+            foreground: false,
+            config_content,
+            ..
+        } => {
+            #[cfg(unix)]
+            {
+                // Check for existing relay.
+                match relay_lock::check_lock() {
+                    relay_lock::LockStatus::Free => {}
+                    relay_lock::LockStatus::Stale(_) => relay_lock::remove_lock(),
+                    relay_lock::LockStatus::Held(info) => {
+                        eprintln!("error: relay already running (pid {})", info.pid);
+                        std::process::exit(1);
+                    }
+                }
+
+                // Snapshot config.
+                if let Err(e) = relay_lock::snapshot_config(config_content) {
+                    eprintln!("error: failed to snapshot config: {e}");
+                    std::process::exit(1);
+                }
+
+                // Double-fork to background.
+                let fd = daemon::daemonize_relay(Duration::from_secs(10)).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
+                    std::process::exit(1);
+                });
+                Some(fd)
+            }
+            #[cfg(not(unix))]
+            {
+                eprintln!("error: background relay mode not supported on this platform");
+                std::process::exit(1);
+            }
+        }
+        CliAction::RelayRun {
+            foreground: true, ..
+        } => None,
         _ => None,
     };
 
@@ -373,7 +413,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
             mode, config_path, ..
         } => match mode {
             Mode::Relay(_) => {
-                eprintln!("error: relay mode does not support `mcpr proxy run`");
+                eprintln!("error: use `mcpr relay run` instead of `mcpr proxy run` for relay mode");
                 std::process::exit(1);
             }
             Mode::Gateway(cfg) => {
@@ -383,6 +423,16 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
         },
         CliAction::Store(cmd) => {
             cmd::handle_store_command(cmd);
+        }
+        CliAction::RelayRun {
+            relay_config,
+            config_path,
+            ..
+        } => {
+            run_relay_inner(relay_config, ready_fd, config_path).await;
+        }
+        CliAction::Relay(cmd) => {
+            cmd::handle_relay_command(cmd);
         }
     }
 }
@@ -709,6 +759,90 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     proxy_lock::remove_lock(&proxy_name_for_shutdown);
 
     eprintln!("[mcpr] Shutdown complete.");
+}
+
+/// Run the relay server process. Called from `mcpr relay run` / `mcpr relay start`.
+#[allow(unused_variables)]
+async fn run_relay_inner(
+    cfg: mcpr_tunnel::RelayConfig,
+    ready_fd: Option<i32>,
+    config_path: String,
+) {
+    let (app, port) = mcpr_tunnel::build_relay_app(cfg);
+
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to bind relay on port {port}: {e}");
+            std::process::exit(1);
+        });
+    let actual_port = listener.local_addr().unwrap().port();
+
+    // Write lockfile.
+    #[cfg(unix)]
+    if let Err(e) = relay_lock::write_lock(actual_port, &config_path) {
+        eprintln!("error: failed to write relay lockfile: {e}");
+        std::process::exit(1);
+    }
+
+    // Signal readiness to parent (if daemonized).
+    #[cfg(unix)]
+    if let Some(fd) = ready_fd {
+        daemon::signal_ready(fd);
+    }
+
+    eprintln!(
+        "  {} relay listening on :{actual_port}",
+        colored::Colorize::green("mcpr")
+    );
+
+    // Shutdown signal.
+    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+    let mut shutdown_rx = shutdown_tx.subscribe();
+
+    // Signal handler (SIGTERM + SIGINT).
+    let shutdown_trigger = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM");
+            tokio::select! {
+                _ = ctrl_c => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.expect("Failed to listen for ctrl-c");
+        }
+
+        eprintln!("[mcpr] Received shutdown signal, stopping relay...");
+        let _ = shutdown_trigger.send(true);
+    });
+
+    // Serve with graceful shutdown.
+    let shutdown_for_server = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let mut rx = shutdown_for_server;
+                let _ = rx.changed().await;
+            })
+            .await
+            .expect("Relay server failed");
+    });
+
+    // Wait for shutdown signal.
+    let _ = shutdown_rx.changed().await;
+
+    // Clean up lockfile.
+    relay_lock::remove_lock();
+
+    eprintln!("[mcpr] Relay shutdown complete.");
 }
 
 /// Validate MCP URL format at startup. Exits with an error for clearly invalid URLs,

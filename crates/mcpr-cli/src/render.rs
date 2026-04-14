@@ -242,6 +242,36 @@ pub fn no_proxies_to_restart() {
     eprintln!("No running proxies found to restart.");
 }
 
+// ── Relay lifecycle ──────────────────────────────────────────────────
+
+pub fn relay_stopping(pid: u32) {
+    eprintln!("Stopping relay (pid {pid})...");
+}
+
+pub fn relay_stopped_done() {
+    eprintln!("Stopped.");
+}
+
+pub fn relay_stale_cleaned() {
+    eprintln!("Cleaned up stale lock for relay.");
+}
+
+pub fn relay_restarted() {
+    eprintln!("Restarted relay.");
+}
+
+pub fn relay_not_running() {
+    eprintln!("Relay is not running.");
+}
+
+pub fn relay_status(info: &crate::logic::relay::RelayStatusInfo) {
+    let uptime = chrono::Utc::now().timestamp() - info.started_at;
+    eprintln!("Relay is running.");
+    eprintln!("  PID:     {}", info.pid);
+    eprintln!("  Port:    {}", info.port);
+    eprintln!("  Uptime:  {}s", uptime);
+}
+
 // ── Proxy list ────────────────────────────────────────────────────────
 
 pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
