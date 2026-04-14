@@ -33,6 +33,7 @@ mcpr-core = { workspace = true }
 
 mcpr-tunnel = { workspace = true }
 mcpr-integrations = { workspace = true }
+inquire = "0.7"
 
 # Platform-specific default paths for PID file and daemon log.
 dirs = "6"

@@ -48,6 +48,7 @@
 //!         +-- store_ops.rs# Store stats and vacuum
 //! ```
 
+pub mod cloud_client;
 pub mod emitter;
 pub mod store;
 

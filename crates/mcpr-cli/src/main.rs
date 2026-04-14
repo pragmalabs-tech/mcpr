@@ -433,6 +433,12 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 }
             }
         }
+        CliAction::ProxySetup { cloud_url, output } => {
+            if let Err(e) = cmd::setup::run_setup(&cloud_url, output.as_deref()).await {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
         CliAction::Proxy(cmd) => {
             cmd::handle_proxy_command(cmd);
         }
