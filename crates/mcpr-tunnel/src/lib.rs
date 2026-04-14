@@ -45,4 +45,5 @@ pub mod relay;
 
 pub use client::{TunnelStatusCallback, start_tunnel_client};
 pub use protocol::*;
+pub use relay::build_relay_app;
 pub use relay::config::RelayConfig;

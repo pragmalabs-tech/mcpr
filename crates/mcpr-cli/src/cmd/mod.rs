@@ -2,9 +2,10 @@
 
 mod observe;
 mod proxy;
+mod relay;
 mod store;
 
-use crate::config::{ProxyCommand, StoreCommand};
+use crate::config::{ProxyCommand, RelayCommand, StoreCommand};
 
 pub fn handle_proxy_command(cmd: ProxyCommand) {
     let result = match cmd {
@@ -26,6 +27,22 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         ProxyCommand::Status(args) => observe::status(args),
         ProxyCommand::Session(args) => observe::session(args),
         ProxyCommand::Schema(args) => observe::schema(args),
+    };
+
+    if let Err(e) = result {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+pub fn handle_relay_command(cmd: RelayCommand) {
+    let result = match cmd {
+        RelayCommand::Run(_) | RelayCommand::Start(_) => {
+            unreachable!("`mcpr relay run/start` is handled before async dispatch");
+        }
+        RelayCommand::Stop => relay::stop(),
+        RelayCommand::Restart(args) => relay::restart(args),
+        RelayCommand::Status => relay::status(),
     };
 
     if let Err(e) = result {

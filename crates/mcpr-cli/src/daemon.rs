@@ -217,6 +217,82 @@ pub fn daemonize_proxy(
     }
 }
 
+/// Daemonize the relay process using double-fork.
+///
+/// Same pattern as `daemonize_proxy()` but redirects stdio to the relay log.
+#[cfg(unix)]
+pub fn daemonize_relay(timeout: Duration) -> Result<std::os::unix::io::RawFd, String> {
+    use nix::unistd::{ForkResult, close, fork, pipe, setsid};
+    use std::os::unix::io::{IntoRawFd, RawFd};
+
+    let (read_owned, write_owned) = pipe().map_err(|e| format!("pipe failed: {e}"))?;
+    let read_fd: RawFd = read_owned.into_raw_fd();
+    let write_fd: RawFd = write_owned.into_raw_fd();
+
+    match unsafe { fork() }.map_err(|e| format!("fork failed: {e}"))? {
+        ForkResult::Parent { child: _ } => {
+            let _ = close(write_fd);
+            wait_for_relay_readiness(read_fd, timeout);
+            unreachable!();
+        }
+        ForkResult::Child => {
+            let _ = close(read_fd);
+            setsid().map_err(|e| format!("setsid failed: {e}"))?;
+
+            match unsafe { fork() }.map_err(|e| format!("second fork failed: {e}"))? {
+                ForkResult::Parent { child: _ } => {
+                    std::process::exit(0);
+                }
+                ForkResult::Child => {
+                    super::relay_lock::redirect_stdio()
+                        .map_err(|e| format!("failed to redirect stdio: {e}"))?;
+                    Ok(write_fd)
+                }
+            }
+        }
+    }
+}
+
+/// Wait for the relay child to signal readiness, then exit.
+#[cfg(unix)]
+fn wait_for_relay_readiness(read_fd: std::os::unix::io::RawFd, _timeout: Duration) {
+    use std::os::unix::io::FromRawFd;
+
+    let mut pipe_read = unsafe { std::fs::File::from_raw_fd(read_fd) };
+    let mut buf = [0u8; 1];
+
+    let handle = std::thread::spawn(move || {
+        let result = pipe_read.read(&mut buf);
+        (buf, result)
+    });
+
+    match handle.join() {
+        Ok((buf, Ok(1))) if buf[0] == b'1' => {
+            if let Some(info) = super::relay_lock::read_lock_info() {
+                eprintln!("relay started (PID: {}, port: {})", info.pid, info.port);
+            } else {
+                eprintln!("relay started");
+            }
+            std::process::exit(0);
+        }
+        Ok((_, Ok(_))) => {
+            eprintln!(
+                "error: relay failed to start (check {})",
+                super::relay_lock::log_path().display()
+            );
+            std::process::exit(1);
+        }
+        Ok((_, Err(e))) => {
+            eprintln!("error: reading readiness pipe: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            eprintln!("error: internal error waiting for relay");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Wait for a proxy child to signal readiness, then exit.
 #[cfg(unix)]
 fn wait_for_proxy_readiness(
@@ -406,6 +482,15 @@ pub async fn run_supervisor(ready_fd: Option<i32>) {
                     super::proxy_lock::remove_lock(name);
                 }
             }
+
+            // Also monitor relay lockfile.
+            if let super::relay_lock::LockStatus::Stale(info) = super::relay_lock::check_lock() {
+                eprintln!(
+                    "[mcprd] relay (PID: {}) is dead, cleaning up lockfile",
+                    info.pid
+                );
+                super::relay_lock::remove_lock();
+            }
         }
     });
 
@@ -420,6 +505,11 @@ pub async fn run_supervisor(ready_fd: Option<i32>) {
             stopped.len(),
             stopped.join(", ")
         );
+    }
+
+    // Stop relay if running.
+    if super::relay_lock::stop_relay() {
+        eprintln!("[mcprd] stopped relay");
     }
 
     // Clean up.

@@ -1,10 +1,11 @@
 # CLI Reference
 
-The CLI **manages the daemon and proxy processes** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](CONFIGURATION.md). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full two-process model.
+The CLI **manages the daemon, proxy, and relay processes** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](CONFIGURATION.md). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full multi-process model.
 
-Two responsibilities:
-1. **Lifecycle** — start/stop the daemon supervisor and individual proxies.
+Three responsibilities:
+1. **Lifecycle** — start/stop the daemon supervisor, individual proxies, and the relay server.
 2. **Query & observe** — read request logs, per-tool metrics, sessions, schema, and storage stats from SQLite. These commands work even when the daemon isn't running.
+3. **Relay** — run a tunnel relay server that accepts remote mcpr client connections.
 
 ## Quick Start
 
@@ -15,13 +16,17 @@ mcpr start
 # Launch a proxy
 mcpr proxy run mcpr.toml
 
+# Launch a relay server
+mcpr relay start relay.toml
+
 # Check status
 mcpr status
+mcpr relay status
 
 # View request logs
 mcpr proxy logs
 
-# Stop everything
+# Stop everything (proxies + relay + daemon)
 mcpr stop
 ```
 
@@ -33,15 +38,16 @@ mcpr stop
 |---------|-------------|
 | `mcpr start` | Start the daemon supervisor (no config needed) |
 | `mcpr start --foreground` | Start in foreground (for Docker, systemd, debugging) |
-| `mcpr stop` | Stop all proxies + daemon (graceful SIGTERM) |
-| `mcpr restart` | Stop + start, re-launching previously running proxies |
+| `mcpr stop` | Stop all proxies + relay + daemon (graceful SIGTERM) |
+| `mcpr restart` | Stop + start, re-launching previously running proxies and relay |
 | `mcpr status` | Show daemon PID/uptime + list all proxies |
 
-`mcpr start` launches the daemon supervisor and exits. No config file is needed — the daemon is a pure supervisor that monitors proxy health. Logs go to `~/.mcpr/mcprd.log`.
+`mcpr start` launches the daemon supervisor and exits. No config file is needed — the daemon is a pure supervisor that monitors proxy and relay health. Logs go to `~/.mcpr/mcprd.log`.
 
 ```bash
 mcpr start              # start daemon, no config needed
 mcpr proxy run app.toml # then launch proxies
+mcpr relay start relay.toml # optionally launch relay
 ```
 
 ### Proxy Lifecycle
@@ -75,6 +81,32 @@ Start a stopped proxy by name, using its saved config snapshot. Errors if the pr
 ```bash
 mcpr proxy start localhost-9000
 ```
+
+### Relay Lifecycle
+
+The relay is a singleton tunnel server. One relay per machine.
+
+| Command | Description |
+|---------|-------------|
+| `mcpr relay run <config>` | Run relay in foreground (no daemon required) |
+| `mcpr relay start <config>` | Start relay in background (requires daemon) |
+| `mcpr relay stop` | Stop the relay |
+| `mcpr relay restart` | Stop + start from saved config snapshot |
+| `mcpr relay restart <config>` | Stop + start with new config |
+| `mcpr relay status` | Show relay PID, port, uptime |
+
+`mcpr relay run` runs in the foreground and does not require a running daemon. Use this for Docker, systemd, and debugging.
+
+`mcpr relay start` forks to the background and requires a running daemon. The relay participates in daemon lifecycle: `mcpr stop` stops it, `mcpr restart` re-launches it, and it self-terminates if the daemon dies.
+
+```bash
+mcpr start                    # start daemon
+mcpr relay start relay.toml   # start relay in background
+mcpr relay status             # check status
+mcpr relay stop               # stop relay
+```
+
+Relay config does not need `mode = "relay"` when using `mcpr relay` commands.
 
 ### Query & Observe
 
@@ -412,3 +444,6 @@ All state lives under `~/.mcpr/`. See [ARCHITECTURE.md](ARCHITECTURE.md) for ful
 | `~/.mcpr/proxies/{name}/config.toml` | Config snapshot (immutable after creation) |
 | `~/.mcpr/proxies/{name}/lock` | Proxy PID, port, timestamp, daemon PID |
 | `~/.mcpr/proxies/{name}/proxy.log` | Proxy stdout/stderr |
+| `~/.mcpr/relay/config.toml` | Relay config snapshot |
+| `~/.mcpr/relay/lock` | Relay PID, port, timestamp |
+| `~/.mcpr/relay/relay.log` | Relay stdout/stderr |

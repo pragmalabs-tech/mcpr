@@ -34,7 +34,7 @@ pub enum LockStatus {
 
 // ── Path helpers ──────────────────────────────────────────────────────
 
-fn mcpr_dir() -> PathBuf {
+pub(crate) fn mcpr_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".mcpr")
@@ -245,30 +245,30 @@ pub fn redirect_stdio(name: &str) -> std::io::Result<()> {
 
 /// Check if a process with the given PID is alive.
 #[cfg(unix)]
-fn is_process_alive(pid: u32) -> bool {
+pub(crate) fn is_process_alive(pid: u32) -> bool {
     use nix::sys::signal;
     use nix::unistd::Pid;
     signal::kill(Pid::from_raw(pid as i32), None).is_ok()
 }
 
 #[cfg(not(unix))]
-fn is_process_alive(_pid: u32) -> bool {
+pub(crate) fn is_process_alive(_pid: u32) -> bool {
     false
 }
 
 /// Send SIGTERM to a process.
 #[cfg(unix)]
-fn send_sigterm(pid: u32) {
+pub(crate) fn send_sigterm(pid: u32) {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
 }
 
 #[cfg(not(unix))]
-fn send_sigterm(_pid: u32) {}
+pub(crate) fn send_sigterm(_pid: u32) {}
 
 /// Wait for a process to exit, polling every 100ms.
-fn wait_for_exit(pid: u32, timeout: Duration) {
+pub(crate) fn wait_for_exit(pid: u32, timeout: Duration) {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         if !is_process_alive(pid) {

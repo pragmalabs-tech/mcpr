@@ -22,9 +22,10 @@ pub enum CliAction {
     },
     /// Stop the running daemon via SIGTERM.
     Stop,
-    /// Stop + start the daemon, re-launching previously running proxies.
+    /// Stop + start the daemon, re-launching previously running proxies and relay.
     Restart {
         restart_proxies: Vec<String>,
+        restart_relay: bool,
     },
     /// Show daemon status (PID, port, uptime, proxy name).
     Status,
@@ -45,6 +46,18 @@ pub enum CliAction {
     },
     /// Store maintenance commands.
     Store(StoreCommand),
+    /// Relay subcommands (stop, restart, status — no config needed).
+    Relay(RelayCommand),
+    /// Run the relay server (foreground or daemonized).
+    RelayRun {
+        relay_config: RelayConfig,
+        /// Raw TOML content for config snapshot.
+        config_content: String,
+        /// Absolute path to the original config file.
+        config_path: String,
+        /// `true` for `relay run` (foreground), `false` for `relay start` (daemonize).
+        foreground: bool,
+    },
 }
 
 // ── Log format ──────────────────────────────────────────────────────────
@@ -114,6 +127,8 @@ enum Commands {
     Proxy(ProxyArgs),
     /// Storage maintenance (stats, vacuum)
     Store(StoreArgs),
+    /// Relay server lifecycle (run, start, stop, restart, status)
+    Relay(RelayArgs),
 }
 
 /// Arguments for `mcpr start`.
@@ -445,6 +460,43 @@ pub struct StoreVacuumArgs {
     pub dry_run: bool,
 }
 
+// ── Relay subcommands ─────────────────────────────────────────────────
+
+#[derive(Parser)]
+pub struct RelayArgs {
+    #[command(subcommand)]
+    pub command: RelayCommand,
+}
+
+/// Relay server lifecycle commands.
+#[derive(Subcommand, Clone)]
+pub enum RelayCommand {
+    /// Run relay server in the foreground
+    Run(RelayRunArgs),
+    /// Start relay server in the background
+    Start(RelayRunArgs),
+    /// Stop the running relay server
+    Stop,
+    /// Restart the relay server
+    Restart(RelayRestartArgs),
+    /// Show relay server status
+    Status,
+}
+
+/// Arguments for `mcpr relay run` and `mcpr relay start`.
+#[derive(Parser, Clone)]
+pub struct RelayRunArgs {
+    /// Config file path
+    pub config: Option<String>,
+}
+
+/// Arguments for `mcpr relay restart`.
+#[derive(Parser, Clone)]
+pub struct RelayRestartArgs {
+    /// New config file (omit to reuse saved config)
+    pub config: Option<String>,
+}
+
 /// Arguments for the `validate` subcommand.
 #[derive(Parser, Clone)]
 pub struct ValidateArgs {
@@ -708,6 +760,13 @@ pub fn load() -> CliAction {
         }
         Some(Commands::Proxy(args)) => CliAction::Proxy(args.command),
         Some(Commands::Store(args)) => CliAction::Store(args.command),
+        Some(Commands::Relay(RelayArgs {
+            command: RelayCommand::Run(run_args),
+        })) => load_relay_run(run_args, cli.config.as_deref(), true),
+        Some(Commands::Relay(RelayArgs {
+            command: RelayCommand::Start(run_args),
+        })) => load_relay_run(run_args, cli.config.as_deref(), false),
+        Some(Commands::Relay(args)) => CliAction::Relay(args.command),
         Some(Commands::Stop) => CliAction::Stop,
         Some(Commands::Status) => CliAction::Status,
         Some(Commands::Start(args)) => CliAction::Start {
@@ -715,9 +774,58 @@ pub fn load() -> CliAction {
         },
         Some(Commands::Restart) => CliAction::Restart {
             restart_proxies: vec![],
+            restart_relay: false,
         },
         // No subcommand — default to starting the daemon.
         None => CliAction::Start { foreground: false },
+    }
+}
+
+/// Load config for `mcpr relay run` / `mcpr relay start`.
+/// The `mode = "relay"` field is not required — it is implicit from the command.
+fn load_relay_run(args: RelayRunArgs, global_config: Option<&str>, foreground: bool) -> CliAction {
+    let explicit_path = args.config.as_deref().or(global_config);
+    let (file, cfg_path) = FileConfig::load(explicit_path);
+    let config_content = cfg_path
+        .as_ref()
+        .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+        .unwrap_or_default();
+    let config_path_str = cfg_path
+        .as_ref()
+        .and_then(|p| p.canonicalize().ok())
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+
+    let port = file
+        .port
+        .expect("port is required for relay mode in config");
+    let relay_domain = file
+        .relay
+        .domain
+        .expect("relay.domain is required for relay mode in config");
+
+    let tokens = file
+        .relay
+        .tokens
+        .into_iter()
+        .map(|e| (e.token, e.subdomains))
+        .collect();
+
+    let relay_config = RelayConfig {
+        port,
+        relay_domain,
+        auth_provider: file.relay.auth_provider,
+        auth_provider_secret: file.relay.auth_provider_secret,
+        tokens,
+        max_request_body_size: file.max_request_body_size,
+        max_response_body_size: file.max_response_body_size,
+    };
+
+    CliAction::RelayRun {
+        relay_config,
+        config_content,
+        config_path: config_path_str,
+        foreground,
     }
 }
 
@@ -1122,5 +1230,324 @@ mod tests {
         "#;
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.name.as_deref(), Some("email"));
+    }
+
+    // ── Relay config parsing ──────────────────────────────────────────
+
+    #[test]
+    fn file_config__relay_mode_detected() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+            domain = "tunnel.example.com"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.is_relay());
+    }
+
+    #[test]
+    fn file_config__gateway_mode_by_default() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+            port = 3000
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.is_relay());
+    }
+
+    #[test]
+    fn file_config__relay_domain_parsed() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+            domain = "tunnel.example.com"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.relay.domain.as_deref(), Some("tunnel.example.com"));
+    }
+
+    #[test]
+    fn file_config__relay_static_tokens() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+            domain = "tunnel.example.com"
+            [[relay.tokens]]
+            token = "tok_abc"
+            subdomains = ["myapp", "myapp-*"]
+            [[relay.tokens]]
+            token = "tok_xyz"
+            subdomains = ["other"]
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.relay.tokens.len(), 2);
+        assert_eq!(config.relay.tokens[0].token, "tok_abc");
+        assert_eq!(config.relay.tokens[0].subdomains, vec!["myapp", "myapp-*"]);
+        assert_eq!(config.relay.tokens[1].token, "tok_xyz");
+        assert_eq!(config.relay.tokens[1].subdomains, vec!["other"]);
+    }
+
+    #[test]
+    fn file_config__relay_auth_provider() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+            domain = "tunnel.example.com"
+            auth_provider = "https://auth.example.com"
+            auth_provider_secret = "secret123"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.relay.auth_provider.as_deref(),
+            Some("https://auth.example.com")
+        );
+        assert_eq!(
+            config.relay.auth_provider_secret.as_deref(),
+            Some("secret123")
+        );
+    }
+
+    #[test]
+    fn file_config__relay_defaults_empty() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.relay.domain.is_none());
+        assert!(config.relay.auth_provider.is_none());
+        assert!(config.relay.auth_provider_secret.is_none());
+        assert!(config.relay.tokens.is_empty());
+    }
+
+    #[test]
+    fn file_config__relay_body_size_limits() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            max_request_body_size = 1048576
+            max_response_body_size = 2097152
+            [relay]
+            domain = "tunnel.example.com"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.max_request_body_size, Some(1_048_576));
+        assert_eq!(config.max_response_body_size, Some(2_097_152));
+    }
+
+    // ── load_relay ────────────────────────────────────────────────────
+
+    #[test]
+    fn load_relay__builds_relay_config() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 9090
+            [relay]
+            domain = "tunnel.test"
+            [[relay.tokens]]
+            token = "tok_a"
+            subdomains = ["app1"]
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let runtime = RuntimeOptions {
+            drain_timeout: 30,
+            log_format: LogFormat::Json,
+            admin_bind: "127.0.0.1:9901".to_string(),
+        };
+        let mode = load_relay(file, runtime);
+        match mode {
+            Mode::Relay(cfg) => {
+                assert_eq!(cfg.port, 9090);
+                assert_eq!(cfg.relay_domain, "tunnel.test");
+                assert_eq!(cfg.tokens.len(), 1);
+                assert!(cfg.tokens.contains_key("tok_a"));
+                assert_eq!(cfg.tokens["tok_a"], vec!["app1"]);
+            }
+            Mode::Gateway(_) => panic!("expected Mode::Relay"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "port is required")]
+    fn load_relay__panics_without_port() {
+        let toml_str = r#"
+            mode = "relay"
+            [relay]
+            domain = "tunnel.test"
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let runtime = RuntimeOptions {
+            drain_timeout: 30,
+            log_format: LogFormat::Json,
+            admin_bind: "127.0.0.1:9901".to_string(),
+        };
+        load_relay(file, runtime);
+    }
+
+    #[test]
+    #[should_panic(expected = "relay.domain is required")]
+    fn load_relay__panics_without_domain() {
+        let toml_str = r#"
+            mode = "relay"
+            port = 8080
+            [relay]
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let runtime = RuntimeOptions {
+            drain_timeout: 30,
+            log_format: LogFormat::Json,
+            admin_bind: "127.0.0.1:9901".to_string(),
+        };
+        load_relay(file, runtime);
+    }
+
+    // ── load_relay_run ────────────────────────────────────────────────
+
+    #[test]
+    fn load_relay_run__foreground() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(
+            &cfg_path,
+            "port = 9090\n[relay]\ndomain = \"tunnel.test\"\n",
+        )
+        .unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        let action = load_relay_run(args, None, true);
+        match action {
+            CliAction::RelayRun {
+                relay_config,
+                foreground,
+                config_content,
+                ..
+            } => {
+                assert!(foreground);
+                assert_eq!(relay_config.port, 9090);
+                assert_eq!(relay_config.relay_domain, "tunnel.test");
+                assert!(!config_content.is_empty());
+            }
+            _ => panic!("expected CliAction::RelayRun"),
+        }
+    }
+
+    #[test]
+    fn load_relay_run__background() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(&cfg_path, "port = 8080\n[relay]\ndomain = \"tunnel.bg\"\n").unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        let action = load_relay_run(args, None, false);
+        match action {
+            CliAction::RelayRun {
+                relay_config,
+                foreground,
+                ..
+            } => {
+                assert!(!foreground);
+                assert_eq!(relay_config.port, 8080);
+                assert_eq!(relay_config.relay_domain, "tunnel.bg");
+            }
+            _ => panic!("expected CliAction::RelayRun"),
+        }
+    }
+
+    #[test]
+    fn load_relay_run__with_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+port = 8080
+[relay]
+domain = "tunnel.test"
+[[relay.tokens]]
+token = "tok_abc"
+subdomains = ["myapp"]
+"#,
+        )
+        .unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        let action = load_relay_run(args, None, true);
+        match action {
+            CliAction::RelayRun { relay_config, .. } => {
+                assert_eq!(relay_config.tokens.len(), 1);
+                assert!(relay_config.tokens.contains_key("tok_abc"));
+            }
+            _ => panic!("expected CliAction::RelayRun"),
+        }
+    }
+
+    #[test]
+    fn load_relay_run__with_auth_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+port = 8080
+[relay]
+domain = "tunnel.test"
+auth_provider = "https://auth.example.com"
+auth_provider_secret = "secret123"
+"#,
+        )
+        .unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        let action = load_relay_run(args, None, true);
+        match action {
+            CliAction::RelayRun { relay_config, .. } => {
+                assert_eq!(
+                    relay_config.auth_provider.as_deref(),
+                    Some("https://auth.example.com")
+                );
+                assert_eq!(
+                    relay_config.auth_provider_secret.as_deref(),
+                    Some("secret123")
+                );
+            }
+            _ => panic!("expected CliAction::RelayRun"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "port is required")]
+    fn load_relay_run__panics_without_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(&cfg_path, "[relay]\ndomain = \"tunnel.test\"\n").unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        load_relay_run(args, None, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "relay.domain is required")]
+    fn load_relay_run__panics_without_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(&cfg_path, "port = 8080\n[relay]\n").unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        load_relay_run(args, None, true);
     }
 }
