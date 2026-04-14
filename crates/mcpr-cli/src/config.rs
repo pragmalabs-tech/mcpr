@@ -22,9 +22,10 @@ pub enum CliAction {
     },
     /// Stop the running daemon via SIGTERM.
     Stop,
-    /// Stop + start the daemon, re-launching previously running proxies.
+    /// Stop + start the daemon, re-launching previously running proxies and relay.
     Restart {
         restart_proxies: Vec<String>,
+        restart_relay: bool,
     },
     /// Show daemon status (PID, port, uptime, proxy name).
     Status,
@@ -773,6 +774,7 @@ pub fn load() -> CliAction {
         },
         Some(Commands::Restart) => CliAction::Restart {
             restart_proxies: vec![],
+            restart_relay: false,
         },
         // No subcommand — default to starting the daemon.
         None => CliAction::Start { foreground: false },

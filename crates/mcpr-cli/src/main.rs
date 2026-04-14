@@ -173,6 +173,10 @@ fn main() {
                     .map(|(name, _)| name)
                     .collect();
 
+                // Check if relay was running.
+                let relay_was_running =
+                    matches!(relay_lock::check_lock(), relay_lock::LockStatus::Held(_));
+
                 // Stop all managed proxies.
                 let stopped = proxy_lock::stop_all_proxies();
                 if !stopped.is_empty() {
@@ -183,12 +187,20 @@ fn main() {
                     );
                 }
 
+                // Stop relay if running.
+                if relay_lock::stop_relay() {
+                    eprintln!("Stopped relay.");
+                }
+
                 // Pass the names to the child so it can re-launch after startup.
                 if let CliAction::Restart {
-                    restart_proxies, ..
+                    restart_proxies,
+                    restart_relay,
+                    ..
                 } = &mut action
                 {
                     *restart_proxies = running_names;
+                    *restart_relay = relay_was_running;
                 }
 
                 daemon::stop_daemon_if_running();
@@ -268,6 +280,12 @@ fn main() {
         } => {
             #[cfg(unix)]
             {
+                // Check that the daemon is running.
+                if !matches!(daemon::check_status(), daemon::DaemonStatus::Running(_)) {
+                    eprintln!("error: daemon not running — run `mcpr start` first");
+                    std::process::exit(1);
+                }
+
                 // Check for existing relay.
                 match relay_lock::check_lock() {
                     relay_lock::LockStatus::Free => {}
@@ -337,16 +355,25 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 std::process::exit(1);
             }
         }
-        CliAction::Restart { restart_proxies } => {
+        CliAction::Restart {
+            restart_proxies,
+            restart_relay,
+        } => {
             // Spawn a background task to re-launch previously running proxies
-            // after the supervisor has had time to start up.
-            if !restart_proxies.is_empty() {
+            // and relay after the supervisor has had time to start up.
+            if !restart_proxies.is_empty() || restart_relay {
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     for name in &restart_proxies {
                         match logic::proxy::start_proxy(name) {
                             Ok(_) => eprintln!("Restarted proxy \"{}\".", name),
                             Err(e) => eprintln!("Failed to restart proxy \"{}\": {}", name, e),
+                        }
+                    }
+                    if restart_relay {
+                        match logic::relay::start_relay_from_snapshot() {
+                            Ok(_) => eprintln!("Restarted relay."),
+                            Err(e) => eprintln!("Failed to restart relay: {}", e),
                         }
                     }
                 });
@@ -778,6 +805,10 @@ async fn run_relay_inner(
         });
     let actual_port = listener.local_addr().unwrap().port();
 
+    // Read daemon PID for watchdog.
+    #[cfg(unix)]
+    let daemon_pid = daemon::read_pid_file().map(|i| i.pid);
+
     // Write lockfile.
     #[cfg(unix)]
     if let Err(e) = relay_lock::write_lock(actual_port, &config_path) {
@@ -835,6 +866,22 @@ async fn run_relay_inner(
             .await
             .expect("Relay server failed");
     });
+
+    // Daemon watchdog: if the daemon dies, shut down this relay.
+    #[cfg(unix)]
+    if let Some(dpid) = daemon_pid {
+        let watchdog_shutdown = shutdown_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                if !daemon::is_process_alive(dpid) {
+                    eprintln!("[mcpr] daemon died, shutting down relay...");
+                    let _ = watchdog_shutdown.send(true);
+                    break;
+                }
+            }
+        });
+    }
 
     // Wait for shutdown signal.
     let _ = shutdown_rx.changed().await;
