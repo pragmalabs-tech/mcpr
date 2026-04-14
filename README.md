@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/cptrodgers/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/cptrodgers/mcpr)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**A reverse proxy for MCP servers.** Works like nginx or Kong, but at the MCP protocol level — it parses JSON-RPC messages to route, observe, authenticate, and secure MCP traffic.
+**A reverse proxy for MCP servers.** Works like nginx or Kong, but at the MCP protocol level — it parses JSON-RPC messages to route, observe, authenticate, and secure MCP traffic. Written in Rust, with under 0.3ms overhead.
 
 ```
 AI Client (ChatGPT, Claude, Cursor)
@@ -239,26 +239,36 @@ request_timeout = 30                    # seconds (default)
 
 ## CLI
 
-The CLI manages the daemon and queries the local SQLite store. See [docs/CLI.md](docs/CLI.md) for the full reference.
+The CLI manages the daemon, proxies, and relay, and queries the local SQLite store. See [docs/CLI.md](docs/CLI.md) for the full reference.
 
 ### Daemon
 
 ```
-mcpr start                     Start proxy daemon (background)
+mcpr start                     Start daemon (background)
 mcpr start --foreground        Start in foreground (Docker/systemd)
-mcpr stop                      Stop daemon (graceful SIGTERM)
-mcpr restart                   Stop + start
-mcpr status                    PID, port, uptime, proxy name
+mcpr stop                      Stop proxies + relay + daemon
+mcpr restart                   Stop + start, re-launch proxies and relay
+mcpr status                    PID, port, uptime, proxy list
 ```
 
-### Proxy Management
+### Proxy
 
 ```
-mcpr proxy list                List all proxies and their status (--json)
-mcpr proxy start <name>        Start a stopped proxy from saved config
 mcpr proxy run [config]        Run a proxy from a config file (--replace)
+mcpr proxy start <name>        Start a stopped proxy from saved config
 mcpr proxy stop [name]         Stop a proxy (--all)
 mcpr proxy restart [name]      Restart a proxy from saved config (--all)
+mcpr proxy list                List all proxies and their status (--json)
+```
+
+### Relay
+
+```
+mcpr relay run [config]        Run relay in foreground (no daemon required)
+mcpr relay start [config]      Start relay in background (requires daemon)
+mcpr relay stop                Stop the relay
+mcpr relay restart [config]    Restart relay (uses saved config if omitted)
+mcpr relay status              Show relay PID, port, uptime
 ```
 
 ### Observe
@@ -297,20 +307,30 @@ All query commands support `--json` for piping into `jq` or scripts.
 
 ## Roadmap
 
-- [x] MCP reverse proxy with JSON-RPC routing
-- [x] Per-tool metrics (calls, error%, p50, p95, max, bytes)
-- [x] Schema capture with change tracking
-- [x] Request logs, session tracking, client tracking
-- [x] Widget CSP rewriting (auto-detection, per-platform adaptation)
-- [x] Built-in tunnel (public HTTPS for dev)
-- [x] Cloud dashboard sync ([mcpr.app](https://cloud.mcpr.app))
-- [x] Daemon mode, graceful shutdown
+**Routing**
+- [x] JSON-RPC routing
 - [ ] Multi-server routing (one mcpr URL, many MCP backends)
-- [ ] OAuth 2.1 at the proxy (legacy auth, oauth providers or inhouse)
-- [ ] Token API Auth at the proxy
+
+**Observability**
+- [x] MCP request logs, session tracking, AI client tracking
+- [x] MCP schema capture with change tracking
+- [x] Per-tool metrics (calls, error%, p50, p95, max, bytes)
+- [x] Widget CSP rewriting (auto-detection, per-platform adaptation)
+- [x] Cloud dashboard sync ([mcpr.app](https://cloud.mcpr.app))
+
+**Auth**
+- [ ] Token API auth at the proxy
+- [ ] OAuth 2.1 at the proxy (legacy auth, OAuth providers, or in-house)
+
+**Security**
 - [ ] Per-tool access control
 - [ ] Rate limiting and circuit breaker
 - [ ] IP whitelist
+
+**Tunnel/Relay**
+- [x] Built-in tunnel client and self-hosted relay server
+- [x] Standalone `mcpr relay` CLI with daemon lifecycle
+- [x] Daemon mode, graceful shutdown
 
 ## License
 
