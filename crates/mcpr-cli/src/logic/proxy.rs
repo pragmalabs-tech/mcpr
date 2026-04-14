@@ -24,7 +24,7 @@ pub fn start_proxy(name: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find mcpr binary: {e}"))?;
 
     let status = std::process::Command::new(exe)
-        .args(["proxy", "run", &config_path, "--replace"])
+        .args(["proxy", "run", "--config", &config_path, "--replace"])
         .status()
         .map_err(|e| format!("failed to spawn proxy \"{name}\": {e}"))?;
 
