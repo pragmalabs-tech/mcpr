@@ -5,6 +5,7 @@
 use crate::relay_lock;
 
 /// Result of stopping the relay.
+#[derive(Debug)]
 pub enum StopResult {
     /// Relay was running and has been stopped.
     Stopped { pid: u32 },
@@ -13,6 +14,7 @@ pub enum StopResult {
 }
 
 /// Relay status information.
+#[derive(Debug)]
 pub struct RelayStatusInfo {
     pub pid: u32,
     pub port: u16,
@@ -82,56 +84,67 @@ pub fn restart_relay() -> Result<(), String> {
 mod tests {
     use super::*;
 
-    // ── stop_relay ────────────────────────────────────────────────────
+    // Tests that touch the real ~/.mcpr/relay/ lockfile must run
+    // sequentially to avoid parallel conflicts. Combined into one test.
 
+    #[cfg(unix)]
     #[test]
-    fn stop_relay__returns_error_when_not_running() {
-        // With no lockfile, stop should return an error.
-        // This may succeed or fail depending on whether a relay is actually
-        // running on this machine. We test the "not running" path by checking
-        // the error message pattern.
+    fn lifecycle__all_paths() {
+        // 1. Free → stop returns error.
+        relay_lock::remove_lock();
         let result = stop_relay();
-        // If it errors (expected), verify the message.
-        if let Err(e) = result {
-            assert!(e.contains("not running"), "unexpected error: {e}");
-        }
-        // If it succeeds (relay was actually running), that's also valid.
-    }
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not running"));
 
-    // ── relay_status ──────────────────────────────────────────────────
-
-    #[test]
-    fn relay_status__returns_error_when_not_running() {
+        // 2. Free → status returns error.
         let result = relay_status();
-        if let Err(e) = result {
-            assert!(e.contains("not running"), "unexpected error: {e}");
-        }
-    }
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not running"));
 
-    #[test]
-    fn relay_status__returns_info_fields() {
-        // If relay happens to be running, verify the struct is populated.
-        if let Ok(info) = relay_status() {
-            assert!(info.pid > 0);
-            assert!(info.port > 0);
-            assert!(info.started_at > 0);
-        }
-    }
+        // 3. Held (own PID) → status returns info.
+        relay_lock::write_lock(7777, "/tmp/test-relay.toml").unwrap();
+        let result = relay_status();
+        assert!(result.is_ok());
+        let info = result.unwrap();
+        assert_eq!(info.pid, std::process::id());
+        assert_eq!(info.port, 7777);
+        assert!(info.started_at > 0);
+        relay_lock::remove_lock();
 
-    // ── start_relay_from_snapshot ─────────────────────────────────────
+        // 4. Stale (dead PID) → status cleans up and returns error.
+        let dir = relay_lock::config_snapshot_path()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let ts = chrono::Utc::now().timestamp();
+        std::fs::write(
+            dir.join("lock"),
+            format!("99999999\n8080\n{ts}\n/tmp/relay.toml\n"),
+        )
+        .unwrap();
+        let result = relay_status();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("stale"));
+        assert!(relay_lock::read_lock_info().is_none());
+
+        // 5. Stale → stop returns StaleCleaned.
+        std::fs::write(
+            dir.join("lock"),
+            format!("99999999\n8080\n{ts}\n/tmp/relay.toml\n"),
+        )
+        .unwrap();
+        let result = stop_relay();
+        assert!(result.is_ok());
+        assert!(matches!(result.unwrap(), StopResult::StaleCleaned));
+        assert!(relay_lock::read_lock_info().is_none());
+    }
 
     #[test]
     fn start_relay_from_snapshot__fails_without_snapshot() {
-        // Without a config snapshot at ~/.mcpr/relay/config.toml, this
-        // should fail with a clear error message.
+        let _ = std::fs::remove_file(relay_lock::config_snapshot_path());
         let result = start_relay_from_snapshot();
-        // This may succeed if a snapshot exists from a prior run, so only
-        // assert on error.
-        if let Err(e) = result {
-            assert!(
-                e.contains("no config snapshot") || e.contains("failed to spawn"),
-                "unexpected error: {e}"
-            );
-        }
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no config snapshot"));
     }
 }

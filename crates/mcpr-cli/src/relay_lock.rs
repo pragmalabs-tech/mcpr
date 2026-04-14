@@ -228,6 +228,18 @@ mod tests {
     // ── path helpers ──────────────────────────────────────────────────
 
     #[test]
+    fn relay_dir__under_mcpr() {
+        let d = relay_dir();
+        assert!(d.ends_with(".mcpr/relay"));
+    }
+
+    #[test]
+    fn lock_path__under_relay_dir() {
+        let p = lock_path();
+        assert!(p.ends_with("relay/lock"));
+    }
+
+    #[test]
     fn config_snapshot_path__ends_with_config_toml() {
         let p = config_snapshot_path();
         assert!(p.ends_with("relay/config.toml"));
@@ -239,16 +251,72 @@ mod tests {
         assert!(p.ends_with("relay/relay.log"));
     }
 
-    // ── check_lock (against temp lockfiles) ───────────────────────────
-
-    // Note: check_lock() reads from the real ~/.mcpr/relay/lock path,
-    // so we test the underlying read_lock_file + is_process_alive logic
-    // rather than calling check_lock() directly (which would need real
-    // filesystem state). The proxy_lock tests follow the same pattern.
+    // ── Integration tests using real ~/.mcpr/relay/ paths ──────────────
+    //
+    // These tests MUST run sequentially since they share the same lockfile.
+    // We combine them into one test to avoid parallel conflicts.
 
     #[cfg(unix)]
     #[test]
-    fn lock_file__stale_when_pid_dead() {
+    fn real_path__lifecycle_roundtrip() {
+        // 1. Start clean.
+        remove_lock();
+        let _ = fs::remove_file(config_snapshot_path());
+
+        // 2. check_lock returns Free when no lockfile.
+        assert!(matches!(check_lock(), LockStatus::Free));
+
+        // 3. stop_relay returns false when free.
+        assert!(!stop_relay());
+
+        // 4. read_snapshot fails when no snapshot.
+        assert!(read_snapshot().is_err());
+
+        // 5. Write a lockfile with our PID → Held.
+        write_lock(9998, "/tmp/test-relay.toml").unwrap();
+        let info = read_lock_info().unwrap();
+        assert_eq!(info.pid, std::process::id());
+        assert_eq!(info.port, 9998);
+        assert_eq!(info.config_path, "/tmp/test-relay.toml");
+        assert!(info.started_at > 0);
+        assert!(matches!(check_lock(), LockStatus::Held(_)));
+
+        // 6. Remove → Free again.
+        remove_lock();
+        assert!(read_lock_info().is_none());
+        assert!(matches!(check_lock(), LockStatus::Free));
+
+        // 7. Write a stale lockfile (dead PID) → Stale.
+        let dir = relay_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let ts = chrono::Utc::now().timestamp();
+        fs::write(
+            lock_path(),
+            format!("99999999\n8080\n{ts}\n/tmp/relay.toml\n"),
+        )
+        .unwrap();
+        assert!(matches!(check_lock(), LockStatus::Stale(_)));
+
+        // 8. stop_relay cleans stale lock.
+        let result = stop_relay();
+        assert!(!result); // returns false for stale
+        assert!(read_lock_info().is_none());
+
+        // 9. snapshot_config + read_snapshot roundtrip.
+        let content = "port = 7777\n[relay]\ndomain = \"test.relay\"\n";
+        snapshot_config(content).unwrap();
+        let read_back = read_snapshot().unwrap();
+        assert_eq!(read_back, content);
+
+        // Clean up.
+        let _ = fs::remove_file(config_snapshot_path());
+    }
+
+    // ── read_lock_file edge cases (temp dir) ─────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn read_lock_file__stale_when_pid_dead() {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("lock");
 
@@ -263,7 +331,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn lock_file__held_when_pid_alive() {
+    fn read_lock_file__held_when_pid_alive() {
         let dir = tempfile::tempdir().unwrap();
         let lock = dir.path().join("lock");
 
@@ -276,15 +344,11 @@ mod tests {
         assert!(crate::proxy_lock::is_process_alive(info.pid));
     }
 
-    // ── stop_relay (free state) ───────────────────────────────────────
-
     #[test]
-    fn stop_relay__returns_false_when_free() {
-        // When there's no lockfile at all, stop_relay returns false.
-        // This test relies on the lockfile not existing, which is the
-        // default state on a clean system. If a relay IS running during
-        // test, this would be flaky — but that's extremely unlikely in CI.
-        // We can't easily override the path, so this tests the common case.
-        // The read_lock_file unit tests above cover the actual parsing.
+    fn read_lock_file__overflow_port_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join("lock");
+        fs::write(&lock, "1234\n99999\n12345\n/tmp/relay.toml\n").unwrap();
+        assert!(read_lock_file(&lock).is_none()); // 99999 > u16::MAX
     }
 }

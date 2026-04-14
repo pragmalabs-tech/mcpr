@@ -1102,4 +1102,43 @@ mod tests {
         let result = format_ts(0);
         assert_ne!(result, "?"); // epoch is valid
     }
+
+    // ── Relay render functions ────────────────────────────────────────
+
+    #[test]
+    fn relay_stopping__does_not_panic() {
+        relay_stopping(12345);
+    }
+
+    #[test]
+    fn relay_stopped_done__does_not_panic() {
+        relay_stopped_done();
+    }
+
+    #[test]
+    fn relay_stale_cleaned__does_not_panic() {
+        relay_stale_cleaned();
+    }
+
+    #[test]
+    fn relay_restarted__does_not_panic() {
+        relay_restarted();
+    }
+
+    #[test]
+    fn relay_not_running__does_not_panic() {
+        relay_not_running();
+    }
+
+    #[test]
+    fn relay_status__formats_output() {
+        use crate::logic::relay::RelayStatusInfo;
+        let info = RelayStatusInfo {
+            pid: 12345,
+            port: 8080,
+            started_at: chrono::Utc::now().timestamp() - 3600,
+        };
+        // Should not panic and should produce output.
+        relay_status(&info);
+    }
 }

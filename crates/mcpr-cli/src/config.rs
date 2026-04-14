@@ -1403,4 +1403,151 @@ mod tests {
         };
         load_relay(file, runtime);
     }
+
+    // ── load_relay_run ────────────────────────────────────────────────
+
+    #[test]
+    fn load_relay_run__foreground() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(
+            &cfg_path,
+            "port = 9090\n[relay]\ndomain = \"tunnel.test\"\n",
+        )
+        .unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        let action = load_relay_run(args, None, true);
+        match action {
+            CliAction::RelayRun {
+                relay_config,
+                foreground,
+                config_content,
+                ..
+            } => {
+                assert!(foreground);
+                assert_eq!(relay_config.port, 9090);
+                assert_eq!(relay_config.relay_domain, "tunnel.test");
+                assert!(!config_content.is_empty());
+            }
+            _ => panic!("expected CliAction::RelayRun"),
+        }
+    }
+
+    #[test]
+    fn load_relay_run__background() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(&cfg_path, "port = 8080\n[relay]\ndomain = \"tunnel.bg\"\n").unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        let action = load_relay_run(args, None, false);
+        match action {
+            CliAction::RelayRun {
+                relay_config,
+                foreground,
+                ..
+            } => {
+                assert!(!foreground);
+                assert_eq!(relay_config.port, 8080);
+                assert_eq!(relay_config.relay_domain, "tunnel.bg");
+            }
+            _ => panic!("expected CliAction::RelayRun"),
+        }
+    }
+
+    #[test]
+    fn load_relay_run__with_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+port = 8080
+[relay]
+domain = "tunnel.test"
+[[relay.tokens]]
+token = "tok_abc"
+subdomains = ["myapp"]
+"#,
+        )
+        .unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        let action = load_relay_run(args, None, true);
+        match action {
+            CliAction::RelayRun { relay_config, .. } => {
+                assert_eq!(relay_config.tokens.len(), 1);
+                assert!(relay_config.tokens.contains_key("tok_abc"));
+            }
+            _ => panic!("expected CliAction::RelayRun"),
+        }
+    }
+
+    #[test]
+    fn load_relay_run__with_auth_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+port = 8080
+[relay]
+domain = "tunnel.test"
+auth_provider = "https://auth.example.com"
+auth_provider_secret = "secret123"
+"#,
+        )
+        .unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        let action = load_relay_run(args, None, true);
+        match action {
+            CliAction::RelayRun { relay_config, .. } => {
+                assert_eq!(
+                    relay_config.auth_provider.as_deref(),
+                    Some("https://auth.example.com")
+                );
+                assert_eq!(
+                    relay_config.auth_provider_secret.as_deref(),
+                    Some("secret123")
+                );
+            }
+            _ => panic!("expected CliAction::RelayRun"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "port is required")]
+    fn load_relay_run__panics_without_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(&cfg_path, "[relay]\ndomain = \"tunnel.test\"\n").unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        load_relay_run(args, None, true);
+    }
+
+    #[test]
+    #[should_panic(expected = "relay.domain is required")]
+    fn load_relay_run__panics_without_domain() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("relay.toml");
+        std::fs::write(&cfg_path, "port = 8080\n[relay]\n").unwrap();
+
+        let args = RelayRunArgs {
+            config: Some(cfg_path.display().to_string()),
+        };
+        load_relay_run(args, None, true);
+    }
 }
