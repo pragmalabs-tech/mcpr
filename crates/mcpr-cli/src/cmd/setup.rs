@@ -11,6 +11,23 @@ use mcpr_integrations::cloud_client::{CloudClient, DEFAULT_CLOUD_URL, Endpoint, 
 
 const CREATE_NEW: &str = "+ Create new";
 
+/// Defaults extracted from an existing mcpr.toml.
+#[derive(Default)]
+struct ExistingConfig {
+    mcp: Option<String>,
+    name: Option<String>,
+}
+
+/// Try to load defaults from an existing config file.
+fn load_existing_config(path: &str) -> Option<ExistingConfig> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let table: toml::Table = content.parse().ok()?;
+    Some(ExistingConfig {
+        mcp: table.get("mcp").and_then(|v| v.as_str()).map(String::from),
+        name: table.get("name").and_then(|v| v.as_str()).map(String::from),
+    })
+}
+
 /// Run the full setup wizard. Returns an error message on failure.
 pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), String> {
     println!(
@@ -18,13 +35,32 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         "Welcome to MCPR!".bold()
     );
 
+    // ── Check for existing config ──────────────────────────────────────
+    let defaults = if output.is_none() && std::path::Path::new("mcpr.toml").exists() {
+        let reuse = Confirm::new("Found existing mcpr.toml. Use its settings as defaults?")
+            .with_default(true)
+            .prompt()
+            .map_err(|e| format!("prompt error: {e}"))?;
+        if reuse {
+            load_existing_config("mcpr.toml").unwrap_or_default()
+        } else {
+            ExistingConfig::default()
+        }
+    } else {
+        ExistingConfig::default()
+    };
+
     let mut client = CloudClient::new(cloud_url);
 
     // ── 1. Authenticate ────────────────────────────────────────────────
     authenticate(&mut client).await?;
 
     // ── 2. MCP server URL ──────────────────────────────────────────────
-    let mcp_url = Text::new("MCP server URL (e.g. http://localhost:8080):")
+    let mut prompt = Text::new("MCP server URL (e.g. http://localhost:8080):");
+    if let Some(ref mcp) = defaults.mcp {
+        prompt = prompt.with_default(mcp);
+    }
+    let mcp_url = prompt
         .prompt()
         .map_err(|e| format!("prompt error: {e}"))?;
 
@@ -36,7 +72,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
     let project = select_or_create_project(&client).await?;
 
     // ── 4. Server selection ────────────────────────────────────────────
-    let server = select_or_create_server(&client, &project.id).await?;
+    let server = select_or_create_server(&client, &project.id, &defaults).await?;
 
     // ── 5. Tunnel ──────────────────────────────────────────────────────
     let enable_tunnel = Confirm::new("Enable tunnel?")
@@ -60,7 +96,10 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
     println!("    {} Created project token", "✓".green());
 
     // ── 7. Write config ────────────────────────────────────────────────
-    let config_path = output.unwrap_or("mcpr.toml");
+    let config_path = match output {
+        Some(explicit) => explicit.to_string(),
+        None => next_available_config_path(),
+    };
     let config = build_config(
         &mcp_url,
         &server,
@@ -68,7 +107,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         &token.token,
         cloud_url,
     );
-    std::fs::write(config_path, &config)
+    std::fs::write(&config_path, &config)
         .map_err(|e| format!("failed to write {config_path}: {e}"))?;
     println!("    {} Saved {}", "✓".green(), config_path);
 
@@ -182,11 +221,28 @@ async fn create_project(client: &CloudClient) -> Result<Project, String> {
 
 // ── Server ─────────────────────────────────────────────────────────────
 
-async fn select_or_create_server(client: &CloudClient, project_id: &str) -> Result<Server, String> {
+async fn select_or_create_server(
+    client: &CloudClient,
+    project_id: &str,
+    defaults: &ExistingConfig,
+) -> Result<Server, String> {
     let servers = client
         .list_servers(project_id)
         .await
         .map_err(|e| format!("failed to list servers: {e}"))?;
+
+    // If existing config has a name that matches a server, pre-select it
+    if let Some(ref default_name) = defaults.name {
+        if let Some(matching) = servers.iter().find(|s| s.slug == *default_name) {
+            let reuse = Confirm::new(&format!("Use existing server \"{}\"?", matching.name))
+                .with_default(true)
+                .prompt()
+                .map_err(|e| format!("prompt error: {e}"))?;
+            if reuse {
+                return Ok(matching.clone());
+            }
+        }
+    }
 
     if servers.is_empty() {
         println!("  No servers found. Let's create one.");
@@ -316,6 +372,21 @@ fn build_config(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/// Find the next available config filename: mcpr.toml, mcpr_2.toml, mcpr_3.toml, ...
+fn next_available_config_path() -> String {
+    let base = "mcpr.toml";
+    if !std::path::Path::new(base).exists() {
+        return base.to_string();
+    }
+    for i in 2.. {
+        let path = format!("mcpr_{i}.toml");
+        if !std::path::Path::new(&path).exists() {
+            return path;
+        }
+    }
+    unreachable!()
+}
 
 /// Convert a name to a URL-safe slug.
 fn slugify(name: &str) -> String {
