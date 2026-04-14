@@ -701,6 +701,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         &public_url,
         &mcp,
         cfg.widgets.as_deref(),
+        cfg.cloud_server.as_deref(),
     );
 
     // Persist the public URL so `mcpr proxy status` can display it.

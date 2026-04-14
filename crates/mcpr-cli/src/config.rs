@@ -196,6 +196,7 @@ pub enum ProxyCommand {
 #[derive(Parser, Clone)]
 pub struct ProxyRunArgs {
     /// Config file path (default: mcpr.toml)
+    #[arg(long, short)]
     pub config: Option<String>,
 
     /// Replace existing proxy with the same name

@@ -20,6 +20,11 @@ use mcpr_integrations::store::query::{
 
 use crate::proxy_lock::{LockInfo, LockStatus};
 
+/// Percent-encode a URL for use as a query parameter value.
+fn encode_uri_component(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
 // ── Output mode ───────────────────────────────────────────────────────
 
 /// Whether to render human-readable tables or machine-readable JSON.
@@ -100,6 +105,7 @@ pub fn log_startup(
     public_url: &str,
     mcp_upstream: &str,
     widgets: Option<&str>,
+    cloud_server: Option<&str>,
 ) {
     let mut s = mcpr_core::proxy::lock_state(state);
     s.proxy_url = format!("http://localhost:{port}");
@@ -108,16 +114,30 @@ pub fn log_startup(
     s.widgets = widgets.unwrap_or("(none)").to_string();
     drop(s);
 
+    let localhost = format!("http://localhost:{port}");
+    let has_tunnel = public_url != localhost;
+
     eprintln!();
     eprintln!("  {} mcpr proxy running", colored::Colorize::green("ready"),);
-    eprintln!("  proxy:    http://localhost:{port}");
-    if public_url != format!("http://localhost:{port}") {
+    eprintln!("  proxy:    {localhost}");
+    if has_tunnel {
         eprintln!("  tunnel:   {public_url}");
     }
     eprintln!("  upstream: {mcp_upstream}");
     if let Some(w) = widgets {
         eprintln!("  widgets:  {w}");
     }
+
+    // Studio link — prefer tunnel URL if available.
+    let studio_target = if has_tunnel { public_url } else { &localhost };
+    let encoded = encode_uri_component(studio_target);
+    eprintln!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded}");
+
+    // Dashboard link — requires cloud server slug.
+    if let Some(server) = cloud_server {
+        eprintln!("  dashboard: https://mcpr.app/servers/{server}");
+    }
+
     eprintln!();
 }
 
@@ -629,8 +649,11 @@ pub fn status_running_proxies(running: &[&(String, LockStatus)]) {
         "  {:<16} {:>8} {:>8} {:>10}",
         "PROXY", "PORT", "PID", "UPTIME"
     );
-    for (name, status) in running {
+    for (i, (name, status)) in running.iter().enumerate() {
         if let LockStatus::Held(info) = status {
+            if i > 0 {
+                println!("  ──────────────────────────────────────────");
+            }
             let uptime_secs = chrono::Utc::now().timestamp() - info.started_at;
             let uptime = if uptime_secs >= 3600 {
                 format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
@@ -649,17 +672,19 @@ pub fn status_running_proxies(running: &[&(String, LockStatus)]) {
 
             // Show URLs with studio quick-test links.
             let localhost_url = format!("http://localhost:{}", info.port);
+            let encoded_localhost = encode_uri_component(&localhost_url);
             let tunnel_url = crate::proxy_lock::read_tunnel_url(name);
 
             println!();
             println!("  localhost: {localhost_url}");
-            println!("  studio:   https://cloud.mcpr.app/studio?url={localhost_url}");
+            println!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded_localhost}");
             if let Some(ref turl) = tunnel_url
                 && *turl != localhost_url
             {
+                let encoded_tunnel = encode_uri_component(turl);
                 println!();
                 println!("  tunnel:   {turl}");
-                println!("  studio:   https://cloud.mcpr.app/studio?url={turl}");
+                println!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded_tunnel}");
             }
         }
     }
@@ -687,13 +712,13 @@ pub fn status_overview(
                         crate::proxy_lock::read_tunnel_url(name).filter(|t| *t != localhost);
                     let tunnel_studio = tunnel
                         .as_ref()
-                        .map(|t| format!("https://cloud.mcpr.app/studio?url={t}"));
+                        .map(|t| format!("https://cloud.mcpr.app/studio?proxy={}", encode_uri_component(t)));
                     Some(serde_json::json!({
                         "name": name,
                         "port": info.port,
                         "pid": info.pid,
                         "localhost_url": localhost,
-                        "studio_url": format!("https://cloud.mcpr.app/studio?url={localhost}"),
+                        "studio_url": format!("https://cloud.mcpr.app/studio?proxy={}", encode_uri_component(&localhost)),
                         "tunnel_url": tunnel,
                         "tunnel_studio_url": tunnel_studio,
                     }))
@@ -1216,6 +1241,19 @@ mod tests {
         let a = held_proxy("alpha", 3000);
         let b = held_proxy("beta", 3001);
         status_running_proxies(&[&a, &b]);
+    }
+
+    // ── encode_uri_component ───────────────────────────────────────
+
+    #[test]
+    fn encode_uri_component__encodes_colons_and_slashes() {
+        let encoded = encode_uri_component("http://localhost:3000");
+        assert_eq!(encoded, "http%3A%2F%2Flocalhost%3A3000");
+    }
+
+    #[test]
+    fn encode_uri_component__plain_string_unchanged() {
+        assert_eq!(encode_uri_component("hello"), "hello");
     }
 
     // ── status_overview ──────────────────────────────────────────────

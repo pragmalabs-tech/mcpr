@@ -151,6 +151,28 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         return Err("MCP server URL is required".into());
     }
 
+    // ── 2b. Listen port ────────────────────────────────────────────────
+    let port: Option<u16> = loop {
+        let port_str = Text::new("Listen port (leave empty for auto):")
+            .with_default("")
+            .prompt()
+            .map_err(|e| format!("prompt error: {e}"))?;
+        if port_str.is_empty() {
+            break None;
+        }
+        let p: u16 = match port_str.parse() {
+            Ok(v) => v,
+            Err(_) => {
+                println!("  {} invalid port number: {port_str}", "✗".red());
+                continue;
+            }
+        };
+        if is_port_available(p) {
+            break Some(p);
+        }
+        println!("  {} port {p} is already in use", "✗".red());
+    };
+
     // ── 3. Project selection ───────────────────────────────────────────
     let project = select_or_create_project(&client).await?;
 
@@ -189,6 +211,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         endpoint.as_ref(),
         &token.token,
         cloud_url,
+        port,
     );
     std::fs::write(&config_path, &config)
         .map_err(|e| format!("failed to write {config_path}: {e}"))?;
@@ -431,10 +454,14 @@ fn build_config(
     endpoint: Option<&Endpoint>,
     token: &str,
     cloud_url: &str,
+    port: Option<u16>,
 ) -> String {
     let mut cfg = String::new();
     writeln!(cfg, "name = \"{}\"", server.slug).unwrap();
     writeln!(cfg, "mcp = \"{}\"", mcp_url).unwrap();
+    if let Some(p) = port {
+        writeln!(cfg, "port = {}", p).unwrap();
+    }
 
     if let Some(ep) = endpoint {
         writeln!(cfg).unwrap();
@@ -456,6 +483,11 @@ fn build_config(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/// Check whether a TCP port is available for binding.
+fn is_port_available(port: u16) -> bool {
+    std::net::TcpListener::bind(("0.0.0.0", port)).is_ok()
+}
 
 /// Find the next available config filename: mcpr.toml, mcpr_2.toml, mcpr_3.toml, ...
 fn next_available_config_path() -> String {
@@ -600,6 +632,7 @@ mod tests {
             Some(&endpoint),
             "mcpr_token123",
             DEFAULT_CLOUD_URL,
+            None,
         );
         assert!(config.contains("name = \"prod\""));
         assert!(config.contains("mcp = \"http://localhost:8080\""));
@@ -627,6 +660,7 @@ mod tests {
             None,
             "mcpr_abc",
             DEFAULT_CLOUD_URL,
+            None,
         );
         assert!(config.contains("name = \"dev\""));
         assert!(config.contains("mcp = \"http://localhost:3000\""));
@@ -649,8 +683,63 @@ mod tests {
             None,
             "mcpr_abc",
             "http://localhost:8000",
+            Some(8080),
         );
         assert!(config.contains("endpoint = \"http://localhost:8000\""));
+        assert!(config.contains("port = 8080"));
+    }
+
+    #[test]
+    fn build_config__with_explicit_port() {
+        let server = Server {
+            id: "s1".into(),
+            name: "dev".into(),
+            slug: "dev".into(),
+            project_id: "p1".into(),
+        };
+        let config = build_config(
+            "http://localhost:3000",
+            &server,
+            None,
+            "mcpr_abc",
+            DEFAULT_CLOUD_URL,
+            Some(4000),
+        );
+        assert!(config.contains("port = 4000"));
+    }
+
+    #[test]
+    fn build_config__no_port_omits_line() {
+        let server = Server {
+            id: "s1".into(),
+            name: "dev".into(),
+            slug: "dev".into(),
+            project_id: "p1".into(),
+        };
+        let config = build_config(
+            "http://localhost:3000",
+            &server,
+            None,
+            "mcpr_abc",
+            DEFAULT_CLOUD_URL,
+            None,
+        );
+        assert!(!config.contains("port ="));
+    }
+
+    // ── is_port_available ──────────────────────────────────────────
+
+    #[test]
+    fn is_port_available__free_port() {
+        // Port 0 always succeeds (OS picks an available port).
+        assert!(is_port_available(0));
+    }
+
+    #[test]
+    fn is_port_available__bound_port_is_unavailable() {
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(!is_port_available(port));
     }
 
     // ── load_existing_config ────────────────────────────────────────
