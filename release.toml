@@ -1,0 +1,10 @@
+shared-version = true
+tag-name = "v{{version}}"
+
+# Commit message when bumping versions
+pre-release-commit-message = "release: v{{version}}"
+
+# Push tag and commits to remote
+push = true
+tag = true
+publish = false  # CI handles crates.io publish after building artifacts

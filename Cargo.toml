@@ -32,7 +32,3 @@ tokio-tungstenite = { version = "0.26", features = ["connect", "rustls-tls-webpk
 mcpr-core = { path = "crates/mcpr-core", version = "0.4.12" }
 mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.12" }
 mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.12" }
-
-[workspace.metadata.release]
-shared-version = true
-tag-name = "v{{version}}"
