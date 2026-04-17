@@ -11,7 +11,7 @@ use axum::{
 
 use crate::AppState;
 use crate::mcp_handler::{handle_mcp_post, handle_mcp_sse};
-use crate::passthrough::{forward_and_passthrough, serve_oauth_callback_relay};
+use crate::passthrough::forward_and_passthrough;
 use crate::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
 use mcpr_core::event::{ProxyEvent, SessionEndEvent};
 use mcpr_core::protocol::session::SessionStore;
@@ -56,8 +56,6 @@ async fn handle_request(
     let has_widgets = state.widget_source.is_some();
 
     match classify(&method, path, &headers, &body, has_widgets) {
-        ClassifiedRequest::OAuthCallback => serve_oauth_callback_relay().await,
-
         ClassifiedRequest::WidgetHtml { name } => serve_widget_html(&state, &name).await,
 
         ClassifiedRequest::WidgetList => list_widgets(&state).await,

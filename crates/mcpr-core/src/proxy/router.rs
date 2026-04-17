@@ -6,8 +6,6 @@ use axum::{
 
 /// Classified request type for type-separate dispatch.
 pub enum ClassifiedRequest {
-    /// OAuth callback relay page
-    OAuthCallback,
     /// Widget HTML page: /widgets/{name}.html
     WidgetHtml { name: String },
     /// Widget list: /widgets or /widgets/
@@ -30,10 +28,6 @@ pub fn classify(
     body: &Bytes,
     has_widgets: bool,
 ) -> ClassifiedRequest {
-    if *method == Method::GET && path == "/oauth/callback" {
-        return ClassifiedRequest::OAuthCallback;
-    }
-
     if *method == Method::GET {
         if let Some(name) = path
             .strip_prefix("/widgets/")

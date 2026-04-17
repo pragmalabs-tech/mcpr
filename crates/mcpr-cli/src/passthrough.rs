@@ -12,41 +12,6 @@ use mcpr_core::event::{ProxyEvent, RequestEvent};
 use mcpr_core::proxy::forwarding::{build_response, read_body_capped};
 use mcpr_core::proxy::sse::split_upstream;
 
-/// Serve the OAuth callback relay page.
-pub async fn serve_oauth_callback_relay() -> Response {
-    let html = r#"<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Authorization</title></head>
-<body>
-<div id="msg" style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:system-ui;color:#888">
-<p>Completing authorization…</p>
-</div>
-<script>
-(function() {
-  var params = new URLSearchParams(window.location.search);
-  var studioOrigin = params.get("studio");
-  if (!studioOrigin) {
-    var host = window.location.hostname;
-    if (host === "localhost" || host === "127.0.0.1") {
-      studioOrigin = window.location.protocol + "//localhost:5173";
-    } else {
-      studioOrigin = "https://cloud.mcpr.app";
-    }
-  }
-  var callbackUrl = studioOrigin.replace(/\/+$/, "") + "/studio/oauth/callback?" + params.toString();
-  window.location.replace(callbackUrl);
-})();
-</script>
-</body></html>"#.to_string();
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        "text/html; charset=utf-8".parse().unwrap(),
-    );
-    headers.insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
-    (StatusCode::OK, headers, html).into_response()
-}
-
 /// Forward a request to upstream and return the response, rewriting upstream URLs in JSON bodies.
 pub async fn forward_and_passthrough(
     state: &AppState,
