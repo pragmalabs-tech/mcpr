@@ -67,6 +67,11 @@ fn tunnel_url_path(name: &str) -> PathBuf {
     proxy_dir(name).join("tunnel_url")
 }
 
+/// Path to the upstream MCP URL file for a proxy.
+fn upstream_url_path(name: &str) -> PathBuf {
+    proxy_dir(name).join("upstream_url")
+}
+
 /// Write the tunnel/public URL for a proxy (called after tunnel resolution).
 pub fn write_tunnel_url(name: &str, url: &str) -> std::io::Result<()> {
     let dir = proxy_dir(name);
@@ -77,6 +82,21 @@ pub fn write_tunnel_url(name: &str, url: &str) -> std::io::Result<()> {
 /// Read the tunnel URL for a proxy, if one was written.
 pub fn read_tunnel_url(name: &str) -> Option<String> {
     fs::read_to_string(tunnel_url_path(name))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Write the upstream MCP URL for a proxy (called at startup).
+pub fn write_upstream_url(name: &str, url: &str) -> std::io::Result<()> {
+    let dir = proxy_dir(name);
+    fs::create_dir_all(&dir)?;
+    fs::write(upstream_url_path(name), url)
+}
+
+/// Read the upstream MCP URL for a proxy, if one was written.
+pub fn read_upstream_url(name: &str) -> Option<String> {
+    fs::read_to_string(upstream_url_path(name))
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())

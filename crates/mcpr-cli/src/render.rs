@@ -17,8 +17,21 @@ use mcpr_integrations::store::query::{
     stats::StatsResult,
     store_ops::{StoreStats, VacuumResult},
 };
+use tabled::{
+    Table, Tabled,
+    settings::{Alignment, Style, object::Columns},
+};
 
 use crate::proxy_lock::{LockInfo, LockStatus};
+
+/// Render a `Tabled`-derived row set as a borderless table with numeric columns
+/// (everything past the first) right-aligned.
+fn render_table<T: Tabled>(rows: Vec<T>) -> String {
+    let mut t = Table::new(rows);
+    t.with(Style::blank())
+        .modify(Columns::new(1..), Alignment::right());
+    t.to_string()
+}
 
 /// Percent-encode a URL for use as a query parameter value.
 fn encode_uri_component(s: &str) -> String {
@@ -211,7 +224,7 @@ pub fn daemon_status(result: Result<DaemonStatusInfo, DaemonStatusError>) -> i32
                 }
                 println!();
                 println!("  Use `mcpr proxy logs` to view request logs.");
-                println!("  Use `mcpr proxy stats` to view metrics.");
+                println!("  Use `mcpr proxy status` to view metrics.");
             }
             0
         }
@@ -294,6 +307,66 @@ pub fn relay_status(info: &crate::logic::relay::RelayStatusInfo) {
 
 // ── Proxy list ────────────────────────────────────────────────────────
 
+#[derive(Tabled)]
+struct ProxyListRow {
+    #[tabled(rename = "NAME")]
+    name: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
+    #[tabled(rename = "PID")]
+    pid: String,
+    #[tabled(rename = "PORT")]
+    port: String,
+    #[tabled(rename = "STARTED")]
+    started: String,
+}
+
+impl ProxyListRow {
+    fn from_status(name: &str, status: &LockStatus) -> Self {
+        match status {
+            LockStatus::Held(info) => Self {
+                name: name.to_string(),
+                status: "running".to_string(),
+                pid: info.pid.to_string(),
+                port: info.port.to_string(),
+                started: format_ts(info.started_at * 1000),
+            },
+            LockStatus::Stale(info) => Self {
+                name: name.to_string(),
+                status: "stale".to_string(),
+                pid: info.pid.to_string(),
+                port: info.port.to_string(),
+                started: format_ts(info.started_at * 1000),
+            },
+            LockStatus::Free => Self {
+                name: name.to_string(),
+                status: "stopped".to_string(),
+                pid: "—".to_string(),
+                port: "—".to_string(),
+                started: "—".to_string(),
+            },
+        }
+    }
+}
+
+/// URLs + config path for a single running proxy, shown below the list table.
+fn print_proxy_detail(name: &str, info: &LockInfo) {
+    let localhost = format!("http://localhost:{}", info.port);
+    let tunnel = crate::proxy_lock::read_tunnel_url(name).filter(|t| *t != localhost);
+    let upstream = crate::proxy_lock::read_upstream_url(name);
+
+    println!();
+    println!("  {name}");
+    println!("    local:    {localhost}");
+    if let Some(t) = &tunnel {
+        println!("    tunnel:   {t}");
+    }
+    if let Some(u) = &upstream {
+        println!("    upstream: {u}");
+    }
+    println!("    config:   {}", info.config_path);
+}
+
 pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
     if proxies.is_empty() {
         if mode == OutputMode::Json {
@@ -308,14 +381,23 @@ pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
         let items: Vec<serde_json::Value> = proxies
             .iter()
             .map(|(name, status)| match status {
-                LockStatus::Held(info) => serde_json::json!({
-                    "name": name,
-                    "status": "running",
-                    "pid": info.pid,
-                    "port": info.port,
-                    "started_at": info.started_at,
-                    "config_path": info.config_path,
-                }),
+                LockStatus::Held(info) => {
+                    let localhost = format!("http://localhost:{}", info.port);
+                    let tunnel =
+                        crate::proxy_lock::read_tunnel_url(name).filter(|t| *t != localhost);
+                    let upstream = crate::proxy_lock::read_upstream_url(name);
+                    serde_json::json!({
+                        "name": name,
+                        "status": "running",
+                        "pid": info.pid,
+                        "port": info.port,
+                        "started_at": info.started_at,
+                        "config_path": info.config_path,
+                        "localhost_url": localhost,
+                        "tunnel_url": tunnel,
+                        "upstream_url": upstream,
+                    })
+                }
                 LockStatus::Stale(info) => serde_json::json!({
                     "name": name,
                     "status": "stale",
@@ -334,40 +416,15 @@ pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
         return;
     }
 
-    println!(
-        "{:<24} {:<10} {:>7}  {:>6}  {:<20}  CONFIG",
-        "NAME", "STATUS", "PID", "PORT", "STARTED"
-    );
+    let rows: Vec<_> = proxies
+        .iter()
+        .map(|(name, status)| ProxyListRow::from_status(name, status))
+        .collect();
+    println!("{}", render_table(rows));
+
     for (name, status) in proxies {
-        match status {
-            LockStatus::Held(info) => {
-                println!(
-                    "{:<24} {:<10} {:>7}  {:>6}  {:<20}  {}",
-                    name,
-                    "running",
-                    info.pid,
-                    info.port,
-                    format_ts(info.started_at * 1000),
-                    info.config_path,
-                );
-            }
-            LockStatus::Stale(info) => {
-                println!(
-                    "{:<24} {:<10} {:>7}  {:>6}  {:<20}  {}",
-                    name,
-                    "stale",
-                    info.pid,
-                    info.port,
-                    format_ts(info.started_at * 1000),
-                    info.config_path,
-                );
-            }
-            LockStatus::Free => {
-                println!(
-                    "{:<24} {:<10} {:>7}  {:>6}  {:<20}  —",
-                    name, "stopped", "—", "—", "—"
-                );
-            }
+        if let LockStatus::Held(info) = status {
+            print_proxy_detail(name, info);
         }
     }
 
@@ -382,52 +439,71 @@ pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
 
 // ── Logs ──────────────────────────────────────────────────────────────
 
-/// Print the log table header.
-pub fn logs_header() {
-    println!(
-        "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {:>8}  STATUS",
-        "TIME", "METHOD", "TOOL", "LATENCY", "IN", "OUT", "ERR"
-    );
+#[derive(Tabled)]
+struct LogDisplayRow {
+    #[tabled(rename = "TIME")]
+    time: String,
+    #[tabled(rename = "METHOD")]
+    method: String,
+    #[tabled(rename = "TOOL")]
+    tool: String,
+    #[tabled(rename = "LATENCY")]
+    latency: String,
+    #[tabled(rename = "IN")]
+    bytes_in: String,
+    #[tabled(rename = "OUT")]
+    bytes_out: String,
+    #[tabled(rename = "ERR")]
+    err: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
 }
 
-/// Render log rows (used for both initial display and follow-mode batches).
-pub fn log_rows(rows: &[LogRow], mode: OutputMode) {
+impl From<&LogRow> for LogDisplayRow {
+    fn from(row: &LogRow) -> Self {
+        let status = match row.status.as_str() {
+            "error" => format!("error  {:?}", row.error_msg.as_deref().unwrap_or("")),
+            s => s.to_string(),
+        };
+        Self {
+            time: format_ts(row.ts),
+            method: row.method.clone(),
+            tool: row.tool.clone().unwrap_or_else(|| "—".to_string()),
+            latency: format_latency(row.latency_us),
+            bytes_in: format_bytes_col(row.bytes_in),
+            bytes_out: format_bytes_col(row.bytes_out),
+            err: row.error_code.clone().unwrap_or_default(),
+            status,
+        }
+    }
+}
+
+/// Render log rows. In pretty mode, error rows are colored red.
+/// Set `with_header = false` for follow-mode batches.
+pub fn log_rows(rows: &[LogRow], mode: OutputMode, with_header: bool) {
     if mode == OutputMode::Json {
         for row in rows {
             print_json(row);
         }
         return;
     }
-    for row in rows {
-        log_row(row);
+    if rows.is_empty() {
+        return;
     }
-}
-
-/// Render a single log row in pretty mode.
-fn log_row(row: &LogRow) {
-    let tool = row.tool.as_deref().unwrap_or("—");
-    let status_str = match row.status.as_str() {
-        "error" => format!("error  {:?}", row.error_msg.as_deref().unwrap_or("")),
-        s => s.to_string(),
-    };
-    let in_str = format_bytes_col(row.bytes_in);
-    let out_str = format_bytes_col(row.bytes_out);
-    let err_str = row.error_code.as_deref().unwrap_or("");
-    let line = format!(
-        "{:<21} {:<28} {:<32} {:>8}  {:>7}  {:>7}  {:>8}  {}",
-        format_ts(row.ts),
-        row.method,
-        tool,
-        format_latency(row.latency_us),
-        in_str,
-        out_str,
-        err_str,
-        status_str,
-    );
-    if row.error_code.is_some() {
-        println!("{}", colored::Colorize::red(line.as_str()));
-    } else {
-        println!("{line}");
+    let display: Vec<LogDisplayRow> = rows.iter().map(LogDisplayRow::from).collect();
+    let table = render_table(display);
+    let mut lines = table.lines();
+    if let Some(header) = lines.next()
+        && with_header
+    {
+        println!("{header}");
+    }
+    for (i, line) in lines.enumerate() {
+        if rows.get(i).and_then(|r| r.error_code.as_ref()).is_some() {
+            println!("{}", colored::Colorize::red(line));
+        } else {
+            println!("{line}");
+        }
     }
 }
 
@@ -437,47 +513,68 @@ pub fn logs_empty() {
 
 // ── Slow calls ────────────────────────────────────────────────────────
 
-pub fn slow_header(proxy: &Option<String>, since: &str, threshold: &str) {
+#[derive(Tabled)]
+struct SlowDisplayRow {
+    #[tabled(rename = "TOOL")]
+    tool: String,
+    #[tabled(rename = "LATENCY")]
+    latency: String,
+    #[tabled(rename = "SIZE")]
+    size: String,
+    #[tabled(rename = "TIME")]
+    time: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
+}
+
+impl From<&LogRow> for SlowDisplayRow {
+    fn from(row: &LogRow) -> Self {
+        let bytes_total = row.bytes_in.unwrap_or(0).max(0) + row.bytes_out.unwrap_or(0).max(0);
+        let size = if bytes_total > 0 {
+            format_bytes(bytes_total as u64)
+        } else {
+            "—".to_string()
+        };
+        Self {
+            tool: row.tool.clone().unwrap_or_else(|| row.method.clone()),
+            latency: format_latency(row.latency_us),
+            size,
+            time: format_ts(row.ts),
+            status: row.status.clone(),
+        }
+    }
+}
+
+pub fn slow_banner(proxy: &Option<String>, since: &str, threshold: &str) {
     println!(
         "TOP SLOW CALLS — {} — last {} (threshold: {})\n",
         proxy_display(proxy),
         since,
         threshold
     );
-    println!(
-        "  {:<32} {:>10}  {:>9}   {:<21}  STATUS",
-        "TOOL", "LATENCY", "SIZE", "TIME"
-    );
 }
 
-pub fn slow_rows(rows: &[LogRow], mode: OutputMode) {
+pub fn slow_rows(rows: &[LogRow], mode: OutputMode, with_header: bool) {
     if mode == OutputMode::Json {
         for row in rows {
             print_json(row);
         }
         return;
     }
-    for row in rows {
-        slow_row(row);
+    if rows.is_empty() {
+        return;
     }
-}
-
-fn slow_row(row: &LogRow) {
-    let tool = row.tool.as_deref().unwrap_or(&row.method);
-    let bytes_total = row.bytes_in.unwrap_or(0).max(0) + row.bytes_out.unwrap_or(0).max(0);
-    let size_str = if bytes_total > 0 {
-        format_bytes(bytes_total as u64)
-    } else {
-        "—".to_string()
-    };
-    println!(
-        "  {:<32} {:>10}  {:>9}   {:<21}  {}",
-        tool,
-        format_latency(row.latency_us),
-        size_str,
-        format_ts(row.ts),
-        row.status,
-    );
+    let display: Vec<SlowDisplayRow> = rows.iter().map(SlowDisplayRow::from).collect();
+    let table = render_table(display);
+    let mut lines = table.lines();
+    if let Some(header) = lines.next()
+        && with_header
+    {
+        println!("{header}");
+    }
+    for line in lines {
+        println!("{line}");
+    }
 }
 
 pub fn slow_empty() {
@@ -498,65 +595,104 @@ pub fn slow_summary(rows: &[LogRow], since: &str) {
 
 // ── Stats ─────────────────────────────────────────────────────────────
 
-pub fn stats(result: &StatsResult, proxy: &Option<String>, since: &str, mode: OutputMode) {
-    if mode == OutputMode::Json {
-        print_json(result);
-        return;
-    }
+#[derive(Tabled)]
+struct ToolStatsRow {
+    #[tabled(rename = "TOOL")]
+    tool: String,
+    #[tabled(rename = "CALLS")]
+    calls: i64,
+    #[tabled(rename = "AVG")]
+    avg: String,
+    #[tabled(rename = "P95")]
+    p95: String,
+    #[tabled(rename = "MAX")]
+    max: String,
+    #[tabled(rename = "ERRORS")]
+    errors: String,
+    #[tabled(rename = "BYTES IN")]
+    bytes_in: String,
+    #[tabled(rename = "BYTES OUT")]
+    bytes_out: String,
+    #[tabled(rename = "AVG SIZE")]
+    avg_size: String,
+}
 
-    println!(
-        "STATS — {} — last {}   Total: {} calls   Errors: {:.1}%\n",
-        proxy_display(proxy),
-        since,
-        result.total_calls,
-        result.error_pct
-    );
-    println!(
-        "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}  {:>9}  {:>9}",
-        "TOOL", "CALLS", "AVG", "P95", "MAX", "ERRORS", "BYTES IN", "BYTES OUT", "AVG SIZE"
-    );
-    for t in &result.tools {
-        let error_str = if t.error_pct > 0.0 {
-            format!("{:.1}%", t.error_pct)
-        } else {
-            "0%".to_string()
-        };
+impl From<&mcpr_integrations::store::query::stats::ToolStats> for ToolStatsRow {
+    fn from(t: &mcpr_integrations::store::query::stats::ToolStats) -> Self {
         let bytes_in = t.total_bytes_in.max(0) as u64;
         let bytes_out = t.total_bytes_out.max(0) as u64;
-        let in_str = if bytes_in > 0 {
-            format_bytes(bytes_in)
-        } else {
-            "—".to_string()
-        };
-        let out_str = if bytes_out > 0 {
-            format_bytes(bytes_out)
-        } else {
-            "—".to_string()
+        let fmt_bytes = |b: u64| {
+            if b > 0 {
+                format_bytes(b)
+            } else {
+                "—".to_string()
+            }
         };
         let avg_size = if t.calls > 0 {
             format_bytes((bytes_in + bytes_out) / t.calls as u64)
         } else {
             "—".to_string()
         };
-        println!(
-            "  {:<22} {:>6}  {:>7}  {:>7}  {:>7}  {:>8}  {:>9}  {:>9}  {:>9}",
-            t.label,
-            t.calls,
-            format_latency(t.avg_us as i64),
-            format_latency(t.p95_us),
-            format_latency(t.max_us),
-            error_str,
-            in_str,
-            out_str,
+        let errors = if t.error_pct > 0.0 {
+            format!("{:.1}%", t.error_pct)
+        } else {
+            "0%".to_string()
+        };
+        Self {
+            tool: t.label.clone(),
+            calls: t.calls,
+            avg: format_latency(t.avg_us as i64),
+            p95: format_latency(t.p95_us),
+            max: format_latency(t.max_us),
+            errors,
+            bytes_in: fmt_bytes(bytes_in),
+            bytes_out: fmt_bytes(bytes_out),
             avg_size,
-        );
-    }
-    if result.tools.is_empty() {
-        println!("  (no data)");
+        }
     }
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────
+
+#[derive(Tabled)]
+struct SessionDisplayRow {
+    #[tabled(rename = "SESSION")]
+    session: String,
+    #[tabled(rename = "CLIENT")]
+    client: String,
+    #[tabled(rename = "STARTED")]
+    started: String,
+    #[tabled(rename = "LAST SEEN")]
+    last_seen: String,
+    #[tabled(rename = "CALLS")]
+    calls: i64,
+    #[tabled(rename = "ERRS")]
+    errors: i64,
+}
+
+impl From<&SessionRow> for SessionDisplayRow {
+    fn from(row: &SessionRow) -> Self {
+        let client_name = match (&row.client_name, &row.client_version) {
+            (Some(n), Some(v)) => format!("{n} {v}"),
+            (Some(n), None) => n.clone(),
+            _ => "unknown".to_string(),
+        };
+        let status_icon = if row.is_active { "●" } else { "○" };
+        let short_id = row.session_id[..row.session_id.len().min(8)].to_string();
+        Self {
+            session: short_id,
+            client: format!("{client_name} {status_icon}"),
+            started: format_ts(row.started_at),
+            last_seen: if row.is_active {
+                "just now".to_string()
+            } else {
+                format_ts(row.last_seen_at)
+            },
+            calls: row.total_calls,
+            errors: row.total_errors,
+        }
+    }
+}
 
 pub fn sessions(rows: &[SessionRow], proxy: &Option<String>, since: &str, mode: OutputMode) {
     if mode == OutputMode::Json {
@@ -567,31 +703,9 @@ pub fn sessions(rows: &[SessionRow], proxy: &Option<String>, since: &str, mode: 
     }
 
     println!("SESSIONS — {} — last {}\n", proxy_display(proxy), since);
-    println!(
-        "  {:<10} {:<24} {:<17} {:>12} {:>6} {:>6}",
-        "SESSION", "CLIENT", "STARTED", "LAST SEEN", "CALLS", "ERRS"
-    );
-    for row in rows {
-        let client = match (&row.client_name, &row.client_version) {
-            (Some(n), Some(v)) => format!("{n} {v}"),
-            (Some(n), None) => n.clone(),
-            _ => "unknown".to_string(),
-        };
-        let status_icon = if row.is_active { "●" } else { "○" };
-        let short_id = &row.session_id[..row.session_id.len().min(8)];
-        println!(
-            "  {:<10} {:<24} {:<17} {:>12} {:>6} {:>6}",
-            short_id,
-            format!("{client} {status_icon}"),
-            format_ts(row.started_at),
-            if row.is_active {
-                "just now".to_string()
-            } else {
-                format_ts(row.last_seen_at)
-            },
-            row.total_calls,
-            row.total_errors,
-        );
+    if !rows.is_empty() {
+        let display: Vec<SessionDisplayRow> = rows.iter().map(SessionDisplayRow::from).collect();
+        println!("{}", render_table(display));
     }
     let active_count = rows.iter().filter(|r| r.is_active).count();
     println!(
@@ -603,6 +717,38 @@ pub fn sessions(rows: &[SessionRow], proxy: &Option<String>, since: &str, mode: 
 
 // ── Clients ───────────────────────────────────────────────────────────
 
+#[derive(Tabled)]
+struct ClientDisplayRow {
+    #[tabled(rename = "CLIENT")]
+    client: String,
+    #[tabled(rename = "VERSION")]
+    version: String,
+    #[tabled(rename = "PLATFORM")]
+    platform: String,
+    #[tabled(rename = "SESSIONS")]
+    sessions: i64,
+    #[tabled(rename = "CALLS")]
+    calls: i64,
+    #[tabled(rename = "ERRORS")]
+    errors: i64,
+}
+
+impl From<&ClientRow> for ClientDisplayRow {
+    fn from(row: &ClientRow) -> Self {
+        Self {
+            client: row.client_name.clone().unwrap_or_else(|| "unknown".into()),
+            version: row.client_version.clone().unwrap_or_else(|| "—".into()),
+            platform: row
+                .client_platform
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
+            sessions: row.sessions,
+            calls: row.total_calls,
+            errors: row.total_errors,
+        }
+    }
+}
+
 pub fn clients(rows: &[ClientRow], proxy: &Option<String>, since: &str, mode: OutputMode) {
     if mode == OutputMode::Json {
         for row in rows {
@@ -612,80 +758,87 @@ pub fn clients(rows: &[ClientRow], proxy: &Option<String>, since: &str, mode: Ou
     }
 
     println!("CLIENTS — {} — last {}\n", proxy_display(proxy), since);
-    println!(
-        "  {:<20} {:<10} {:<10} {:>8} {:>8} {:>8}",
-        "CLIENT", "VERSION", "PLATFORM", "SESSIONS", "CALLS", "ERRORS"
-    );
-    for row in rows {
-        println!(
-            "  {:<20} {:<10} {:<10} {:>8} {:>8} {:>8}",
-            row.client_name.as_deref().unwrap_or("unknown"),
-            row.client_version.as_deref().unwrap_or("—"),
-            row.client_platform.as_deref().unwrap_or("unknown"),
-            row.sessions,
-            row.total_calls,
-            row.total_errors,
-        );
-    }
     if rows.is_empty() {
         println!("  (no clients found)");
-    } else {
-        println!(
-            "\n  {} unique clients   {} sessions total",
-            rows.len(),
-            rows.iter().map(|r| r.sessions).sum::<i64>()
-        );
+        return;
     }
+    let display: Vec<ClientDisplayRow> = rows.iter().map(ClientDisplayRow::from).collect();
+    println!("{}", render_table(display));
+    println!(
+        "\n  {} unique clients   {} sessions total",
+        rows.len(),
+        rows.iter().map(|r| r.sessions).sum::<i64>()
+    );
 }
 
 // ── Proxy status (overview) ──────────────────────────────────────────
+
+#[derive(Tabled)]
+struct RunningProxyRow {
+    #[tabled(rename = "PROXY")]
+    proxy: String,
+    #[tabled(rename = "PORT")]
+    port: String,
+    #[tabled(rename = "PID")]
+    pid: u32,
+    #[tabled(rename = "UPTIME")]
+    uptime: String,
+}
+
+fn format_uptime(seconds: i64) -> String {
+    if seconds >= 3600 {
+        format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
 
 /// Render the running-proxies header for `mcpr proxy status`.
 pub fn status_running_proxies(running: &[&(String, LockStatus)]) {
     if running.is_empty() {
         return;
     }
-    println!(
-        "  {:<16} {:>8} {:>8} {:>10}",
-        "PROXY", "PORT", "PID", "UPTIME"
-    );
-    for (i, (name, status)) in running.iter().enumerate() {
-        if let LockStatus::Held(info) = status {
-            if i > 0 {
-                println!("  ──────────────────────────────────────────");
-            }
-            let uptime_secs = chrono::Utc::now().timestamp() - info.started_at;
-            let uptime = if uptime_secs >= 3600 {
-                format!("{}h {}m", uptime_secs / 3600, (uptime_secs % 3600) / 60)
-            } else if uptime_secs >= 60 {
-                format!("{}m {}s", uptime_secs / 60, uptime_secs % 60)
-            } else {
-                format!("{}s", uptime_secs)
-            };
-            println!(
-                "  {:<16} {:>8} {:>8} {:>10}",
-                name,
-                format!(":{}", info.port),
-                info.pid,
-                uptime,
-            );
 
-            // Show URLs with studio quick-test links.
-            let localhost_url = format!("http://localhost:{}", info.port);
-            let encoded_localhost = encode_uri_component(&localhost_url);
-            let tunnel_url = crate::proxy_lock::read_tunnel_url(name);
+    let held: Vec<(&String, &LockInfo)> = running
+        .iter()
+        .filter_map(|(name, status)| match status {
+            LockStatus::Held(info) => Some((name, info)),
+            _ => None,
+        })
+        .collect();
+    if held.is_empty() {
+        return;
+    }
 
+    let now = chrono::Utc::now().timestamp();
+    let rows: Vec<RunningProxyRow> = held
+        .iter()
+        .map(|(name, info)| RunningProxyRow {
+            proxy: (*name).clone(),
+            port: format!(":{}", info.port),
+            pid: info.pid,
+            uptime: format_uptime(now - info.started_at),
+        })
+        .collect();
+    println!("{}", render_table(rows));
+
+    for (name, info) in &held {
+        let localhost_url = format!("http://localhost:{}", info.port);
+        let encoded_localhost = encode_uri_component(&localhost_url);
+        let tunnel_url = crate::proxy_lock::read_tunnel_url(name);
+
+        println!();
+        println!("  localhost: {localhost_url}");
+        println!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded_localhost}");
+        if let Some(ref turl) = tunnel_url
+            && *turl != localhost_url
+        {
+            let encoded_tunnel = encode_uri_component(turl);
             println!();
-            println!("  localhost: {localhost_url}");
-            println!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded_localhost}");
-            if let Some(ref turl) = tunnel_url
-                && *turl != localhost_url
-            {
-                let encoded_tunnel = encode_uri_component(turl);
-                println!();
-                println!("  tunnel:   {turl}");
-                println!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded_tunnel}");
-            }
+            println!("  tunnel:   {turl}");
+            println!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded_tunnel}");
         }
     }
     println!();
@@ -752,41 +905,9 @@ pub fn status_overview(
     );
 
     if !stats_result.tools.is_empty() {
-        println!(
-            "\n  {:<24} {:>8} {:>10} {:>10} {:>10} {:>8} {:>9} {:>9} {:>9}",
-            "TOOL", "CALLS", "AVG", "P95", "MAX", "ERR%", "BYTES IN", "BYTES OUT", "AVG SIZE"
-        );
-        for t in &stats_result.tools {
-            let bytes_in = t.total_bytes_in.max(0) as u64;
-            let bytes_out = t.total_bytes_out.max(0) as u64;
-            let in_str = if bytes_in > 0 {
-                format_bytes(bytes_in)
-            } else {
-                "—".to_string()
-            };
-            let out_str = if bytes_out > 0 {
-                format_bytes(bytes_out)
-            } else {
-                "—".to_string()
-            };
-            let avg_size = if t.calls > 0 {
-                format_bytes((bytes_in + bytes_out) / t.calls as u64)
-            } else {
-                "—".to_string()
-            };
-            println!(
-                "  {:<24} {:>8} {:>10} {:>10} {:>10} {:>7.1}% {:>9} {:>9} {:>9}",
-                t.label,
-                t.calls,
-                format_latency(t.avg_us as i64),
-                format_latency(t.p95_us),
-                format_latency(t.max_us),
-                t.error_pct,
-                in_str,
-                out_str,
-                avg_size,
-            );
-        }
+        println!();
+        let rows: Vec<ToolStatsRow> = stats_result.tools.iter().map(ToolStatsRow::from).collect();
+        println!("{}", render_table(rows));
     }
 
     if active_sessions > 0 {
@@ -840,22 +961,41 @@ pub fn session_detail(detail: &SessionDetail, mode: OutputMode) {
     );
 
     if !detail.requests.is_empty() {
-        println!(
-            "\n  {:<20} {:<28} {:<32} {:>10} {:>8}",
-            "TIME", "METHOD", "TOOL", "LATENCY", "STATUS"
-        );
-        for r in &detail.requests {
-            println!(
-                "  {:<20} {:<28} {:<32} {:>10} {:>8}",
-                format_ts(r.ts),
-                r.method,
-                r.tool.as_deref().unwrap_or("—"),
-                format_latency(r.latency_us),
-                r.status,
-            );
-        }
+        println!();
+        let rows: Vec<SessionRequestRow> = detail
+            .requests
+            .iter()
+            .map(SessionRequestRow::from)
+            .collect();
+        println!("{}", render_table(rows));
     } else {
         println!("\n  (no requests recorded)");
+    }
+}
+
+#[derive(Tabled)]
+struct SessionRequestRow {
+    #[tabled(rename = "TIME")]
+    time: String,
+    #[tabled(rename = "METHOD")]
+    method: String,
+    #[tabled(rename = "TOOL")]
+    tool: String,
+    #[tabled(rename = "LATENCY")]
+    latency: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
+}
+
+impl From<&LogRow> for SessionRequestRow {
+    fn from(r: &LogRow) -> Self {
+        Self {
+            time: format_ts(r.ts),
+            method: r.method.clone(),
+            tool: r.tool.clone().unwrap_or_else(|| "—".to_string()),
+            latency: format_latency(r.latency_us),
+            status: r.status.clone(),
+        }
     }
 }
 
@@ -907,6 +1047,29 @@ pub fn schema(rows: &[SchemaRow], status: Option<&SchemaStatusRow>, mode: Output
     }
 }
 
+#[derive(Tabled)]
+struct SchemaChangeDisplayRow {
+    #[tabled(rename = "TIME")]
+    time: String,
+    #[tabled(rename = "METHOD")]
+    method: String,
+    #[tabled(rename = "CHANGE")]
+    change: String,
+    #[tabled(rename = "ITEM")]
+    item: String,
+}
+
+impl From<&SchemaChangeRow> for SchemaChangeDisplayRow {
+    fn from(row: &SchemaChangeRow) -> Self {
+        Self {
+            time: format_ts(row.detected_at),
+            method: row.method.clone(),
+            change: row.change_type.clone(),
+            item: row.item_name.clone().unwrap_or_else(|| "—".into()),
+        }
+    }
+}
+
 pub fn schema_changes(rows: &[SchemaChangeRow], mode: OutputMode) {
     if mode == OutputMode::Json {
         for row in rows {
@@ -915,18 +1078,48 @@ pub fn schema_changes(rows: &[SchemaChangeRow], mode: OutputMode) {
         return;
     }
 
-    println!("  {:<21} {:<28} {:<22} ITEM", "TIME", "METHOD", "CHANGE");
-    for row in rows {
-        println!(
-            "  {:<21} {:<28} {:<22} {}",
-            format_ts(row.detected_at),
-            row.method,
-            row.change_type,
-            row.item_name.as_deref().unwrap_or("—"),
-        );
-    }
     if rows.is_empty() {
         println!("  (no schema changes recorded)");
+        return;
+    }
+    let display: Vec<SchemaChangeDisplayRow> =
+        rows.iter().map(SchemaChangeDisplayRow::from).collect();
+    println!("{}", render_table(display));
+}
+
+#[derive(Tabled)]
+struct SchemaUsageDisplayRow {
+    #[tabled(rename = "TOOL")]
+    tool: String,
+    #[tabled(rename = "CALLS")]
+    calls: i64,
+    #[tabled(rename = "ERRORS")]
+    errors: i64,
+    #[tabled(rename = "LAST CALLED")]
+    last_called: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
+}
+
+impl From<&SchemaToolUsageRow> for SchemaUsageDisplayRow {
+    fn from(row: &SchemaToolUsageRow) -> Self {
+        let status = if row.calls == 0 {
+            "unused"
+        } else if row.errors > 0 {
+            "errors"
+        } else {
+            "ok"
+        };
+        Self {
+            tool: row.tool_name.clone(),
+            calls: row.calls,
+            errors: row.errors,
+            last_called: row
+                .last_called_at
+                .map(format_ts)
+                .unwrap_or_else(|| "never".to_string()),
+            status: status.to_string(),
+        }
     }
 }
 
@@ -957,30 +1150,19 @@ pub fn schema_unused(
         unused_count,
         total
     );
-    println!(
-        "  {:<28} {:>8} {:>8} {:>21}  STATUS",
-        "TOOL", "CALLS", "ERRORS", "LAST CALLED"
-    );
-    for row in rows {
-        let last_called = row
-            .last_called_at
-            .map(format_ts)
-            .unwrap_or_else(|| "never".to_string());
-        let status = if row.calls == 0 {
-            "unused"
-        } else if row.errors > 0 {
-            "errors"
-        } else {
-            "ok"
-        };
-        let line = format!(
-            "  {:<28} {:>8} {:>8} {:>21}  {}",
-            row.tool_name, row.calls, row.errors, last_called, status,
-        );
+    let display: Vec<SchemaUsageDisplayRow> =
+        rows.iter().map(SchemaUsageDisplayRow::from).collect();
+    let table = render_table(display);
+    let mut lines = table.lines();
+    if let Some(header) = lines.next() {
+        println!("{header}");
+    }
+    for (i, line) in lines.enumerate() {
+        let row = &rows[i];
         if row.calls == 0 {
-            println!("{}", colored::Colorize::yellow(line.as_str()));
+            println!("{}", colored::Colorize::yellow(line));
         } else if row.errors > 0 {
-            println!("{}", colored::Colorize::red(line.as_str()));
+            println!("{}", colored::Colorize::red(line));
         } else {
             println!("{line}");
         }

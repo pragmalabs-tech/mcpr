@@ -41,10 +41,7 @@ pub fn logs(args: ProxyLogsArgs) -> Result<(), String> {
         .logs(&params)
         .map_err(|e| format!("query failed: {e}"))?;
 
-    if mode == OutputMode::Pretty {
-        render::logs_header();
-    }
-    render::log_rows(&rows, mode);
+    render::log_rows(&rows, mode, true);
     if rows.is_empty() && mode == OutputMode::Pretty {
         render::logs_empty();
     }
@@ -57,7 +54,7 @@ pub fn logs(args: ProxyLogsArgs) -> Result<(), String> {
             let new_rows = engine
                 .logs_since(&params, last_ts)
                 .map_err(|e| format!("follow query failed: {e}"))?;
-            render::log_rows(&new_rows, mode);
+            render::log_rows(&new_rows, mode, false);
             if let Some(r) = new_rows.last() {
                 last_ts = r.ts;
             }
@@ -87,9 +84,9 @@ pub fn slow(args: ProxySlowArgs) -> Result<(), String> {
         .map_err(|e| format!("query failed: {e}"))?;
 
     if mode == OutputMode::Pretty {
-        render::slow_header(&name, &args.since, &args.threshold);
+        render::slow_banner(&name, &args.since, &args.threshold);
     }
-    render::slow_rows(&rows, mode);
+    render::slow_rows(&rows, mode, true);
     if mode == OutputMode::Pretty {
         if rows.is_empty() {
             render::slow_empty();
@@ -106,29 +103,13 @@ pub fn slow(args: ProxySlowArgs) -> Result<(), String> {
             let new_rows = engine
                 .slow_since(&params, last_ts)
                 .map_err(|e| format!("follow query failed: {e}"))?;
-            render::slow_rows(&new_rows, mode);
+            render::slow_rows(&new_rows, mode, false);
             if let Some(r) = new_rows.last() {
                 last_ts = r.ts;
             }
         }
     }
 
-    Ok(())
-}
-
-pub fn stats(args: ProxyStatsArgs) -> Result<(), String> {
-    let (engine, _) = open_query_engine()?;
-    let name = args.proxy.clone();
-    let since_ts = parse_since(&args.since)?;
-
-    let result = engine
-        .stats(&StatsParams {
-            proxy: name.clone(),
-            since_ts,
-        })
-        .map_err(|e| format!("query failed: {e}"))?;
-
-    render::stats(&result, &name, &args.since, args.json.into());
     Ok(())
 }
 

@@ -92,7 +92,7 @@ rotation = "daily"
 # path = "/var/lib/mcpr/requests.db"
 
 # Proxy name written to every stored request (default: derived from mcp URL)
-# Used by `mcpr proxy logs <name>`, `mcpr proxy stats <name>`, etc.
+# Used by `mcpr proxy logs <name>`, `mcpr proxy status <name>`, etc.
 # name = "api-server"
 ```
 
