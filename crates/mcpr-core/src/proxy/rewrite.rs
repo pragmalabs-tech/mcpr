@@ -1102,4 +1102,130 @@ mod tests {
         let frames = as_strs(&body["result"]["tools"][0]["meta"]["ui"]["csp"]["frameDomains"]);
         assert_eq!(frames, vec!["https://abc.tunnel.example.com"]);
     }
+
+    // ── End-to-end scenario ────────────────────────────────────────────────
+
+    #[test]
+    fn rewrite_response__end_to_end_mcp_schema() {
+        // Scenario exercising the full pipeline:
+        // - A realistic multi-tool tools/list response from an upstream MCP
+        //   server that declares widgets with mixed metadata shapes.
+        // - A mcpr.toml with declared global CSP across all three directives
+        //   and a widget-scoped override for the payment widget.
+        //
+        // After rewriting, every tool's meta should carry both CSP shapes
+        // populated from the same merge, with upstream self-references
+        // dropped, declared config applied, and the payment widget's Stripe
+        // override only appearing on the payment tool.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.myshop.com".into()],
+            mode: Mode::Extend,
+        };
+        config.csp.resource_domains = DirectivePolicy {
+            domains: vec!["https://cdn.myshop.com".into()],
+            mode: Mode::Extend,
+        };
+        config.csp.widgets.push(WidgetScoped {
+            match_pattern: "ui://widget/payment*".into(),
+            connect_domains: vec!["https://api.stripe.com".into()],
+            connect_domains_mode: Mode::Extend,
+            resource_domains: vec!["https://js.stripe.com".into()],
+            resource_domains_mode: Mode::Extend,
+            ..Default::default()
+        });
+
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "result": {
+                "tools": [
+                    {
+                        "name": "search_products",
+                        "description": "Search the product catalog",
+                        "inputSchema": { "type": "object" },
+                        "meta": {
+                            "openai/widgetDomain": "old.shop.com",
+                            "openai/outputTemplate": "ui://widget/search",
+                            "openai/widgetCSP": {
+                                "connect_domains": ["http://localhost:9000"],
+                                "resource_domains": ["http://localhost:4444"]
+                            }
+                        }
+                    },
+                    {
+                        "name": "take_payment",
+                        "description": "Charge a card",
+                        "inputSchema": { "type": "object" },
+                        "meta": {
+                            "ui": {
+                                "resourceUri": "ui://widget/payment-form",
+                                "csp": {
+                                    "connectDomains": ["https://api.myshop.com"]
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "name": "get_order_status",
+                        "description": "Look up an order",
+                        "inputSchema": { "type": "object" }
+                    }
+                ]
+            }
+        });
+
+        rewrite_response("tools/list", &mut body, &config);
+
+        let tools = body["result"]["tools"].as_array().unwrap();
+
+        // ── Tool 0: search — upstream declared only OpenAI shape ──────────
+        let search_meta = &tools[0]["meta"];
+        assert_eq!(
+            search_meta["openai/widgetDomain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+        let search_oa_connect = as_strs(&search_meta["openai/widgetCSP"]["connect_domains"]);
+        let search_spec_connect = as_strs(&search_meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(search_oa_connect, search_spec_connect);
+        // Proxy first, then declared global, upstream localhost dropped.
+        assert_eq!(
+            search_oa_connect,
+            vec!["https://abc.tunnel.example.com", "https://api.myshop.com"]
+        );
+        // The payment widget override must NOT apply to the search tool.
+        assert!(!search_oa_connect.contains(&"https://api.stripe.com"));
+        // Frame directive defaults strict — empty apart from the proxy URL.
+        let search_oa_frame = as_strs(&search_meta["openai/widgetCSP"]["frame_domains"]);
+        assert_eq!(search_oa_frame, vec!["https://abc.tunnel.example.com"]);
+
+        // ── Tool 1: payment — upstream declared only spec shape ──────────
+        let payment_meta = &tools[1]["meta"];
+        let payment_oa_connect = as_strs(&payment_meta["openai/widgetCSP"]["connect_domains"]);
+        let payment_spec_connect = as_strs(&payment_meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(payment_oa_connect, payment_spec_connect);
+        // Proxy + global + widget override (Stripe) all present, in that order.
+        assert_eq!(
+            payment_oa_connect,
+            vec![
+                "https://abc.tunnel.example.com",
+                "https://api.myshop.com",
+                "https://api.stripe.com",
+            ]
+        );
+        let payment_oa_resource = as_strs(&payment_meta["openai/widgetCSP"]["resource_domains"]);
+        assert_eq!(
+            payment_oa_resource,
+            vec![
+                "https://abc.tunnel.example.com",
+                "https://cdn.myshop.com",
+                "https://js.stripe.com",
+            ]
+        );
+
+        // ── Tool 2: plain tool, no widget metadata ────────────────────────
+        // Non-widget metas must not gain synthesized CSP fields.
+        let plain = &tools[2];
+        assert!(plain.get("meta").is_none());
+    }
 }
