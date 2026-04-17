@@ -25,7 +25,6 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         // Observability commands
         ProxyCommand::Logs(args) => observe::logs(args),
         ProxyCommand::Slow(args) => observe::slow(args),
-        ProxyCommand::Stats(args) => observe::stats(args),
         ProxyCommand::Sessions(args) => observe::sessions(args),
         ProxyCommand::Clients(args) => observe::clients(args),
         ProxyCommand::Status(args) => observe::status(args),

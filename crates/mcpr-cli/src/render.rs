@@ -224,7 +224,7 @@ pub fn daemon_status(result: Result<DaemonStatusInfo, DaemonStatusError>) -> i32
                 }
                 println!();
                 println!("  Use `mcpr proxy logs` to view request logs.");
-                println!("  Use `mcpr proxy stats` to view metrics.");
+                println!("  Use `mcpr proxy status` to view metrics.");
             }
             0
         }
@@ -383,8 +383,8 @@ pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
             .map(|(name, status)| match status {
                 LockStatus::Held(info) => {
                     let localhost = format!("http://localhost:{}", info.port);
-                    let tunnel = crate::proxy_lock::read_tunnel_url(name)
-                        .filter(|t| *t != localhost);
+                    let tunnel =
+                        crate::proxy_lock::read_tunnel_url(name).filter(|t| *t != localhost);
                     let upstream = crate::proxy_lock::read_upstream_url(name);
                     serde_json::json!({
                         "name": name,
@@ -493,10 +493,10 @@ pub fn log_rows(rows: &[LogRow], mode: OutputMode, with_header: bool) {
     let display: Vec<LogDisplayRow> = rows.iter().map(LogDisplayRow::from).collect();
     let table = render_table(display);
     let mut lines = table.lines();
-    if let Some(header) = lines.next() {
-        if with_header {
-            println!("{header}");
-        }
+    if let Some(header) = lines.next()
+        && with_header
+    {
+        println!("{header}");
     }
     for (i, line) in lines.enumerate() {
         if rows.get(i).and_then(|r| r.error_code.as_ref()).is_some() {
@@ -567,10 +567,10 @@ pub fn slow_rows(rows: &[LogRow], mode: OutputMode, with_header: bool) {
     let display: Vec<SlowDisplayRow> = rows.iter().map(SlowDisplayRow::from).collect();
     let table = render_table(display);
     let mut lines = table.lines();
-    if let Some(header) = lines.next() {
-        if with_header {
-            println!("{header}");
-        }
+    if let Some(header) = lines.next()
+        && with_header
+    {
+        println!("{header}");
     }
     for line in lines {
         println!("{line}");
@@ -650,27 +650,6 @@ impl From<&mcpr_integrations::store::query::stats::ToolStats> for ToolStatsRow {
             avg_size,
         }
     }
-}
-
-pub fn stats(result: &StatsResult, proxy: &Option<String>, since: &str, mode: OutputMode) {
-    if mode == OutputMode::Json {
-        print_json(result);
-        return;
-    }
-
-    println!(
-        "STATS — {} — last {}   Total: {} calls   Errors: {:.1}%\n",
-        proxy_display(proxy),
-        since,
-        result.total_calls,
-        result.error_pct
-    );
-    if result.tools.is_empty() {
-        println!("  (no data)");
-        return;
-    }
-    let rows: Vec<ToolStatsRow> = result.tools.iter().map(ToolStatsRow::from).collect();
-    println!("{}", render_table(rows));
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────
@@ -759,7 +738,10 @@ impl From<&ClientRow> for ClientDisplayRow {
         Self {
             client: row.client_name.clone().unwrap_or_else(|| "unknown".into()),
             version: row.client_version.clone().unwrap_or_else(|| "—".into()),
-            platform: row.client_platform.clone().unwrap_or_else(|| "unknown".into()),
+            platform: row
+                .client_platform
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
             sessions: row.sessions,
             calls: row.total_calls,
             errors: row.total_errors,
@@ -924,8 +906,7 @@ pub fn status_overview(
 
     if !stats_result.tools.is_empty() {
         println!();
-        let rows: Vec<ToolStatsRow> =
-            stats_result.tools.iter().map(ToolStatsRow::from).collect();
+        let rows: Vec<ToolStatsRow> = stats_result.tools.iter().map(ToolStatsRow::from).collect();
         println!("{}", render_table(rows));
     }
 
@@ -981,8 +962,11 @@ pub fn session_detail(detail: &SessionDetail, mode: OutputMode) {
 
     if !detail.requests.is_empty() {
         println!();
-        let rows: Vec<SessionRequestRow> =
-            detail.requests.iter().map(SessionRequestRow::from).collect();
+        let rows: Vec<SessionRequestRow> = detail
+            .requests
+            .iter()
+            .map(SessionRequestRow::from)
+            .collect();
         println!("{}", render_table(rows));
     } else {
         println!("\n  (no requests recorded)");

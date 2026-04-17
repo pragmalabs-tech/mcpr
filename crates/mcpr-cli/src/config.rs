@@ -172,8 +172,6 @@ pub enum ProxyCommand {
     Logs(ProxyLogsArgs),
     /// Show slowest requests above a latency threshold
     Slow(ProxySlowArgs),
-    /// Show per-tool aggregated metrics
-    Stats(ProxyStatsArgs),
     /// List MCP sessions with client info
     Sessions(ProxySessionsArgs),
     /// Show client (AI model) breakdown
@@ -316,22 +314,6 @@ pub struct ProxySlowArgs {
     /// Poll for new slow calls every 1s (like tail -f)
     #[arg(short, long)]
     pub follow: bool,
-}
-
-/// Arguments for `mcpr proxy stats [name]`.
-#[derive(Parser, Clone)]
-pub struct ProxyStatsArgs {
-    /// Filter to a specific proxy name (omit to show all proxies)
-    #[arg(long)]
-    pub proxy: Option<String>,
-
-    /// Aggregation window (e.g., 1h, 24h)
-    #[arg(long, default_value = "1h")]
-    pub since: String,
-
-    /// Output as JSON snapshot (no table)
-    #[arg(long)]
-    pub json: bool,
 }
 
 /// Arguments for `mcpr proxy sessions [name]`.

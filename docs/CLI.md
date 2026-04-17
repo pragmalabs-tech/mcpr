@@ -183,31 +183,6 @@ mcpr proxy slow --json
 | `--limit N` | 20 | Maximum rows |
 | `--json` | false | NDJSON output |
 
-#### `mcpr proxy stats [name]`
-
-Show per-tool aggregated metrics: call count, avg/p95/max latency, error rate.
-
-```bash
-mcpr proxy stats                         # last 1 hour
-mcpr proxy stats --since 24h             # last 24 hours
-mcpr proxy stats --json
-```
-
-Output:
-```
-STATS — localhost-9000 — last 1h   Total: 1,847 calls   Errors: 1.2%
-
-  TOOL                    CALLS      AVG      P95      MAX    ERRORS
-  search_products           847    142ms    312ms    891ms      0.2%
-  list_orders               412     89ms    201ms    612ms        0%
-  create_order              289    341ms    1,200ms  4,201ms    6.2%
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--since DURATION` | 1h | Aggregation window |
-| `--json` | false | JSON output |
-
 #### `mcpr proxy sessions [name]`
 
 List MCP sessions with client info.

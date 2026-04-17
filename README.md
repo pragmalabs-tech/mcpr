@@ -97,8 +97,12 @@ mcpr records every MCP request to a local SQLite database — tool name, latency
 ### Per-tool metrics
 
 ```bash
-$ mcpr proxy stats
-STATS — localhost-9000 — last 1h   Total: 1,284 calls   Errors: 2.3%
+$ mcpr proxy status
+STATUS — localhost-9000 — last 1h
+
+  Total requests:    1,284
+  Error rate:        2.3%
+  Sessions:          12 total   3 active
 
   TOOL                  CALLS      AVG      P95      MAX   ERRORS   BYTES IN  BYTES OUT
   get_weather             412    45ms    120ms    340ms      0%     48.2 KB    196.8 KB

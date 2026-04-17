@@ -1,4 +1,4 @@
-//! Query: `mcpr proxy stats <proxy>` — per-tool aggregated metrics.
+//! Query: per-tool aggregated metrics (used by `mcpr proxy status`).
 
 use rusqlite::params;
 use serde::Serialize;

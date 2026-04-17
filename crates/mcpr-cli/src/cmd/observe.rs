@@ -113,22 +113,6 @@ pub fn slow(args: ProxySlowArgs) -> Result<(), String> {
     Ok(())
 }
 
-pub fn stats(args: ProxyStatsArgs) -> Result<(), String> {
-    let (engine, _) = open_query_engine()?;
-    let name = args.proxy.clone();
-    let since_ts = parse_since(&args.since)?;
-
-    let result = engine
-        .stats(&StatsParams {
-            proxy: name.clone(),
-            since_ts,
-        })
-        .map_err(|e| format!("query failed: {e}"))?;
-
-    render::stats(&result, &name, &args.since, args.json.into());
-    Ok(())
-}
-
 pub fn sessions(args: ProxySessionsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
     let name = args.proxy.clone();

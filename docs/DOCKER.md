@@ -131,7 +131,7 @@ docker run --rm -v mcpr-state:/var/lib/mcpr \
 ```bash
 docker exec mcpr mcpr status
 docker exec mcpr mcpr proxy logs --tail 20
-docker exec mcpr mcpr proxy stats
+docker exec mcpr mcpr proxy status
 ```
 
 ## docker-compose
