@@ -4,25 +4,30 @@
 [![codecov](https://codecov.io/gh/cptrodgers/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/cptrodgers/mcpr)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**A reverse proxy for MCP servers.** Works like nginx or Kong, but at the MCP protocol level — it parses JSON-RPC messages to route, observe, authenticate, and secure MCP traffic. Written in Rust, with under 0.3ms overhead.
+**A proxy for MCP Apps/Server.** Works like nginx or Kong, but at the MCP protocol level — it parses JSON-RPC messages to route, widget, observe, authenticate, and secure MCP traffic. Written in Rust, with under 0.3ms overhead.
 
-```
-AI Client (ChatGPT, Claude, Cursor)
-        │
-        ▼
-      mcpr       ← routes, observes, authenticates, secures
-        │
-        ▼
-  Your MCP Server
-```
+Most current MCP proxies focus on the client side, consuming multiple MCP servers from the client's perspective. So, mcpr wants to focus on the server side, at the MCP app/server, supporting routing of JSON-RPC requests together with widget serving, easy CSP configuration, OAuth 2.1 integration, and observing tools and resources performance, not just at the HTTP request level. This way, application code (MCP apps) can focus on the business logic instead of a bunch of messy things needed to deal with AI clients.
+
+It also comes from my personal experience while developing usestudykit.com (a study MCP app), so please give me more feedback on the project.
 
 ![mcpr TUI dashboard showing information](docs/mcpr-demo.gif)
 
 ### Quickstart
 
-```bash
-curl -fsSL https://mcpr.app/install.sh | sh
 ```
+AI Client (ChatGPT, Claude, Microsoft Copilot, ...) 
+        │
+        ▼
+  Reserve Proxy (Nginx, Caddy, HaProxy, Kong, ...)
+        │
+        ▼
+      mcpr       ← routes, widgets, observes, authenticates, secures
+        │
+        ▼
+  Your MCP Apps/Server
+```
+
+Write a config:
 
 ```toml
 # mcpr.toml
@@ -30,17 +35,25 @@ mcp = "http://localhost:9000"
 port = 3000
 ```
 
+**Run by mcpr** (recommended for local development):
+
 ```bash
+curl -fsSL https://mcpr.app/install.sh | sh
 mcpr proxy run
 ```
 
----
+**Run By Docker** (recommended for servers/production):
 
-## Why it exists
+```bash
+docker run -d --name mcpr \
+  -v "$(pwd)/mcpr.toml:/etc/mcpr/mcpr.toml:ro" \
+  -v mcpr-state:/var/lib/mcpr \
+  -p 3000:3000 \
+  ghcr.io/cptrodgers/mcpr:latest
+```
 
-General-purpose proxies like nginx and Kong operate at the HTTP level. mcpr operates at the MCP level — it parses JSON-RPC message bodies and extracts MCP-specific fields (method name, tool name, session ID, response status) from each request.
+See [docs/DOCKER.md](docs/DOCKER.md) for volumes, health probes, and compose/Kubernetes examples.
 
-This enables per-tool metrics, schema change tracking, widget CSP rewriting, and MCP-spec OAuth — built in, not through plugins or custom configuration.
 
 ---
 
@@ -50,7 +63,7 @@ mcpr inspects each JSON-RPC body to classify the MCP method. Requests route to t
 
 ```toml
 mcp = "http://localhost:9000"
-widgets = "http://localhost:4444" # For MCP Apps
+widgets = "http://localhost:4444" # Optional for MCP server (no Apps)
 ```
 
 | Category | Methods |
@@ -160,7 +173,7 @@ $ mcpr proxy clients
 
 *Coming soon.*
 
-mcpr will handle MCP OAuth 2.1 and API key auth at the proxy layer. The MCP server receives a verified `x-user-id` header instead of implementing its own auth flow.
+mcpr will handle MCP OAuth 2.1 and API key auth at the proxy layer. The MCP Apps (server) receives a verified `x-user-id` header instead of implementing its own auth flow.
 
 ---
 
@@ -172,25 +185,9 @@ mcpr will provide request validation, per-tool ACLs, and IP whitelisting at the 
 
 ---
 
-## Comparison
-
-| | mcpr | FastMCP | mcp-proxy | Kong / Envoy |
-|---|---|---|---|---|
-| **What it is** | Reverse proxy (sits before server) | Framework for building MCP servers | Forward proxy (stdio↔HTTP bridge) | HTTP API gateway |
-| **Parses MCP JSON-RPC** | Yes | Yes (inside the server) | Transport conversion only | No |
-| **Per-tool metrics** | Built-in (SQLite + CLI) | No | No | No (sees HTTP, not tools) |
-| **Schema tracking** | Built-in | No | No | No |
-| **CSP rewriting** | Built-in | No | No | No |
-| **Auth** | OAuth 2.1 at proxy *(coming soon)* | Built-in OAuth (Python/TS servers) | No | HTTP-level auth |
-| **Language** | Rust (single binary) | Python / TypeScript | Python / TypeScript | Go / C++ |
-
-FastMCP is for building MCP servers. mcp-proxy bridges transports on the client side. Kong and Envoy are HTTP gateways. mcpr is a reverse proxy that operates at the MCP protocol level.
-
----
-
 ## Configuration (`mcpr.toml`)
 
-`mcpr.toml` declares proxy behavior. The CLI manages the daemon process. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference.
+`mcpr.toml` declares proxy behavior — upstream MCP URL, port, tunnel, CSP, cloud sync, logging, and resource limits. See [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) for the full reference.
 
 ```toml
 # Minimal
@@ -198,135 +195,32 @@ mcp = "http://localhost:9000"
 port = 3000
 ```
 
-```toml
-# Full
-mcp = "http://localhost:9000"
-widgets = "http://localhost:4444"
-port = 3000
-
-[tunnel]
-enabled = true
-relay_url = "https://tunnel.mcpr.app"
-token = "your-token-here"
-subdomain = "myapp"                     # → https://myapp.tunnel.mcpr.app
-
-[csp]
-mode = "extend"
-domains = ["api.stripe.com", "cdn.example.com"]
-
-[cloud]
-token = "mcpr_xxxxxxxx"
-server = "my-server"
-
-[logging]
-file = true
-dir = "./logs"
-rotation = "daily"
-
-[store]
-# enabled = true                        # default
-# name = "api-server"                   # default: derived from mcp URL
-
-# Resource limits
-max_request_body_size = 5242880         # 5 MB (default)
-max_response_body_size = 10485760       # 10 MB (default)
-max_concurrent_upstream = 100           # default
-connect_timeout = 5                     # seconds (default)
-request_timeout = 30                    # seconds (default)
-```
-
 ---
 
 ## CLI
 
-The CLI manages the daemon, proxies, and relay, and queries the local SQLite store. See [docs/CLI.md](docs/CLI.md) for the full reference.
-
-### Daemon
-
-```
-mcpr start                     Start daemon (background)
-mcpr start --foreground        Start in foreground (Docker/systemd)
-mcpr stop                      Stop proxies + relay + daemon
-mcpr restart                   Stop + start, re-launch proxies and relay
-mcpr status                    PID, port, uptime, proxy list
-```
-
-### Proxy
-
-```
-mcpr proxy run [config]        Run a proxy from a config file (--replace)
-mcpr proxy start <name>        Start a stopped proxy from saved config
-mcpr proxy stop [name]         Stop a proxy (--all)
-mcpr proxy restart [name]      Restart a proxy from saved config (--all)
-mcpr proxy list                List all proxies and their status (--json)
-```
-
-### Relay
-
-```
-mcpr relay run [config]        Run relay in foreground (no daemon required)
-mcpr relay start [config]      Start relay in background (requires daemon)
-mcpr relay stop                Stop the relay
-mcpr relay restart [config]    Restart relay (uses saved config if omitted)
-mcpr relay status              Show relay PID, port, uptime
-```
-
-### Setup
-
-```
-mcpr proxy setup               Interactive onboarding via cli
-```
-
-### Observe
-
-```
-mcpr proxy stats [name]        Per-tool metrics (--since, --json)
-mcpr proxy logs [name]         Request log (--follow, --tool, --method, --session, --status, --error_code, --since, --tail, --json)
-mcpr proxy slow [name]         Slow calls (--threshold, --tool, --follow, --since, --limit, --json)
-mcpr proxy status [name]       Overview: requests, error rate, active sessions (--since, --json)
-mcpr proxy sessions [name]     Sessions (--active, --client, --since, --limit, --json)
-mcpr proxy session <id>        Single session detail (prefix match) (--json)
-mcpr proxy clients [name]      Client breakdown (--since, --json)
-mcpr proxy schema [name]       Server schema (--changes, --unused, --method, --since, --limit, --json)
-```
-
-`[name]` is optional when one proxy is running — auto-detected from the daemon.
-
-### Storage
-
-```
-mcpr store stats               Database size and row counts
-mcpr store vacuum --before 7d  Delete old records (--proxy, --dry-run)
-```
-
-### Utility
-
-```
-mcpr update                    Update to latest version
-mcpr validate                  Validate mcpr.toml (--dump to print resolved config)
-mcpr version                   Print version (JSON)
-```
-
-All query commands support `--json` for piping into `jq` or scripts.
+The CLI manages the daemon, proxies, and relay, and queries the local SQLite store. See [docs/CLI.md](docs/CLI.md) for the full command reference.
 
 ---
 
 ## Roadmap
 
-**Routing**
-- [x] JSON-RPC routing
+**Routing & Network**
+- [x] JSON-RPC routing 
+- [x] Widget CSP rewriting (auto-detection, per-platform adaptation)
+- [ ] Widgets mode (Server endpoint, statics)
 - [ ] Multi-server routing (one mcpr URL, many MCP backends)
 
 **Observability**
 - [x] MCP request logs, session tracking, AI client tracking
 - [x] MCP schema capture with change tracking
 - [x] Per-tool metrics (calls, error%, p50, p95, max, bytes)
-- [x] Widget CSP rewriting (auto-detection, per-platform adaptation)
 - [x] Cloud dashboard sync ([mcpr.app](https://cloud.mcpr.app))
 
 **Auth**
-- [ ] Token API auth at the proxy
-- [ ] OAuth 2.1 at the proxy (legacy auth, OAuth providers, or in-house)
+- [ ] OAuth 2.1 (Auth Provider, Legacy Auth)
+- [ ] Multiple Auth Mode for one server
+- [ ] Token API auth (Optional because mcp apps support oauth 2.1 only)
 
 **Security**
 - [ ] Per-tool access control

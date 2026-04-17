@@ -1,6 +1,8 @@
 # CLI Reference
 
-The CLI **manages the daemon, proxy, and relay processes** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](CONFIGURATION.md). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full multi-process model.
+The CLI **manages the daemon, proxy, and relay processes** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](proxy/PROXY_CONFIGURATION.md). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full multi-process model.
+
+> Running in a container? The [Docker image](DOCKER.md) wraps the daemon + proxy flow behind a single `docker run` command. The CLI commands below still apply inside the container via `docker exec`.
 
 Three responsibilities:
 1. **Lifecycle** — start/stop the daemon supervisor, individual proxies, and the relay server.
