@@ -274,7 +274,7 @@ mcpr relay status              Show relay PID, port, uptime
 ### Setup
 
 ```
-mcpr proxy setup               Interactive wizard — auth, project, server, token, writes mcpr.toml
+mcpr proxy setup               Interactive onboarding via cli
 ```
 
 ### Observe
