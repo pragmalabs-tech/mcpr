@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 
-pub use mcpr_core::proxy::{CspMode, parse_csp_mode};
+pub use mcpr_core::proxy::Mode as CspMode;
+pub use mcpr_core::proxy::{CspConfig, DirectivePolicy, WidgetScoped};
 use mcpr_tunnel::RelayConfig;
 
 const CONFIG_FILE: &str = "mcpr.toml";
@@ -521,12 +522,128 @@ pub struct RuntimeOptions {
 
 // ── TOML config file ────────────────────────────────────────────────────
 
-/// `[csp]` table in config file
+/// `[csp]` table in config file.
+///
+/// The canonical shape is one sub-table per directive plus an optional
+/// `[[csp.widget]]` array:
+///
+/// ```toml
+/// [csp.connectDomains]
+/// domains = ["api.example.com"]
+/// mode    = "extend"
+///
+/// [csp.resourceDomains]
+/// domains = ["cdn.example.com"]
+/// mode    = "extend"
+///
+/// [csp.frameDomains]
+/// domains = []
+/// mode    = "replace"
+///
+/// [[csp.widget]]
+/// match              = "ui://widget/payment*"
+/// connectDomains     = ["api.stripe.com"]
+/// connectDomainsMode = "extend"
+/// ```
+///
+/// The legacy flat shape (`csp.mode` + `csp.domains`) is still accepted for
+/// one release and folded into `connectDomains` and `resourceDomains`. A
+/// validation warning nudges operators to migrate.
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
 struct FileCspConfig {
+    // -- Legacy flat shape (deprecated) --
     mode: Option<String>,
     domains: Vec<String>,
+
+    // -- Canonical per-directive shape --
+    #[serde(rename = "connectDomains")]
+    connect_domains: Option<FileDirectivePolicy>,
+    #[serde(rename = "resourceDomains")]
+    resource_domains: Option<FileDirectivePolicy>,
+    #[serde(rename = "frameDomains")]
+    frame_domains: Option<FileDirectivePolicy>,
+
+    #[serde(rename = "widget")]
+    widgets: Vec<WidgetScoped>,
+}
+
+/// Per-directive policy as it appears in the config file.
+#[derive(serde::Deserialize, Default)]
+#[serde(default)]
+struct FileDirectivePolicy {
+    domains: Vec<String>,
+    mode: Option<String>,
+}
+
+/// Parse a string into the core `Mode` enum. Unknown values return `None`
+/// so validation can surface the error.
+fn parse_mode(s: &str) -> Option<CspMode> {
+    match s.to_lowercase().as_str() {
+        "extend" => Some(CspMode::Extend),
+        "replace" | "override" => Some(CspMode::Replace),
+        _ => None,
+    }
+}
+
+impl FileDirectivePolicy {
+    fn into_policy(self, default_mode: CspMode) -> DirectivePolicy {
+        let mode = self
+            .mode
+            .as_deref()
+            .and_then(parse_mode)
+            .unwrap_or(default_mode);
+        DirectivePolicy {
+            domains: self.domains,
+            mode,
+        }
+    }
+}
+
+impl FileCspConfig {
+    /// Lower the file representation into a runtime [`CspConfig`].
+    ///
+    /// Precedence rules:
+    /// - If `connectDomains` / `resourceDomains` / `frameDomains` are present,
+    ///   they fully define those directives.
+    /// - Otherwise the legacy `mode` + `domains` pair fills both
+    ///   `connectDomains` and `resourceDomains` with the same values, matching
+    ///   what the previous implementation did when injecting extras.
+    /// - `frameDomains` defaults to `replace` with an empty domain list.
+    fn into_runtime(self) -> CspConfig {
+        let legacy_mode = self
+            .mode
+            .as_deref()
+            .and_then(parse_mode)
+            .unwrap_or(CspMode::Extend);
+        let legacy_domains = self.domains;
+
+        let connect = match self.connect_domains {
+            Some(p) => p.into_policy(CspMode::Extend),
+            None => DirectivePolicy {
+                domains: legacy_domains.clone(),
+                mode: legacy_mode,
+            },
+        };
+        let resource = match self.resource_domains {
+            Some(p) => p.into_policy(CspMode::Extend),
+            None => DirectivePolicy {
+                domains: legacy_domains,
+                mode: legacy_mode,
+            },
+        };
+        let frame = match self.frame_domains {
+            Some(p) => p.into_policy(CspMode::Replace),
+            None => DirectivePolicy::strict(),
+        };
+
+        CspConfig {
+            connect_domains: connect,
+            resource_domains: resource,
+            frame_domains: frame,
+            widgets: self.widgets,
+        }
+    }
 }
 
 /// Entry in `[[relay.tokens]]` array
@@ -676,8 +793,8 @@ pub struct GatewayConfig {
     pub mcp: Option<String>,
     pub widgets: Option<String>,
     pub port: Option<u16>,
-    pub csp_domains: Vec<String>,
-    pub csp_mode: CspMode,
+    /// Resolved CSP config, ready to hand to `RewriteConfig`.
+    pub csp: CspConfig,
     pub relay_url: Option<String>,
     pub tunnel_token: Option<String>,
     pub tunnel_subdomain: Option<String>,
@@ -904,15 +1021,50 @@ pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
                 issues.push(("warn", "port 0 will bind to a random port".to_string()));
             }
 
-            // Validate CSP mode
-            if let Some(ref mode) = config.csp.mode
-                && mode != "extend"
-                && mode != "override"
-            {
+            // Legacy `csp.mode` + `csp.domains` flat shape: valid values are
+            // `extend` and `replace`. `override` is the old spelling — accept
+            // it but warn so operators migrate.
+            if let Some(ref mode) = config.csp.mode {
+                match mode.to_lowercase().as_str() {
+                    "extend" | "replace" => {}
+                    "override" => issues.push((
+                        "warn",
+                        "csp.mode = \"override\" is deprecated; use \"replace\"".to_string(),
+                    )),
+                    other => issues.push((
+                        "error",
+                        format!("invalid csp.mode: {other} (expected: extend, replace)"),
+                    )),
+                }
+            }
+            if !config.csp.domains.is_empty() && config.csp.connect_domains.is_none() {
                 issues.push((
-                    "error",
-                    format!("invalid csp.mode: {mode} (expected: extend, override)"),
+                    "warn",
+                    "csp.domains is deprecated; declare csp.connectDomains and csp.resourceDomains instead"
+                        .to_string(),
                 ));
+            }
+
+            // Validate per-directive modes and widget-scoped overrides.
+            for (name, policy) in [
+                ("csp.connectDomains.mode", &config.csp.connect_domains),
+                ("csp.resourceDomains.mode", &config.csp.resource_domains),
+                ("csp.frameDomains.mode", &config.csp.frame_domains),
+            ] {
+                if let Some(p) = policy
+                    && let Some(m) = p.mode.as_deref()
+                    && parse_mode(m).is_none()
+                {
+                    issues.push((
+                        "error",
+                        format!("invalid {name}: {m} (expected: extend, replace)"),
+                    ));
+                }
+            }
+            for (idx, w) in config.csp.widgets.iter().enumerate() {
+                if w.match_pattern.is_empty() {
+                    issues.push(("error", format!("csp.widget[{idx}].match is required")));
+                }
             }
 
             // Validate log format
@@ -996,20 +1148,15 @@ fn load_gateway(
     config_path: Option<std::path::PathBuf>,
     runtime: RuntimeOptions,
 ) -> Mode {
-    let csp_mode = match file.csp.mode.as_deref() {
-        Some(m) => parse_csp_mode(m),
-        None => CspMode::default(),
-    };
-
     let name = resolve_proxy_name(file.name.as_deref(), config_path.as_deref());
+    let csp = file.csp.into_runtime();
 
     Mode::Gateway(Box::new(GatewayConfig {
         name,
         mcp: file.mcp,
         widgets: file.widgets,
         port: file.port,
-        csp_domains: file.csp.domains,
-        csp_mode,
+        csp,
         relay_url: Some(
             file.tunnel
                 .relay_url
@@ -1189,6 +1336,116 @@ mod tests {
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert!(config.cloud.token.is_none());
         assert!(config.cloud.server.is_none());
+    }
+
+    // ── CSP config parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn csp_config__canonical_shape_parses() {
+        let toml_str = r#"
+            [csp.connectDomains]
+            domains = ["api.example.com"]
+            mode    = "extend"
+
+            [csp.resourceDomains]
+            domains = ["cdn.example.com"]
+            mode    = "extend"
+
+            [csp.frameDomains]
+            domains = []
+            mode    = "replace"
+
+            [[csp.widget]]
+            match              = "ui://widget/payment*"
+            connectDomains     = ["api.stripe.com"]
+            connectDomainsMode = "extend"
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.csp.into_runtime();
+        assert_eq!(cfg.connect_domains.domains, vec!["api.example.com"]);
+        assert_eq!(cfg.connect_domains.mode, CspMode::Extend);
+        assert_eq!(cfg.resource_domains.domains, vec!["cdn.example.com"]);
+        assert_eq!(cfg.frame_domains.mode, CspMode::Replace);
+        assert_eq!(cfg.widgets.len(), 1);
+        assert_eq!(cfg.widgets[0].match_pattern, "ui://widget/payment*");
+        assert_eq!(cfg.widgets[0].connect_domains, vec!["api.stripe.com"]);
+        assert_eq!(cfg.widgets[0].connect_domains_mode, CspMode::Extend);
+    }
+
+    #[test]
+    fn csp_config__legacy_flat_shape_populates_connect_and_resource() {
+        let toml_str = r#"
+            [csp]
+            mode    = "extend"
+            domains = ["api.legacy.com"]
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.csp.into_runtime();
+        assert_eq!(cfg.connect_domains.domains, vec!["api.legacy.com"]);
+        assert_eq!(cfg.resource_domains.domains, vec!["api.legacy.com"]);
+        assert_eq!(cfg.connect_domains.mode, CspMode::Extend);
+        assert_eq!(cfg.frame_domains.mode, CspMode::Replace);
+    }
+
+    #[test]
+    fn csp_config__legacy_override_maps_to_replace() {
+        let toml_str = r#"
+            [csp]
+            mode    = "override"
+            domains = ["api.legacy.com"]
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.csp.into_runtime();
+        assert_eq!(cfg.connect_domains.mode, CspMode::Replace);
+        assert_eq!(cfg.resource_domains.mode, CspMode::Replace);
+    }
+
+    #[test]
+    fn csp_config__empty_defaults_strict_frames() {
+        let file: FileConfig = toml::from_str("").unwrap();
+        let cfg = file.csp.into_runtime();
+        assert!(cfg.connect_domains.domains.is_empty());
+        assert!(cfg.resource_domains.domains.is_empty());
+        assert_eq!(cfg.frame_domains.mode, CspMode::Replace);
+        assert!(cfg.widgets.is_empty());
+    }
+
+    #[test]
+    fn csp_config__canonical_overrides_legacy_when_both_present() {
+        // An operator partially migrated: they have the new connectDomains
+        // block plus a leftover legacy mode+domains. The new block wins; the
+        // legacy shape only fills directives the operator hasn't migrated yet.
+        let toml_str = r#"
+            [csp]
+            mode    = "extend"
+            domains = ["legacy.com"]
+
+            [csp.connectDomains]
+            domains = ["new.com"]
+            mode    = "replace"
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.csp.into_runtime();
+        assert_eq!(cfg.connect_domains.domains, vec!["new.com"]);
+        assert_eq!(cfg.connect_domains.mode, CspMode::Replace);
+        // resourceDomains still comes from the legacy fallback.
+        assert_eq!(cfg.resource_domains.domains, vec!["legacy.com"]);
+        assert_eq!(cfg.resource_domains.mode, CspMode::Extend);
+    }
+
+    #[test]
+    fn parse_mode__accepts_known_values() {
+        assert_eq!(parse_mode("extend"), Some(CspMode::Extend));
+        assert_eq!(parse_mode("replace"), Some(CspMode::Replace));
+        assert_eq!(parse_mode("override"), Some(CspMode::Replace));
+        assert_eq!(parse_mode("EXTEND"), Some(CspMode::Extend));
+    }
+
+    #[test]
+    fn parse_mode__rejects_unknown() {
+        assert_eq!(parse_mode(""), None);
+        assert_eq!(parse_mode("strict"), None);
+        assert_eq!(parse_mode("off"), None);
     }
 
     // ── Proxy name resolution ──────────────────────────────────────────

@@ -1,19 +1,49 @@
+//! # Response rewriting for widget CSP
+//!
+//! Mutates JSON-RPC response bodies so widgets see the right CSP regardless of
+//! which host renders them.
+//!
+//! Three things happen on every widget meta rewrite:
+//!
+//! 1. **Aggregate.** Upstream CSP domains are collected from both the OpenAI
+//!    (`openai/widgetCSP`) and spec (`ui.csp`) shapes, per directive.
+//! 2. **Merge.** [`super::csp::effective_domains`] applies the per-directive
+//!    mode, widget-scoped overrides, and proxy URL to produce one domain list
+//!    per directive.
+//! 3. **Emit both shapes.** The merge result is written to *both*
+//!    `openai/widgetCSP` (snake_case) and `ui.csp` (camelCase). ChatGPT reads
+//!    the former, Claude and VS Code read the latter; unknown keys are
+//!    ignored, so emitting both means the same declared config works on every
+//!    host.
+//!
+//! A deep scan walks the entire response afterwards and prepends the proxy URL
+//! to any CSP domain array it finds, catching servers that embed CSP in
+//! non-standard locations.
+//!
+//! Response body `text` and `blob` fields are never touched — widget HTML is
+//! served verbatim.
+
 use serde_json::Value;
 
-use super::csp::CspMode;
+use super::csp::{CspConfig, Directive, effective_domains};
 use crate::protocol as jsonrpc;
 
+/// Runtime configuration for response rewriting.
 #[derive(Clone)]
 pub struct RewriteConfig {
+    /// Proxy URL (scheme + host, no trailing slash) to insert into every CSP
+    /// array so widgets can reach the proxy.
     pub proxy_url: String,
+    /// Bare proxy host (no scheme) used when rewriting `widgetDomain`.
     pub proxy_domain: String,
+    /// Upstream MCP URL, used to recognise and strip upstream self-references
+    /// from the CSP arrays the server returns.
     pub mcp_upstream: String,
-    pub extra_csp_domains: Vec<String>,
-    pub csp_mode: CspMode,
+    /// Declarative CSP config — global policies plus widget-scoped overrides.
+    pub csp: CspConfig,
 }
 
-/// Rewrite a JSON-RPC response based on the method.
-/// Phase 1: inject proxy URL into known metadata fields (no dynamic learning).
+/// Rewrite a JSON-RPC response in place for the given method.
 pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) {
     match method {
         jsonrpc::TOOLS_LIST => {
@@ -24,15 +54,14 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
             {
                 for tool in tools {
                     if let Some(meta) = tool.get_mut("meta") {
-                        rewrite_widget_meta(meta, config);
+                        rewrite_widget_meta(meta, None, config);
                     }
                 }
             }
         }
         jsonrpc::TOOLS_CALL => {
-            // _meta is at result.meta in the JSON-RPC response
             if let Some(meta) = body.get_mut("result").and_then(|r| r.get_mut("meta")) {
-                rewrite_widget_meta(meta, config);
+                rewrite_widget_meta(meta, None, config);
             }
         }
         jsonrpc::RESOURCES_LIST => {
@@ -42,8 +71,12 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 .and_then(|r| r.as_array_mut())
             {
                 for resource in resources {
+                    let uri = resource
+                        .get("uri")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     if let Some(meta) = resource.get_mut("meta") {
-                        rewrite_widget_meta(meta, config);
+                        rewrite_widget_meta(meta, uri.as_deref(), config);
                     }
                 }
             }
@@ -55,8 +88,14 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 .and_then(|t| t.as_array_mut())
             {
                 for template in templates {
+                    // Templates expose `uriTemplate`, not a concrete URI; treat
+                    // it as the match key so operators can glob on template IDs.
+                    let uri = template
+                        .get("uriTemplate")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     if let Some(meta) = template.get_mut("meta") {
-                        rewrite_widget_meta(meta, config);
+                        rewrite_widget_meta(meta, uri.as_deref(), config);
                     }
                 }
             }
@@ -68,50 +107,209 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 .and_then(|c| c.as_array_mut())
             {
                 for content in contents {
+                    let uri = content
+                        .get("uri")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
                     if let Some(meta) = content.get_mut("meta") {
-                        rewrite_widget_meta(meta, config);
+                        rewrite_widget_meta(meta, uri.as_deref(), config);
                     }
                 }
             }
         }
-        _ => {} // passthrough
+        _ => {}
     }
 
-    // Always do a deep scan on the entire response to catch any CSP arrays we missed
+    // Safety net: any CSP-shaped domain array elsewhere in the tree still gets
+    // the proxy URL. The merge rules above do not run here — this pass only
+    // guarantees the proxy URL is present.
     inject_proxy_into_all_csp(body, config);
 }
 
-/// Rewrite widget metadata: domain, CSP arrays (both OpenAI and Claude formats).
-fn rewrite_widget_meta(meta: &mut Value, config: &RewriteConfig) {
-    // openai/widgetDomain → proxy domain
+/// Rewrite a widget metadata object.
+///
+/// Goal: an operator declares their CSP once in `mcpr.toml`, and the widget
+/// works on every host. Hosts disagree about where they read CSP from —
+/// ChatGPT reads `openai/widgetCSP` (snake_case), Claude and VS Code read
+/// `ui.csp` (camelCase). Instead of detecting the host, the rewrite does the
+/// same merge once and emits the result to *both* shapes. Extra keys are
+/// ignored by hosts that don't understand them.
+///
+/// Upstream domains that feed into the merge are aggregated from both shapes
+/// so a server declaring only one shape still informs the merge for the other.
+///
+/// `explicit_uri` is the resource URI the caller already resolved (for example,
+/// a `resources/read` caller knows the URI from the containing object). When
+/// missing, the URI is inferred from `meta.ui.resourceUri` or the legacy
+/// `openai/outputTemplate` field. The URI picks which `[[csp.widget]]`
+/// overrides apply.
+///
+/// The rewrite is skipped entirely for meta objects that show no sign of being
+/// a widget — a tool call result's `meta`, for example — so non-widget metas
+/// are not polluted with CSP fields they don't need.
+fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &RewriteConfig) {
     if meta.get("openai/widgetDomain").is_some() {
         meta["openai/widgetDomain"] = Value::String(config.proxy_domain.clone());
     }
 
-    // openai/widgetCSP → rewrite CSP arrays
-    rewrite_csp_object(meta, "openai/widgetCSP", "resource_domains", config);
-    rewrite_csp_object(meta, "openai/widgetCSP", "connect_domains", config);
-
-    // ui.csp → rewrite CSP arrays (Claude format)
-    if let Some(ui) = meta.get_mut("ui") {
-        rewrite_csp_object(ui, "csp", "connectDomains", config);
-        rewrite_csp_object(ui, "csp", "resourceDomains", config);
+    if !is_widget_meta(meta, explicit_uri) {
+        inject_proxy_into_all_csp(meta, config);
+        return;
     }
 
-    // Deep scan: ensure proxy URL is in ALL CSP domain arrays anywhere in the tree
+    let inferred = explicit_uri
+        .map(String::from)
+        .or_else(|| extract_resource_uri(meta));
+    let uri = inferred.as_deref();
+    let upstream_host = strip_scheme(&config.mcp_upstream);
+
+    // Merge once per directive, using the union of upstream declarations from
+    // both shapes so a server that only declared `ui.csp` still informs the
+    // merge for the `openai/widgetCSP` output and vice versa.
+    let connect = merged_domains(meta, Directive::Connect, uri, &upstream_host, config);
+    let resource = merged_domains(meta, Directive::Resource, uri, &upstream_host, config);
+    let frame = merged_domains(meta, Directive::Frame, uri, &upstream_host, config);
+
+    write_openai_csp(meta, &connect, &resource, &frame);
+    write_spec_csp(meta, &connect, &resource, &frame);
+
     inject_proxy_into_all_csp(meta, config);
 }
 
-/// Recursively find any CSP domain arrays and ensure proxy URL is present.
+/// Return `true` when the meta object belongs to a widget, either because it
+/// already holds widget-shaped fields or because the caller resolved an
+/// explicit resource URI for it.
+fn is_widget_meta(meta: &Value, explicit_uri: Option<&str>) -> bool {
+    if explicit_uri.is_some() {
+        return true;
+    }
+    meta.get("openai/widgetCSP").is_some()
+        || meta.get("openai/widgetDomain").is_some()
+        || meta.get("openai/outputTemplate").is_some()
+        || meta.pointer("/ui/csp").is_some()
+        || meta.pointer("/ui/resourceUri").is_some()
+        || meta.pointer("/ui/domain").is_some()
+}
+
+/// Extract a resource URI from a widget meta object. Prefers the spec field
+/// (`ui.resourceUri`) and falls back to the OpenAI legacy key.
+fn extract_resource_uri(meta: &Value) -> Option<String> {
+    if let Some(u) = meta.pointer("/ui/resourceUri").and_then(|v| v.as_str()) {
+        return Some(u.to_string());
+    }
+    meta.get("openai/outputTemplate")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// Compute the effective domain list for one directive, seeded from whatever
+/// the upstream server declared in either CSP shape.
+fn merged_domains(
+    meta: &Value,
+    directive: Directive,
+    resource_uri: Option<&str>,
+    upstream_host: &str,
+    config: &RewriteConfig,
+) -> Vec<String> {
+    let upstream = collect_upstream(meta, directive);
+    effective_domains(
+        &config.csp,
+        directive,
+        resource_uri,
+        &upstream,
+        upstream_host,
+        &config.proxy_url,
+    )
+}
+
+/// Gather every string domain the upstream declared for `directive`, looking
+/// at both `openai/widgetCSP` and `ui.csp`. Duplicates are removed in order.
+fn collect_upstream(meta: &Value, directive: Directive) -> Vec<String> {
+    let (openai_key, spec_key) = match directive {
+        Directive::Connect => ("connect_domains", "connectDomains"),
+        Directive::Resource => ("resource_domains", "resourceDomains"),
+        Directive::Frame => ("frame_domains", "frameDomains"),
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut append = |arr: &Vec<Value>| {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                let s = s.to_string();
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+    };
+
+    if let Some(arr) = meta
+        .get("openai/widgetCSP")
+        .and_then(|c| c.get(openai_key))
+        .and_then(|v| v.as_array())
+    {
+        append(arr);
+    }
+    if let Some(arr) = meta
+        .pointer("/ui/csp")
+        .and_then(|c| c.get(spec_key))
+        .and_then(|v| v.as_array())
+    {
+        append(arr);
+    }
+    out
+}
+
+/// Write the OpenAI-shaped CSP block, creating the parent object when needed.
+fn write_openai_csp(meta: &mut Value, connect: &[String], resource: &[String], frame: &[String]) {
+    let Some(obj) = meta.as_object_mut() else {
+        return;
+    };
+    obj.insert(
+        "openai/widgetCSP".to_string(),
+        serde_json::json!({
+            "connect_domains": connect,
+            "resource_domains": resource,
+            "frame_domains": frame,
+        }),
+    );
+}
+
+/// Write the spec-shaped CSP block under `ui.csp`, creating `ui` when needed.
+fn write_spec_csp(meta: &mut Value, connect: &[String], resource: &[String], frame: &[String]) {
+    let Some(obj) = meta.as_object_mut() else {
+        return;
+    };
+    let ui = obj
+        .entry("ui".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !ui.is_object() {
+        *ui = Value::Object(serde_json::Map::new());
+    }
+    let ui_obj = ui.as_object_mut().unwrap();
+    ui_obj.insert(
+        "csp".to_string(),
+        serde_json::json!({
+            "connectDomains": connect,
+            "resourceDomains": resource,
+            "frameDomains": frame,
+        }),
+    );
+}
+
+/// Recursively ensure the proxy URL is present in every CSP-shaped domain array.
+/// Does not apply the merge rules — that would require URI context the deep scan
+/// does not have. The only guarantee is "proxy URL is reachable from the widget."
 fn inject_proxy_into_all_csp(value: &mut Value, config: &RewriteConfig) {
     match value {
         Value::Object(map) => {
-            // Check known CSP array keys at this level
             for key in [
-                "resource_domains",
                 "connect_domains",
+                "resource_domains",
+                "frame_domains",
                 "connectDomains",
                 "resourceDomains",
+                "frameDomains",
             ] {
                 if let Some(arr) = map.get_mut(key).and_then(|v| v.as_array_mut()) {
                     let has_proxy = arr.iter().any(|v| v.as_str() == Some(&config.proxy_url));
@@ -120,7 +318,6 @@ fn inject_proxy_into_all_csp(value: &mut Value, config: &RewriteConfig) {
                     }
                 }
             }
-            // Recurse into all values
             for (_, v) in map.iter_mut() {
                 inject_proxy_into_all_csp(v, config);
             }
@@ -134,82 +331,48 @@ fn inject_proxy_into_all_csp(value: &mut Value, config: &RewriteConfig) {
     }
 }
 
-/// Rewrite a CSP domain array inside a parent object.
-/// - Extend mode: keep external domains from upstream, strip localhost/upstream, add extras + tunnel
-/// - Override mode: ignore upstream entirely, use only configured domains + tunnel domain
-fn rewrite_csp_object(parent: &mut Value, obj_key: &str, array_key: &str, config: &RewriteConfig) {
-    let Some(obj) = parent.get_mut(obj_key) else {
-        return;
-    };
-    let Some(arr) = obj.get_mut(array_key).and_then(|v| v.as_array_mut()) else {
-        return;
-    };
-
-    // Always start with proxy (tunnel) domain
-    let mut new_domains: Vec<String> = vec![config.proxy_url.clone()];
-
-    match config.csp_mode {
-        CspMode::Extend => {
-            let upstream_domain = config
-                .mcp_upstream
-                .trim_start_matches("https://")
-                .trim_start_matches("http://");
-
-            for entry in arr.iter() {
-                if let Some(domain) = entry.as_str() {
-                    // Skip localhost/upstream — we replace them with proxy
-                    if domain.contains("localhost")
-                        || domain.contains("127.0.0.1")
-                        || domain.contains(upstream_domain)
-                    {
-                        continue;
-                    }
-                    if !new_domains.contains(&domain.to_string()) {
-                        new_domains.push(domain.to_string());
-                    }
-                }
-            }
-        }
-        CspMode::Override => {
-            // Ignore all upstream domains
-        }
-    }
-
-    // Append extra CSP domains from config
-    for extra in &config.extra_csp_domains {
-        if !new_domains.contains(extra) {
-            new_domains.push(extra.clone());
-        }
-    }
-
-    *obj.get_mut(array_key).unwrap() =
-        Value::Array(new_domains.into_iter().map(Value::String).collect());
+fn strip_scheme(url: &str) -> String {
+    url.trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .to_string()
 }
 
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use crate::proxy::csp::{DirectivePolicy, Mode, WidgetScoped};
     use serde_json::json;
 
-    fn test_config() -> RewriteConfig {
+    // ── helpers ────────────────────────────────────────────────────────────
+
+    fn rewrite_config() -> RewriteConfig {
         RewriteConfig {
             proxy_url: "https://abc.tunnel.example.com".into(),
             proxy_domain: "abc.tunnel.example.com".into(),
             mcp_upstream: "http://localhost:9000".into(),
-            extra_csp_domains: vec![],
-            csp_mode: CspMode::Extend,
+            csp: CspConfig::default(),
         }
     }
 
-    // ── Standalone proxy mode: resources/read must NOT touch HTML text ──
+    fn as_strs(arr: &Value) -> Vec<&str> {
+        arr.as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect()
+    }
+
+    // ── resources/read: HTML body is never touched ─────────────────────────
 
     #[test]
     fn rewrite_response__resources_read_preserves_html() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
+            "jsonrpc": "2.0", "id": 1,
             "result": {
                 "contents": [{
                     "uri": "ui://widget/question",
@@ -218,24 +381,25 @@ mod tests {
                 }]
             }
         });
-        let original_html = body["result"]["contents"][0]["text"]
+        let original = body["result"]["contents"][0]["text"]
             .as_str()
             .unwrap()
             .to_string();
 
         rewrite_response("resources/read", &mut body, &config);
 
-        // HTML text must be untouched — rewrite only applies to meta
-        let html = body["result"]["contents"][0]["text"].as_str().unwrap();
-        assert_eq!(html, original_html);
+        assert_eq!(
+            body["result"]["contents"][0]["text"].as_str().unwrap(),
+            original
+        );
     }
+
+    // ── resources/read: rewrites meta, not text ────────────────────────────
 
     #[test]
     fn rewrite_response__resources_read_rewrites_meta_not_text() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
             "result": {
                 "contents": [{
                     "uri": "ui://widget/question",
@@ -255,31 +419,24 @@ mod tests {
         rewrite_response("resources/read", &mut body, &config);
 
         let content = &body["result"]["contents"][0];
-        // Text untouched
         assert_eq!(
             content["text"].as_str().unwrap(),
             "<html><body>Hello</body></html>"
         );
-        // Meta rewritten
         assert_eq!(
             content["meta"]["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
         );
-        let resource_domains: Vec<&str> = content["meta"]["openai/widgetCSP"]["resource_domains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(resource_domains.contains(&"https://abc.tunnel.example.com"));
-        assert!(!resource_domains.iter().any(|d| d.contains("localhost")));
+        let resources = as_strs(&content["meta"]["openai/widgetCSP"]["resource_domains"]);
+        assert!(resources.contains(&"https://abc.tunnel.example.com"));
+        assert!(!resources.iter().any(|d| d.contains("localhost")));
     }
 
-    // ── tools/list: rewrite widget meta on tools ──
+    // ── tools/list: per-tool meta rewrite ──────────────────────────────────
 
     #[test]
     fn rewrite_response__tools_list_rewrites_widget_domain() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "tools": [{
@@ -302,23 +459,17 @@ mod tests {
             meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
         );
-        // External domains preserved, localhost stripped
-        let connect: Vec<&str> = meta["openai/widgetCSP"]["connect_domains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
+        let connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         assert!(connect.contains(&"https://abc.tunnel.example.com"));
         assert!(connect.contains(&"https://api.external.com"));
         assert!(!connect.iter().any(|d| d.contains("localhost")));
     }
 
-    // ── tools/call: rewrite meta ──
+    // ── tools/call: rewrites result.meta ───────────────────────────────────
 
     #[test]
     fn rewrite_response__tools_call_rewrites_meta() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "content": [{"type": "text", "text": "some result"}],
@@ -339,18 +490,17 @@ mod tests {
                 .unwrap(),
             "abc.tunnel.example.com"
         );
-        // Tool result text content is NOT touched
         assert_eq!(
             body["result"]["content"][0]["text"].as_str().unwrap(),
             "some result"
         );
     }
 
-    // ── resources/list: rewrite meta on each resource ──
+    // ── resources/list ─────────────────────────────────────────────────────
 
     #[test]
     fn rewrite_response__resources_list_rewrites_meta() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "resources": [{
@@ -373,11 +523,11 @@ mod tests {
         );
     }
 
-    // ── resources/templates/list: rewrite meta on each template ──
+    // ── resources/templates/list ───────────────────────────────────────────
 
     #[test]
     fn rewrite_response__resources_templates_list_rewrites_meta() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "resourceTemplates": [{
@@ -401,21 +551,16 @@ mod tests {
             meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
         );
-        let resource: Vec<&str> = meta["openai/widgetCSP"]["resource_domains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(resource.contains(&"https://abc.tunnel.example.com"));
-        assert!(!resource.iter().any(|d| d.contains("localhost")));
+        let resources = as_strs(&meta["openai/widgetCSP"]["resource_domains"]);
+        assert!(resources.contains(&"https://abc.tunnel.example.com"));
+        assert!(!resources.iter().any(|d| d.contains("localhost")));
     }
 
-    // ── CSP rewriting details ──
+    // ── CSP merge: localhost stripping ─────────────────────────────────────
 
     #[test]
     fn rewrite_response__csp_strips_localhost() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "tools": [{
@@ -436,23 +581,23 @@ mod tests {
 
         rewrite_response("tools/list", &mut body, &config);
 
-        let domains: Vec<&str> =
-            body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
+        let domains =
+            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
         assert_eq!(
             domains,
             vec!["https://abc.tunnel.example.com", "https://cdn.external.com"]
         );
     }
 
+    // ── CSP merge: declared global domains are appended ────────────────────
+
     #[test]
-    fn rewrite_response__csp_extra_domains_appended() {
-        let mut config = test_config();
-        config.extra_csp_domains = vec!["https://extra.example.com".into()];
+    fn rewrite_response__global_connect_domains_appended() {
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://extra.example.com".into()],
+            mode: Mode::Extend,
+        };
 
         let mut body = json!({
             "result": {
@@ -469,19 +614,17 @@ mod tests {
 
         rewrite_response("tools/list", &mut body, &config);
 
-        let domains: Vec<&str> =
-            body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
+        let domains =
+            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
         assert!(domains.contains(&"https://extra.example.com"));
+        assert!(domains.contains(&"https://abc.tunnel.example.com"));
     }
+
+    // ── CSP merge: no duplicate proxy entries ──────────────────────────────
 
     #[test]
     fn rewrite_response__csp_no_duplicate_proxy() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "tools": [{
@@ -497,25 +640,20 @@ mod tests {
 
         rewrite_response("tools/list", &mut body, &config);
 
-        let domains: Vec<&str> =
-            body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
-        let proxy_count = domains
+        let domains =
+            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
+        let count = domains
             .iter()
             .filter(|d| **d == "https://abc.tunnel.example.com")
             .count();
-        assert_eq!(proxy_count, 1);
+        assert_eq!(count, 1);
     }
 
-    // ── Claude format (ui.csp) ──
+    // ── Claude format parity ───────────────────────────────────────────────
 
     #[test]
     fn rewrite_response__claude_csp_format() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "tools": [{
@@ -535,29 +673,19 @@ mod tests {
         rewrite_response("tools/list", &mut body, &config);
 
         let meta = &body["result"]["tools"][0]["meta"]["ui"]["csp"];
-        let connect: Vec<&str> = meta["connectDomains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        let resource: Vec<&str> = meta["resourceDomains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
+        let connect = as_strs(&meta["connectDomains"]);
+        let resource = as_strs(&meta["resourceDomains"]);
         assert!(connect.contains(&"https://abc.tunnel.example.com"));
         assert!(resource.contains(&"https://abc.tunnel.example.com"));
         assert!(!connect.iter().any(|d| d.contains("localhost")));
         assert!(!resource.iter().any(|d| d.contains("localhost")));
     }
 
-    // ── Deep CSP injection ──
+    // ── Deep CSP injection fallback ────────────────────────────────────────
 
     #[test]
     fn rewrite_response__deep_csp_injection() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "content": [{
@@ -574,33 +702,23 @@ mod tests {
 
         rewrite_response("tools/call", &mut body, &config);
 
-        let domains: Vec<&str> =
-            body["result"]["content"][0]["deeply"]["nested"]["connect_domains"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
+        let domains = as_strs(&body["result"]["content"][0]["deeply"]["nested"]["connect_domains"]);
         assert!(domains.contains(&"https://abc.tunnel.example.com"));
     }
 
-    // ── Unknown methods are passthrough ──
+    // ── Unknown methods: only deep scan runs ───────────────────────────────
 
     #[test]
     fn rewrite_response__unknown_method_passthrough() {
-        let config = test_config();
+        let config = rewrite_config();
         let mut body = json!({
             "result": {
                 "data": "unchanged",
-                "meta": {
-                    "openai/widgetDomain": "should-stay.com"
-                }
+                "meta": { "openai/widgetDomain": "should-stay.com" }
             }
         });
         rewrite_response("notifications/message", &mut body, &config);
 
-        // meta.openai/widgetDomain should NOT be rewritten for unknown methods
-        // (only deep CSP injection runs, which doesn't touch widgetDomain)
         assert_eq!(
             body["result"]["meta"]["openai/widgetDomain"]
                 .as_str()
@@ -610,13 +728,19 @@ mod tests {
         assert_eq!(body["result"]["data"].as_str().unwrap(), "unchanged");
     }
 
-    // ── Override mode ──
+    // ── Global replace mode ───────────────────────────────────────────────
 
     #[test]
-    fn rewrite_response__override_mode_ignores_upstream() {
-        let mut config = test_config();
-        config.csp_mode = CspMode::Override;
-        config.extra_csp_domains = vec!["https://allowed.example.com".into()];
+    fn rewrite_response__replace_mode_ignores_upstream() {
+        let mut config = rewrite_config();
+        config.csp.resource_domains = DirectivePolicy {
+            domains: vec!["https://allowed.example.com".into()],
+            mode: Mode::Replace,
+        };
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://allowed.example.com".into()],
+            mode: Mode::Replace,
+        };
 
         let mut body = json!({
             "result": {
@@ -624,15 +748,8 @@ mod tests {
                     "name": "test",
                     "meta": {
                         "openai/widgetCSP": {
-                            "resource_domains": [
-                                "https://cdn.external.com",
-                                "https://api.external.com",
-                                "http://localhost:4444"
-                            ],
-                            "connect_domains": [
-                                "https://api.external.com",
-                                "http://localhost:9000"
-                            ]
+                            "resource_domains": ["https://cdn.external.com", "https://api.external.com"],
+                            "connect_domains": ["https://api.external.com", "http://localhost:9000"]
                         }
                     }
                 }]
@@ -641,29 +758,17 @@ mod tests {
 
         rewrite_response("tools/list", &mut body, &config);
 
-        let resource: Vec<&str> =
-            body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
-        // Only proxy + configured extras — no upstream domains
+        let resources =
+            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
         assert_eq!(
-            resource,
+            resources,
             vec![
                 "https://abc.tunnel.example.com",
                 "https://allowed.example.com"
             ]
         );
-
-        let connect: Vec<&str> =
-            body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
+        let connect =
+            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
         assert_eq!(
             connect,
             vec![
@@ -673,15 +778,130 @@ mod tests {
         );
     }
 
+    // ── Widget-scoped overrides ────────────────────────────────────────────
+
     #[test]
-    fn rewrite_response__override_mode_claude_format() {
-        let mut config = test_config();
-        config.csp_mode = CspMode::Override;
+    fn rewrite_response__widget_scope_matches_resource_uri() {
+        // A widget override should only apply when the resource URI matches.
+        let mut config = rewrite_config();
+        config.csp.widgets.push(WidgetScoped {
+            match_pattern: "ui://widget/payment*".into(),
+            connect_domains: vec!["https://api.stripe.com".into()],
+            connect_domains_mode: Mode::Extend,
+            ..Default::default()
+        });
+
+        let mut body = json!({
+            "result": {
+                "resources": [
+                    {
+                        "uri": "ui://widget/payment-form",
+                        "meta": {
+                            "openai/widgetCSP": { "connect_domains": [] }
+                        }
+                    },
+                    {
+                        "uri": "ui://widget/search",
+                        "meta": {
+                            "openai/widgetCSP": { "connect_domains": [] }
+                        }
+                    }
+                ]
+            }
+        });
+
+        rewrite_response("resources/list", &mut body, &config);
+
+        let payment_connect =
+            as_strs(&body["result"]["resources"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
+        assert!(payment_connect.contains(&"https://api.stripe.com"));
+
+        let search_connect =
+            as_strs(&body["result"]["resources"][1]["meta"]["openai/widgetCSP"]["connect_domains"]);
+        assert!(!search_connect.contains(&"https://api.stripe.com"));
+    }
+
+    #[test]
+    fn rewrite_response__widget_replace_mode_wipes_upstream() {
+        let mut config = rewrite_config();
+        config.csp.widgets.push(WidgetScoped {
+            match_pattern: "ui://widget/*".into(),
+            connect_domains: vec!["https://api.stripe.com".into()],
+            connect_domains_mode: Mode::Replace,
+            ..Default::default()
+        });
+
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/payment",
+                    "meta": {
+                        "openai/widgetCSP": {
+                            "connect_domains": [
+                                "https://api.external.com",
+                                "https://another.external.com"
+                            ]
+                        }
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/read", &mut body, &config);
+
+        let connect =
+            as_strs(&body["result"]["contents"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
+        assert_eq!(
+            connect,
+            vec!["https://abc.tunnel.example.com", "https://api.stripe.com"]
+        );
+    }
+
+    #[test]
+    fn rewrite_response__widget_uri_inferred_from_tool_meta() {
+        // tools/list responses do not carry a URI on the tool itself, but the
+        // widget resource URI lives in meta.ui.resourceUri; widget overrides
+        // should match against that.
+        let mut config = rewrite_config();
+        config.csp.widgets.push(WidgetScoped {
+            match_pattern: "ui://widget/payment*".into(),
+            connect_domains: vec!["https://api.stripe.com".into()],
+            connect_domains_mode: Mode::Extend,
+            ..Default::default()
+        });
 
         let mut body = json!({
             "result": {
                 "tools": [{
-                    "name": "test",
+                    "name": "take_payment",
+                    "meta": {
+                        "ui": { "resourceUri": "ui://widget/payment-form" },
+                        "openai/widgetCSP": { "connect_domains": [] }
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("tools/list", &mut body, &config);
+
+        let connect =
+            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
+        assert!(connect.contains(&"https://api.stripe.com"));
+    }
+
+    // ── Both shapes emitted from one declaration ───────────────────────────
+
+    #[test]
+    fn rewrite_response__spec_only_upstream_also_emits_openai_shape() {
+        // Upstream only declared ui.csp (spec shape). The rewrite must also
+        // synthesize openai/widgetCSP so ChatGPT — which reads the legacy
+        // key — receives the same effective CSP.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/search",
+                    "mimeType": "text/html",
                     "meta": {
                         "ui": {
                             "csp": {
@@ -694,15 +914,318 @@ mod tests {
             }
         });
 
+        rewrite_response("resources/read", &mut body, &config);
+
+        let meta = &body["result"]["contents"][0]["meta"];
+        let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec_connect = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa_connect, spec_connect);
+        assert!(oa_connect.contains(&"https://api.external.com"));
+        assert!(oa_connect.contains(&"https://abc.tunnel.example.com"));
+    }
+
+    #[test]
+    fn rewrite_response__openai_only_upstream_also_emits_spec_shape() {
+        // Reverse of the above: upstream only declared openai/widgetCSP and
+        // Claude/VS Code clients must still see ui.csp.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/search",
+                    "mimeType": "text/html",
+                    "meta": {
+                        "openai/widgetCSP": {
+                            "connect_domains": ["https://api.external.com"],
+                            "resource_domains": ["https://cdn.external.com"]
+                        }
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/read", &mut body, &config);
+
+        let meta = &body["result"]["contents"][0]["meta"];
+        let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec_connect = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa_connect, spec_connect);
+        assert!(spec_connect.contains(&"https://api.external.com"));
+        assert!(spec_connect.contains(&"https://abc.tunnel.example.com"));
+    }
+
+    #[test]
+    fn rewrite_response__declared_config_synthesizes_both_shapes_from_empty() {
+        // The server declared neither CSP shape. The operator's mcpr.toml
+        // declares connectDomains. Both shapes appear in the response with
+        // the declared domain, keyed off the URI on the containing resource.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.declared.com".into()],
+            mode: Mode::Extend,
+        };
+
+        let mut body = json!({
+            "result": {
+                "resources": [{
+                    "uri": "ui://widget/search",
+                    "meta": {
+                        "openai/widgetDomain": "old.domain.com"
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/list", &mut body, &config);
+
+        let meta = &body["result"]["resources"][0]["meta"];
+        let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa, spec);
+        assert!(oa.contains(&"https://api.declared.com"));
+        assert!(oa.contains(&"https://abc.tunnel.example.com"));
+    }
+
+    #[test]
+    fn rewrite_response__upstream_declarations_unioned_across_shapes() {
+        // The server filled different domains into each shape. The merge must
+        // see the union, not pick one.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/search",
+                    "mimeType": "text/html",
+                    "meta": {
+                        "openai/widgetCSP": {
+                            "connect_domains": ["https://api.only-openai.com"]
+                        },
+                        "ui": {
+                            "csp": {
+                                "connectDomains": ["https://api.only-spec.com"]
+                            }
+                        }
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/read", &mut body, &config);
+
+        let meta = &body["result"]["contents"][0]["meta"];
+        let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa, spec);
+        assert!(oa.contains(&"https://api.only-openai.com"));
+        assert!(oa.contains(&"https://api.only-spec.com"));
+    }
+
+    #[test]
+    fn rewrite_response__non_widget_meta_is_not_polluted() {
+        // A tool call result with plain meta (no widget indicators) must not
+        // gain synthesized CSP fields — those only belong on widget metas.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "content": [{"type": "text", "text": "plain result"}],
+                "meta": { "requestId": "abc-123" }
+            }
+        });
+
+        rewrite_response("tools/call", &mut body, &config);
+
+        let meta = &body["result"]["meta"];
+        assert!(meta.get("openai/widgetCSP").is_none());
+        assert!(meta.get("ui").is_none());
+        assert_eq!(meta["requestId"].as_str().unwrap(), "abc-123");
+    }
+
+    #[test]
+    fn rewrite_response__all_three_directives_synthesized() {
+        // All three directives land in both shapes, not just connect.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.example.com".into()],
+            mode: Mode::Extend,
+        };
+        config.csp.resource_domains = DirectivePolicy {
+            domains: vec!["https://cdn.example.com".into()],
+            mode: Mode::Extend,
+        };
+
+        let mut body = json!({
+            "result": {
+                "resources": [{
+                    "uri": "ui://widget/search",
+                    "meta": { "openai/widgetDomain": "x" }
+                }]
+            }
+        });
+
+        rewrite_response("resources/list", &mut body, &config);
+
+        let meta = &body["result"]["resources"][0]["meta"];
+        for shape in ["openai/widgetCSP"] {
+            assert!(meta[shape]["connect_domains"].is_array());
+            assert!(meta[shape]["resource_domains"].is_array());
+            assert!(meta[shape]["frame_domains"].is_array());
+        }
+        assert!(meta["ui"]["csp"]["connectDomains"].is_array());
+        assert!(meta["ui"]["csp"]["resourceDomains"].is_array());
+        assert!(meta["ui"]["csp"]["frameDomains"].is_array());
+    }
+
+    // ── Frame directive defaults strict ────────────────────────────────────
+
+    #[test]
+    fn rewrite_response__frame_domains_default_replace_drops_upstream() {
+        // Default config treats frameDomains as replace, so upstream values are
+        // dropped even in the absence of any declared frame domains.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "tools": [{
+                    "name": "test",
+                    "meta": {
+                        "ui": {
+                            "csp": {
+                                "frameDomains": ["https://embed.external.com"]
+                            }
+                        }
+                    }
+                }]
+            }
+        });
+
         rewrite_response("tools/list", &mut body, &config);
 
-        let connect: Vec<&str> = body["result"]["tools"][0]["meta"]["ui"]["csp"]["connectDomains"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        // Override: only proxy domain, no upstream
-        assert_eq!(connect, vec!["https://abc.tunnel.example.com"]);
+        let frames = as_strs(&body["result"]["tools"][0]["meta"]["ui"]["csp"]["frameDomains"]);
+        assert_eq!(frames, vec!["https://abc.tunnel.example.com"]);
+    }
+
+    // ── End-to-end scenario ────────────────────────────────────────────────
+
+    #[test]
+    fn rewrite_response__end_to_end_mcp_schema() {
+        // Scenario exercising the full pipeline:
+        // - A realistic multi-tool tools/list response from an upstream MCP
+        //   server that declares widgets with mixed metadata shapes.
+        // - A mcpr.toml with declared global CSP across all three directives
+        //   and a widget-scoped override for the payment widget.
+        //
+        // After rewriting, every tool's meta should carry both CSP shapes
+        // populated from the same merge, with upstream self-references
+        // dropped, declared config applied, and the payment widget's Stripe
+        // override only appearing on the payment tool.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.myshop.com".into()],
+            mode: Mode::Extend,
+        };
+        config.csp.resource_domains = DirectivePolicy {
+            domains: vec!["https://cdn.myshop.com".into()],
+            mode: Mode::Extend,
+        };
+        config.csp.widgets.push(WidgetScoped {
+            match_pattern: "ui://widget/payment*".into(),
+            connect_domains: vec!["https://api.stripe.com".into()],
+            connect_domains_mode: Mode::Extend,
+            resource_domains: vec!["https://js.stripe.com".into()],
+            resource_domains_mode: Mode::Extend,
+            ..Default::default()
+        });
+
+        let mut body = json!({
+            "jsonrpc": "2.0",
+            "id": 42,
+            "result": {
+                "tools": [
+                    {
+                        "name": "search_products",
+                        "description": "Search the product catalog",
+                        "inputSchema": { "type": "object" },
+                        "meta": {
+                            "openai/widgetDomain": "old.shop.com",
+                            "openai/outputTemplate": "ui://widget/search",
+                            "openai/widgetCSP": {
+                                "connect_domains": ["http://localhost:9000"],
+                                "resource_domains": ["http://localhost:4444"]
+                            }
+                        }
+                    },
+                    {
+                        "name": "take_payment",
+                        "description": "Charge a card",
+                        "inputSchema": { "type": "object" },
+                        "meta": {
+                            "ui": {
+                                "resourceUri": "ui://widget/payment-form",
+                                "csp": {
+                                    "connectDomains": ["https://api.myshop.com"]
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "name": "get_order_status",
+                        "description": "Look up an order",
+                        "inputSchema": { "type": "object" }
+                    }
+                ]
+            }
+        });
+
+        rewrite_response("tools/list", &mut body, &config);
+
+        let tools = body["result"]["tools"].as_array().unwrap();
+
+        // ── Tool 0: search — upstream declared only OpenAI shape ──────────
+        let search_meta = &tools[0]["meta"];
+        assert_eq!(
+            search_meta["openai/widgetDomain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+        let search_oa_connect = as_strs(&search_meta["openai/widgetCSP"]["connect_domains"]);
+        let search_spec_connect = as_strs(&search_meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(search_oa_connect, search_spec_connect);
+        // Proxy first, then declared global, upstream localhost dropped.
+        assert_eq!(
+            search_oa_connect,
+            vec!["https://abc.tunnel.example.com", "https://api.myshop.com"]
+        );
+        // The payment widget override must NOT apply to the search tool.
+        assert!(!search_oa_connect.contains(&"https://api.stripe.com"));
+        // Frame directive defaults strict — empty apart from the proxy URL.
+        let search_oa_frame = as_strs(&search_meta["openai/widgetCSP"]["frame_domains"]);
+        assert_eq!(search_oa_frame, vec!["https://abc.tunnel.example.com"]);
+
+        // ── Tool 1: payment — upstream declared only spec shape ──────────
+        let payment_meta = &tools[1]["meta"];
+        let payment_oa_connect = as_strs(&payment_meta["openai/widgetCSP"]["connect_domains"]);
+        let payment_spec_connect = as_strs(&payment_meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(payment_oa_connect, payment_spec_connect);
+        // Proxy + global + widget override (Stripe) all present, in that order.
+        assert_eq!(
+            payment_oa_connect,
+            vec![
+                "https://abc.tunnel.example.com",
+                "https://api.myshop.com",
+                "https://api.stripe.com",
+            ]
+        );
+        let payment_oa_resource = as_strs(&payment_meta["openai/widgetCSP"]["resource_domains"]);
+        assert_eq!(
+            payment_oa_resource,
+            vec![
+                "https://abc.tunnel.example.com",
+                "https://cdn.myshop.com",
+                "https://js.stripe.com",
+            ]
+        );
+
+        // ── Tool 2: plain tool, no widget metadata ────────────────────────
+        // Non-widget metas must not gain synthesized CSP fields.
+        let plain = &tools[2];
+        assert!(plain.get("meta").is_none());
     }
 }

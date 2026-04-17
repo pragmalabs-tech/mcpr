@@ -594,8 +594,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         proxy_url: public_url.clone(),
         proxy_domain,
         mcp_upstream: mcp.clone(),
-        extra_csp_domains: cfg.csp_domains.clone(),
-        csp_mode: cfg.csp_mode,
+        csp: cfg.csp.clone(),
     };
 
     let connect_timeout =
