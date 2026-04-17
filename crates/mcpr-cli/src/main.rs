@@ -717,6 +717,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     #[cfg(unix)]
     {
         let _ = proxy_lock::write_tunnel_url(&proxy_name_for_shutdown, &public_url);
+        let _ = proxy_lock::write_upstream_url(&proxy_name_for_shutdown, &mcp);
     }
 
     let drain_timeout = cfg.runtime.drain_timeout;

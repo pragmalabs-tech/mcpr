@@ -319,8 +319,6 @@ struct ProxyListRow {
     port: String,
     #[tabled(rename = "STARTED")]
     started: String,
-    #[tabled(rename = "CONFIG")]
-    config: String,
 }
 
 impl ProxyListRow {
@@ -332,7 +330,6 @@ impl ProxyListRow {
                 pid: info.pid.to_string(),
                 port: info.port.to_string(),
                 started: format_ts(info.started_at * 1000),
-                config: info.config_path.clone(),
             },
             LockStatus::Stale(info) => Self {
                 name: name.to_string(),
@@ -340,7 +337,6 @@ impl ProxyListRow {
                 pid: info.pid.to_string(),
                 port: info.port.to_string(),
                 started: format_ts(info.started_at * 1000),
-                config: info.config_path.clone(),
             },
             LockStatus::Free => Self {
                 name: name.to_string(),
@@ -348,10 +344,27 @@ impl ProxyListRow {
                 pid: "—".to_string(),
                 port: "—".to_string(),
                 started: "—".to_string(),
-                config: "—".to_string(),
             },
         }
     }
+}
+
+/// URLs + config path for a single running proxy, shown below the list table.
+fn print_proxy_detail(name: &str, info: &LockInfo) {
+    let localhost = format!("http://localhost:{}", info.port);
+    let tunnel = crate::proxy_lock::read_tunnel_url(name).filter(|t| *t != localhost);
+    let upstream = crate::proxy_lock::read_upstream_url(name);
+
+    println!();
+    println!("  {name}");
+    println!("    local:    {localhost}");
+    if let Some(t) = &tunnel {
+        println!("    tunnel:   {t}");
+    }
+    if let Some(u) = &upstream {
+        println!("    upstream: {u}");
+    }
+    println!("    config:   {}", info.config_path);
 }
 
 pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
@@ -368,14 +381,23 @@ pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
         let items: Vec<serde_json::Value> = proxies
             .iter()
             .map(|(name, status)| match status {
-                LockStatus::Held(info) => serde_json::json!({
-                    "name": name,
-                    "status": "running",
-                    "pid": info.pid,
-                    "port": info.port,
-                    "started_at": info.started_at,
-                    "config_path": info.config_path,
-                }),
+                LockStatus::Held(info) => {
+                    let localhost = format!("http://localhost:{}", info.port);
+                    let tunnel = crate::proxy_lock::read_tunnel_url(name)
+                        .filter(|t| *t != localhost);
+                    let upstream = crate::proxy_lock::read_upstream_url(name);
+                    serde_json::json!({
+                        "name": name,
+                        "status": "running",
+                        "pid": info.pid,
+                        "port": info.port,
+                        "started_at": info.started_at,
+                        "config_path": info.config_path,
+                        "localhost_url": localhost,
+                        "tunnel_url": tunnel,
+                        "upstream_url": upstream,
+                    })
+                }
                 LockStatus::Stale(info) => serde_json::json!({
                     "name": name,
                     "status": "stale",
@@ -399,6 +421,12 @@ pub fn proxy_list(proxies: &[(String, LockStatus)], mode: OutputMode) {
         .map(|(name, status)| ProxyListRow::from_status(name, status))
         .collect();
     println!("{}", render_table(rows));
+
+    for (name, status) in proxies {
+        if let LockStatus::Held(info) = status {
+            print_proxy_detail(name, info);
+        }
+    }
 
     let running = proxies
         .iter()
