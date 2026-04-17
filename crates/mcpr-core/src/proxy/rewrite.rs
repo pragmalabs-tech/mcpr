@@ -1,18 +1,27 @@
 //! # Response rewriting for widget CSP
 //!
-//! Mutates JSON-RPC response bodies so widgets see the right CSP when hosts
-//! render them. Two things happen on every rewrite:
+//! Mutates JSON-RPC response bodies so widgets see the right CSP regardless of
+//! which host renders them.
 //!
-//! 1. Widget metadata (`_meta.openai/widgetCSP` and `_meta.ui.csp`) is rebuilt
-//!    per directive using [`super::csp::effective_domains`]. The merge knows
-//!    about the per-directive mode, the widget-scoped overrides, and the
-//!    proxy URL that always prepends the list.
-//! 2. A conservative deep scan walks the entire response and inserts the proxy
-//!    URL into any CSP domain array it finds. This catches servers that embed
-//!    CSP arrays in non-standard locations.
+//! Three things happen on every widget meta rewrite:
 //!
-//! The rewrite never touches response body `text` or `blob` fields — widget
-//! HTML is served verbatim.
+//! 1. **Aggregate.** Upstream CSP domains are collected from both the OpenAI
+//!    (`openai/widgetCSP`) and spec (`ui.csp`) shapes, per directive.
+//! 2. **Merge.** [`super::csp::effective_domains`] applies the per-directive
+//!    mode, widget-scoped overrides, and proxy URL to produce one domain list
+//!    per directive.
+//! 3. **Emit both shapes.** The merge result is written to *both*
+//!    `openai/widgetCSP` (snake_case) and `ui.csp` (camelCase). ChatGPT reads
+//!    the former, Claude and VS Code read the latter; unknown keys are
+//!    ignored, so emitting both means the same declared config works on every
+//!    host.
+//!
+//! A deep scan walks the entire response afterwards and prepends the proxy URL
+//! to any CSP domain array it finds, catching servers that embed CSP in
+//! non-standard locations.
+//!
+//! Response body `text` and `blob` fields are never touched — widget HTML is
+//! served verbatim.
 
 use serde_json::Value;
 
@@ -117,64 +126,69 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
     inject_proxy_into_all_csp(body, config);
 }
 
-/// Rewrite a widget metadata object. Handles both the OpenAI (`openai/widgetCSP`,
-/// `openai/widgetDomain`) and Claude/spec (`ui.csp`, `ui.domain`) shapes.
+/// Rewrite a widget metadata object.
+///
+/// Goal: an operator declares their CSP once in `mcpr.toml`, and the widget
+/// works on every host. Hosts disagree about where they read CSP from —
+/// ChatGPT reads `openai/widgetCSP` (snake_case), Claude and VS Code read
+/// `ui.csp` (camelCase). Instead of detecting the host, the rewrite does the
+/// same merge once and emits the result to *both* shapes. Extra keys are
+/// ignored by hosts that don't understand them.
+///
+/// Upstream domains that feed into the merge are aggregated from both shapes
+/// so a server declaring only one shape still informs the merge for the other.
 ///
 /// `explicit_uri` is the resource URI the caller already resolved (for example,
 /// a `resources/read` caller knows the URI from the containing object). When
 /// missing, the URI is inferred from `meta.ui.resourceUri` or the legacy
-/// `openai/outputTemplate` field.
+/// `openai/outputTemplate` field. The URI picks which `[[csp.widget]]`
+/// overrides apply.
+///
+/// The rewrite is skipped entirely for meta objects that show no sign of being
+/// a widget — a tool call result's `meta`, for example — so non-widget metas
+/// are not polluted with CSP fields they don't need.
 fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &RewriteConfig) {
     if meta.get("openai/widgetDomain").is_some() {
         meta["openai/widgetDomain"] = Value::String(config.proxy_domain.clone());
+    }
+
+    if !is_widget_meta(meta, explicit_uri) {
+        inject_proxy_into_all_csp(meta, config);
+        return;
     }
 
     let inferred = explicit_uri
         .map(String::from)
         .or_else(|| extract_resource_uri(meta));
     let uri = inferred.as_deref();
+    let upstream_host = strip_scheme(&config.mcp_upstream);
 
-    // OpenAI legacy shape uses snake_case keys.
-    rewrite_directive(
-        meta,
-        "openai/widgetCSP",
-        "connect_domains",
-        Directive::Connect,
-        uri,
-        config,
-    );
-    rewrite_directive(
-        meta,
-        "openai/widgetCSP",
-        "resource_domains",
-        Directive::Resource,
-        uri,
-        config,
-    );
-    rewrite_directive(
-        meta,
-        "openai/widgetCSP",
-        "frame_domains",
-        Directive::Frame,
-        uri,
-        config,
-    );
+    // Merge once per directive, using the union of upstream declarations from
+    // both shapes so a server that only declared `ui.csp` still informs the
+    // merge for the `openai/widgetCSP` output and vice versa.
+    let connect = merged_domains(meta, Directive::Connect, uri, &upstream_host, config);
+    let resource = merged_domains(meta, Directive::Resource, uri, &upstream_host, config);
+    let frame = merged_domains(meta, Directive::Frame, uri, &upstream_host, config);
 
-    // Spec / Claude shape uses camelCase keys under `ui.csp`.
-    if let Some(ui) = meta.get_mut("ui") {
-        rewrite_directive(ui, "csp", "connectDomains", Directive::Connect, uri, config);
-        rewrite_directive(
-            ui,
-            "csp",
-            "resourceDomains",
-            Directive::Resource,
-            uri,
-            config,
-        );
-        rewrite_directive(ui, "csp", "frameDomains", Directive::Frame, uri, config);
-    }
+    write_openai_csp(meta, &connect, &resource, &frame);
+    write_spec_csp(meta, &connect, &resource, &frame);
 
     inject_proxy_into_all_csp(meta, config);
+}
+
+/// Return `true` when the meta object belongs to a widget, either because it
+/// already holds widget-shaped fields or because the caller resolved an
+/// explicit resource URI for it.
+fn is_widget_meta(meta: &Value, explicit_uri: Option<&str>) -> bool {
+    if explicit_uri.is_some() {
+        return true;
+    }
+    meta.get("openai/widgetCSP").is_some()
+        || meta.get("openai/widgetDomain").is_some()
+        || meta.get("openai/outputTemplate").is_some()
+        || meta.pointer("/ui/csp").is_some()
+        || meta.pointer("/ui/resourceUri").is_some()
+        || meta.pointer("/ui/domain").is_some()
 }
 
 /// Extract a resource URI from a widget meta object. Prefers the spec field
@@ -188,41 +202,99 @@ fn extract_resource_uri(meta: &Value) -> Option<String> {
         .map(String::from)
 }
 
-/// Recompute one CSP directive array in place using [`effective_domains`].
-/// Skips silently when the parent object or the directive array is absent.
-fn rewrite_directive(
-    parent: &mut Value,
-    obj_key: &str,
-    array_key: &str,
+/// Compute the effective domain list for one directive, seeded from whatever
+/// the upstream server declared in either CSP shape.
+fn merged_domains(
+    meta: &Value,
     directive: Directive,
     resource_uri: Option<&str>,
+    upstream_host: &str,
     config: &RewriteConfig,
-) {
-    let Some(obj) = parent.get_mut(obj_key) else {
-        return;
-    };
-    let Some(arr) = obj.get_mut(array_key).and_then(|v| v.as_array_mut()) else {
-        return;
-    };
-
-    let upstream: Vec<String> = arr
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
-
-    let upstream_host = strip_scheme(&config.mcp_upstream);
-
-    let merged = effective_domains(
+) -> Vec<String> {
+    let upstream = collect_upstream(meta, directive);
+    effective_domains(
         &config.csp,
         directive,
         resource_uri,
         &upstream,
-        &upstream_host,
+        upstream_host,
         &config.proxy_url,
-    );
+    )
+}
 
-    *obj.get_mut(array_key).unwrap() =
-        Value::Array(merged.into_iter().map(Value::String).collect());
+/// Gather every string domain the upstream declared for `directive`, looking
+/// at both `openai/widgetCSP` and `ui.csp`. Duplicates are removed in order.
+fn collect_upstream(meta: &Value, directive: Directive) -> Vec<String> {
+    let (openai_key, spec_key) = match directive {
+        Directive::Connect => ("connect_domains", "connectDomains"),
+        Directive::Resource => ("resource_domains", "resourceDomains"),
+        Directive::Frame => ("frame_domains", "frameDomains"),
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut append = |arr: &Vec<Value>| {
+        for v in arr {
+            if let Some(s) = v.as_str() {
+                let s = s.to_string();
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+    };
+
+    if let Some(arr) = meta
+        .get("openai/widgetCSP")
+        .and_then(|c| c.get(openai_key))
+        .and_then(|v| v.as_array())
+    {
+        append(arr);
+    }
+    if let Some(arr) = meta
+        .pointer("/ui/csp")
+        .and_then(|c| c.get(spec_key))
+        .and_then(|v| v.as_array())
+    {
+        append(arr);
+    }
+    out
+}
+
+/// Write the OpenAI-shaped CSP block, creating the parent object when needed.
+fn write_openai_csp(meta: &mut Value, connect: &[String], resource: &[String], frame: &[String]) {
+    let Some(obj) = meta.as_object_mut() else {
+        return;
+    };
+    obj.insert(
+        "openai/widgetCSP".to_string(),
+        serde_json::json!({
+            "connect_domains": connect,
+            "resource_domains": resource,
+            "frame_domains": frame,
+        }),
+    );
+}
+
+/// Write the spec-shaped CSP block under `ui.csp`, creating `ui` when needed.
+fn write_spec_csp(meta: &mut Value, connect: &[String], resource: &[String], frame: &[String]) {
+    let Some(obj) = meta.as_object_mut() else {
+        return;
+    };
+    let ui = obj
+        .entry("ui".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !ui.is_object() {
+        *ui = Value::Object(serde_json::Map::new());
+    }
+    let ui_obj = ui.as_object_mut().unwrap();
+    ui_obj.insert(
+        "csp".to_string(),
+        serde_json::json!({
+            "connectDomains": connect,
+            "resourceDomains": resource,
+            "frameDomains": frame,
+        }),
+    );
 }
 
 /// Recursively ensure the proxy URL is present in every CSP-shaped domain array.
@@ -815,6 +887,192 @@ mod tests {
         let connect =
             as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
         assert!(connect.contains(&"https://api.stripe.com"));
+    }
+
+    // ── Both shapes emitted from one declaration ───────────────────────────
+
+    #[test]
+    fn rewrite_response__spec_only_upstream_also_emits_openai_shape() {
+        // Upstream only declared ui.csp (spec shape). The rewrite must also
+        // synthesize openai/widgetCSP so ChatGPT — which reads the legacy
+        // key — receives the same effective CSP.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/search",
+                    "mimeType": "text/html",
+                    "meta": {
+                        "ui": {
+                            "csp": {
+                                "connectDomains": ["https://api.external.com"],
+                                "resourceDomains": ["https://cdn.external.com"]
+                            }
+                        }
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/read", &mut body, &config);
+
+        let meta = &body["result"]["contents"][0]["meta"];
+        let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec_connect = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa_connect, spec_connect);
+        assert!(oa_connect.contains(&"https://api.external.com"));
+        assert!(oa_connect.contains(&"https://abc.tunnel.example.com"));
+    }
+
+    #[test]
+    fn rewrite_response__openai_only_upstream_also_emits_spec_shape() {
+        // Reverse of the above: upstream only declared openai/widgetCSP and
+        // Claude/VS Code clients must still see ui.csp.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/search",
+                    "mimeType": "text/html",
+                    "meta": {
+                        "openai/widgetCSP": {
+                            "connect_domains": ["https://api.external.com"],
+                            "resource_domains": ["https://cdn.external.com"]
+                        }
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/read", &mut body, &config);
+
+        let meta = &body["result"]["contents"][0]["meta"];
+        let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec_connect = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa_connect, spec_connect);
+        assert!(spec_connect.contains(&"https://api.external.com"));
+        assert!(spec_connect.contains(&"https://abc.tunnel.example.com"));
+    }
+
+    #[test]
+    fn rewrite_response__declared_config_synthesizes_both_shapes_from_empty() {
+        // The server declared neither CSP shape. The operator's mcpr.toml
+        // declares connectDomains. Both shapes appear in the response with
+        // the declared domain, keyed off the URI on the containing resource.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.declared.com".into()],
+            mode: Mode::Extend,
+        };
+
+        let mut body = json!({
+            "result": {
+                "resources": [{
+                    "uri": "ui://widget/search",
+                    "meta": {
+                        "openai/widgetDomain": "old.domain.com"
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/list", &mut body, &config);
+
+        let meta = &body["result"]["resources"][0]["meta"];
+        let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa, spec);
+        assert!(oa.contains(&"https://api.declared.com"));
+        assert!(oa.contains(&"https://abc.tunnel.example.com"));
+    }
+
+    #[test]
+    fn rewrite_response__upstream_declarations_unioned_across_shapes() {
+        // The server filled different domains into each shape. The merge must
+        // see the union, not pick one.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/search",
+                    "mimeType": "text/html",
+                    "meta": {
+                        "openai/widgetCSP": {
+                            "connect_domains": ["https://api.only-openai.com"]
+                        },
+                        "ui": {
+                            "csp": {
+                                "connectDomains": ["https://api.only-spec.com"]
+                            }
+                        }
+                    }
+                }]
+            }
+        });
+
+        rewrite_response("resources/read", &mut body, &config);
+
+        let meta = &body["result"]["contents"][0]["meta"];
+        let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa, spec);
+        assert!(oa.contains(&"https://api.only-openai.com"));
+        assert!(oa.contains(&"https://api.only-spec.com"));
+    }
+
+    #[test]
+    fn rewrite_response__non_widget_meta_is_not_polluted() {
+        // A tool call result with plain meta (no widget indicators) must not
+        // gain synthesized CSP fields — those only belong on widget metas.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "content": [{"type": "text", "text": "plain result"}],
+                "meta": { "requestId": "abc-123" }
+            }
+        });
+
+        rewrite_response("tools/call", &mut body, &config);
+
+        let meta = &body["result"]["meta"];
+        assert!(meta.get("openai/widgetCSP").is_none());
+        assert!(meta.get("ui").is_none());
+        assert_eq!(meta["requestId"].as_str().unwrap(), "abc-123");
+    }
+
+    #[test]
+    fn rewrite_response__all_three_directives_synthesized() {
+        // All three directives land in both shapes, not just connect.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.example.com".into()],
+            mode: Mode::Extend,
+        };
+        config.csp.resource_domains = DirectivePolicy {
+            domains: vec!["https://cdn.example.com".into()],
+            mode: Mode::Extend,
+        };
+
+        let mut body = json!({
+            "result": {
+                "resources": [{
+                    "uri": "ui://widget/search",
+                    "meta": { "openai/widgetDomain": "x" }
+                }]
+            }
+        });
+
+        rewrite_response("resources/list", &mut body, &config);
+
+        let meta = &body["result"]["resources"][0]["meta"];
+        for shape in ["openai/widgetCSP"] {
+            assert!(meta[shape]["connect_domains"].is_array());
+            assert!(meta[shape]["resource_domains"].is_array());
+            assert!(meta[shape]["frame_domains"].is_array());
+        }
+        assert!(meta["ui"]["csp"]["connectDomains"].is_array());
+        assert!(meta["ui"]["csp"]["resourceDomains"].is_array());
+        assert!(meta["ui"]["csp"]["frameDomains"].is_array());
     }
 
     // ── Frame directive defaults strict ────────────────────────────────────
