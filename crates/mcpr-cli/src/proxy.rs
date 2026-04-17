@@ -112,8 +112,7 @@ mod tests {
                 proxy_url: "http://localhost:0".to_string(),
                 proxy_domain: "localhost".to_string(),
                 mcp_upstream: upstream_url.to_string(),
-                extra_csp_domains: vec![],
-                csp_mode: mcpr_core::proxy::CspMode::default(),
+                csp: mcpr_core::proxy::CspConfig::default(),
             })),
             upstream: mcpr_core::proxy::forwarding::UpstreamClient {
                 http_client: reqwest::Client::builder()
