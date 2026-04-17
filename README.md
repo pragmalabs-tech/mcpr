@@ -211,7 +211,7 @@ The CLI manages the daemon, proxies, and relay, and queries the local SQLite sto
 
 **Routing & Network**
 - [x] JSON-RPC routing 
-- [x] Widget CSP rewriting (auto-detection, per-platform adaptation)
+- [x] Widget CSP rewriting (at widget resource level)
 - [ ] Widgets mode (Server endpoint, statics)
 - [ ] Multi-server routing (one mcpr URL, many MCP backends)
 
