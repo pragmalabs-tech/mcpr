@@ -48,12 +48,15 @@ token = "90c74def-8fdc-4922-8702-44bc5cabf830"
 # Fixed subdomain (optional -- derived from token if omitted)
 subdomain = "myapp"
 
-[csp]
-# CSP rewriting mode: "extend" (default) or "override"
-mode = "extend"
+# CSP — declare once, emitted to every widget meta in both shapes.
+# See docs/proxy/CSP.md for the full reference, including per-widget overrides.
+[csp.connectDomains]
+domains = ["https://api.example.com"]
+mode    = "extend"
 
-# Additional CSP domains to allow
-domains = ["https://media.mcpr.app", "https://api.example.com"]
+[csp.resourceDomains]
+domains = ["https://media.mcpr.app"]
+mode    = "extend"
 
 [cloud]
 # Cloud sync token (from mcpr.app project settings)
@@ -107,8 +110,7 @@ rotation = "daily"
 | `[tunnel].relay_url` | Relay server URL |
 | `[tunnel].token` | Tunnel authentication token (from mcpr.app) |
 | `[tunnel].subdomain` | Fixed subdomain for tunnel |
-| `[csp].mode` | `"extend"` or `"override"` |
-| `[csp].domains` | Extra CSP domains |
+| `[csp.*]` | Widget CSP declaration — see [CSP](CSP.md) |
 | `[cloud].token` | Cloud sync token from mcpr.app |
 | `[cloud].server` | Server slug for cloud routing |
 | `[cloud].endpoint` | Custom cloud API endpoint |
@@ -250,6 +252,7 @@ The new grouped format is recommended for new configs. See [`config_examples/`](
 
 ## Related docs
 
+- [CSP](CSP.md) -- widget CSP: directives, modes, per-widget overrides
 - [Deploy Relay Server](DEPLOY_RELAY_SERVER.md) -- VPS setup, DNS, TLS, nginx/Caddy
 - [Static Tokens](STATIC_TOKENS.md) -- practical guide for static token auth (team setup, CI/CD, demos)
 - [Auth Provider](AUTH_PROVIDER.md) -- building an external auth provider API
