@@ -12,6 +12,7 @@ use axum::{
 
 use crate::mcp_handler::{handle_mcp_post, handle_mcp_sse};
 use crate::passthrough::forward_and_passthrough;
+use crate::pipeline::build_request_context;
 use crate::state::{AppState, ProxyState};
 use crate::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
 use mcpr_core::event::{ProxyEvent, SessionEndEvent};
@@ -44,7 +45,7 @@ pub fn proxy_routes(router: Router<AppState>) -> Router<AppState> {
     router.fallback(any(handle_request))
 }
 
-/// Catch-all handler: classify the request, then dispatch to the appropriate handler.
+/// Catch-all handler: parse once, classify, then dispatch.
 async fn handle_request(
     State(proxy): State<Arc<ProxyState>>,
     method: Method,
@@ -56,6 +57,9 @@ async fn handle_request(
     let path = uri.path();
     let has_widgets = proxy.widget_source.is_some();
 
+    // Stage ① Parse — classify() re-parses the body for now; removed in Phase 7.
+    let mut ctx = build_request_context(method.clone(), path, &headers, &body, start);
+
     match classify(&method, path, &headers, &body, has_widgets) {
         ClassifiedRequest::WidgetHtml { name } => serve_widget_html(&proxy, &name).await,
 
@@ -63,8 +67,8 @@ async fn handle_request(
 
         ClassifiedRequest::WidgetAsset => serve_widget_asset(&proxy, path).await,
 
-        ClassifiedRequest::McpPost { parsed } => {
-            handle_mcp_post(&proxy, path, &headers, &body, parsed, start).await
+        ClassifiedRequest::McpPost { .. } => {
+            handle_mcp_post(&proxy, &mut ctx, &headers, &body).await
         }
 
         ClassifiedRequest::McpSse => handle_mcp_sse(&proxy, path, &headers, start).await,
@@ -85,8 +89,7 @@ async fn handle_request(
 
             let (base, _) = split_upstream(&proxy.mcp_upstream);
             let upstream_url = format!("{}{}", base.trim_end_matches('/'), path);
-            forward_and_passthrough(&proxy, &upstream_url, method, path, &headers, &body, start)
-                .await
+            forward_and_passthrough(&proxy, &mut ctx, &upstream_url, &headers, &body).await
         }
     }
 }

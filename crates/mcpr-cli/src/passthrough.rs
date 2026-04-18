@@ -2,33 +2,39 @@ use std::time::Instant;
 
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderMap, Method, StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 
+use crate::pipeline::{RequestContext, ResponseSummary, emit_request_event};
 use crate::proxy::forward_request;
 use crate::state::ProxyState;
-use mcpr_core::event::{ProxyEvent, RequestEvent};
 use mcpr_core::proxy::forwarding::{build_response, read_body_capped};
 use mcpr_core::proxy::sse::split_upstream;
 
 /// Forward a request to upstream and return the response, rewriting upstream URLs in JSON bodies.
 pub async fn forward_and_passthrough(
     state: &ProxyState,
+    ctx: &mut RequestContext,
     url: &str,
-    method: Method,
-    log_path: &str,
     headers: &HeaderMap,
     body: &Bytes,
-    start: Instant,
 ) -> Response {
-    let is_streaming = headers
-        .get(header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .map(|a| a.contains("text/event-stream"))
-        .unwrap_or(false);
+    // Preserve today's behavior: passthrough doesn't log session or client.
+    ctx.session_id = None;
+
     let upstream_start = Instant::now();
-    match forward_request(state, url, method.clone(), headers, body, is_streaming).await {
+    let resp = forward_request(
+        state,
+        url,
+        ctx.http_method.clone(),
+        headers,
+        body,
+        ctx.wants_sse,
+    )
+    .await;
+
+    match resp {
         Ok(resp) => {
             let status = resp.status().as_u16();
             let resp_headers = resp.headers().clone();
@@ -60,55 +66,35 @@ pub async fn forward_and_passthrough(
                 (bytes.to_vec(), "passthrough")
             };
 
-            state
-                .event_bus
-                .emit(ProxyEvent::Request(Box::new(RequestEvent {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    ts: chrono::Utc::now().timestamp_millis(),
-                    proxy: state.name.clone(),
-                    session_id: None,
-                    method: method.to_string(),
-                    path: log_path.to_string(),
-                    mcp_method: None,
-                    tool: None,
+            emit_request_event(
+                state,
+                ctx,
+                &ResponseSummary {
                     status,
-                    latency_us: start.elapsed().as_micros() as u64,
-                    upstream_us: Some(upstream_us),
-                    request_size: Some(body.len() as u64),
                     response_size: Some(response_body.len() as u64),
+                    upstream_us: Some(upstream_us),
                     error_code: None,
                     error_msg: None,
-                    client_name: None,
-                    client_version: None,
-                    note: note.to_string(),
-                })));
+                },
+                note,
+            );
 
             build_response(status, &resp_headers, Body::from(response_body))
         }
         Err(e) => {
             let upstream_us = upstream_start.elapsed().as_micros() as u64;
-            state
-                .event_bus
-                .emit(ProxyEvent::Request(Box::new(RequestEvent {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    ts: chrono::Utc::now().timestamp_millis(),
-                    proxy: state.name.clone(),
-                    session_id: None,
-                    method: method.to_string(),
-                    path: log_path.to_string(),
-                    mcp_method: None,
-                    tool: None,
+            emit_request_event(
+                state,
+                ctx,
+                &ResponseSummary {
                     status: 502,
-                    latency_us: start.elapsed().as_micros() as u64,
-                    upstream_us: Some(upstream_us),
-                    request_size: Some(body.len() as u64),
                     response_size: None,
+                    upstream_us: Some(upstream_us),
                     error_code: None,
-                    error_msg: Some(format!("{e}").chars().take(512).collect()),
-                    client_name: None,
-                    client_version: None,
-                    note: "upstream error".to_string(),
-                })));
+                    error_msg: Some(format!("{e}")),
+                },
+                "upstream error",
+            );
             (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response()
         }
     }

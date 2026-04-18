@@ -54,6 +54,7 @@ mod daemon;
 mod logic;
 mod mcp_handler;
 mod passthrough;
+mod pipeline;
 mod proxy;
 #[allow(dead_code)]
 mod proxy_lock;

@@ -7,109 +7,36 @@ use axum::{
 };
 use serde_json::Value;
 
+use crate::pipeline::{ResponseSummary, RequestContext, emit_request_event, normalize_platform};
 use crate::proxy::forward_request;
 use crate::state::ProxyState;
 use crate::widgets::fetch_widget_html;
 use mcpr_core::event::{ProxyEvent, RequestEvent, SchemaVersionCreatedEvent, SessionStartEvent};
 use mcpr_core::protocol::schema as proto_schema;
-use mcpr_core::protocol::session::{self as session, SessionState, SessionStore};
+use mcpr_core::protocol::session::{SessionState, SessionStore};
 use mcpr_core::protocol::{self as jsonrpc, McpMethod};
 use mcpr_core::proxy::forwarding::{build_response, read_body_capped};
 use mcpr_core::proxy::rewrite_response;
 use mcpr_core::proxy::sse::{extract_json_from_sse, wrap_as_sse};
 
-/// Normalize a client name to a platform identifier.
-fn normalize_platform(client_name: &str) -> &'static str {
-    let lower = client_name.to_lowercase();
-    if lower.contains("claude") {
-        "claude"
-    } else if lower.contains("cursor") {
-        "cursor"
-    } else if lower.contains("chatgpt") || lower.contains("openai") {
-        "chatgpt"
-    } else if lower.contains("copilot") || lower.contains("vscode") || lower.contains("vs-code") {
-        "vscode"
-    } else if lower.contains("windsurf") {
-        "windsurf"
-    } else {
-        "unknown"
-    }
-}
-
-/// Build a `ProxyEvent::Request` from the request/response data.
-#[allow(clippy::too_many_arguments)]
-fn make_request_event(
-    proxy: &str,
-    path: &str,
-    method_str: &str,
-    mcp_method: &McpMethod,
-    call_detail: &Option<String>,
-    session_id: Option<&str>,
-    client_name: Option<String>,
-    client_version: Option<String>,
-    status: u16,
-    start: Instant,
-    upstream_us: Option<u64>,
-    request_size: usize,
-    response_size: Option<usize>,
-    rpc_error: Option<&(i64, String)>,
-    note: &str,
-) -> ProxyEvent {
-    let tool = if *mcp_method == McpMethod::ToolsCall {
-        call_detail.clone()
-    } else {
-        None
-    };
-
-    ProxyEvent::Request(Box::new(RequestEvent {
-        id: uuid::Uuid::new_v4().to_string(),
-        ts: chrono::Utc::now().timestamp_millis(),
-        proxy: proxy.to_string(),
-        session_id: session_id.map(String::from),
-        method: "POST".to_string(),
-        path: path.to_string(),
-        mcp_method: Some(method_str.to_string()),
-        tool,
-        status,
-        latency_us: start.elapsed().as_micros() as u64,
-        upstream_us,
-        request_size: Some(request_size as u64),
-        response_size: response_size.map(|s| s as u64),
-        error_code: rpc_error.map(|(code, _)| code.to_string()),
-        error_msg: rpc_error.map(|(_, msg)| msg.chars().take(512).collect()),
-        client_name,
-        client_version,
-        note: note.to_string(),
-    }))
-}
-
 /// Handle MCP JSON-RPC POST — intercept resources/read, forward, rewrite response.
 pub async fn handle_mcp_post(
     state: &ProxyState,
-    path: &str,
+    ctx: &mut RequestContext,
     headers: &HeaderMap,
     body: &Bytes,
-    parsed: jsonrpc::ParsedBody,
-    start: Instant,
 ) -> Response {
-    let raw_body_len = body.len();
-    let mcp_method = parsed.mcp_method();
-    let method_str = mcp_method.as_str();
-    let call_detail = parsed.detail();
-
-    // Extract client info from initialize request before forwarding
-    let client_info = if mcp_method == McpMethod::Initialize {
-        parsed.first_params().and_then(session::parse_client_info)
-    } else {
-        None
-    };
+    let mcp_method = ctx
+        .mcp_method
+        .clone()
+        .expect("handle_mcp_post called without an MCP method");
+    let method_str: String = ctx
+        .mcp_method_str
+        .clone()
+        .expect("handle_mcp_post called without a parsed method string");
 
     // Track session activity and state transitions
-    let req_session_id = headers
-        .get("mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(String::from);
-    if let Some(ref sid) = req_session_id {
+    if let Some(ref sid) = ctx.session_id {
         state.sessions.touch(sid).await;
         if mcp_method == McpMethod::Initialized {
             state.sessions.update_state(sid, SessionState::Active).await;
@@ -118,10 +45,11 @@ pub async fn handle_mcp_post(
 
     // Intercept resources/read for widget HTML serving (single requests only)
     if mcp_method == McpMethod::ResourcesRead
-        && !parsed.is_batch
+        && !ctx.is_batch
         && state.widget_source.is_some()
         && let Ok(json_val) = serde_json::from_slice::<Value>(body)
-        && let Some(response) = handle_resources_read(state, headers, body, &json_val, start).await
+        && let Some(response) =
+            handle_resources_read(state, headers, body, &json_val, ctx.start).await
     {
         return response;
     }
@@ -135,33 +63,22 @@ pub async fn handle_mcp_post(
         Err(e) => {
             let upstream_us = upstream_start.elapsed().as_micros() as u64;
 
-            // Single emit — all sinks (stderr, sqlite, cloud) receive this.
-            // Look up client info for error path (before session id merging)
-            let (err_client_name, err_client_version) = if let Some(ref sid) = req_session_id
-                && let Some(info) = state.sessions.get(sid).await
-                && let Some(ci) = info.client_info
-            {
-                (Some(ci.name), ci.version)
-            } else {
-                (None, None)
-            };
-            state.event_bus.emit(make_request_event(
-                &state.name,
-                path,
-                method_str,
-                &mcp_method,
-                &call_detail,
-                req_session_id.as_deref(),
-                err_client_name,
-                err_client_version,
-                502,
-                start,
-                Some(upstream_us),
-                raw_body_len,
-                None,
-                None,
+            // Resolve client info from the request-side session (upstream
+            // didn't respond — no resp session id to merge in).
+            populate_client_info(state, ctx).await;
+
+            emit_request_event(
+                state,
+                ctx,
+                &ResponseSummary {
+                    status: 502,
+                    response_size: None,
+                    upstream_us: Some(upstream_us),
+                    error_code: None,
+                    error_msg: None,
+                },
                 "upstream error",
-            ));
+            );
 
             return (StatusCode::BAD_GATEWAY, format!("Upstream error: {e}")).into_response();
         }
@@ -170,41 +87,45 @@ pub async fn handle_mcp_post(
     let status = resp.status().as_u16();
     let resp_headers = resp.headers().clone();
 
-    // Track session from upstream response
-    let resp_session_id = resp_headers
+    // Track session id from upstream response — overwrites ctx's request-side
+    // id so downstream logic (SessionStart, emit) sees the authoritative one.
+    if let Some(resp_sid) = resp_headers
         .get("mcp-session-id")
         .and_then(|v| v.to_str().ok())
-        .map(String::from);
+    {
+        ctx.session_id = Some(resp_sid.to_string());
+    }
 
     if mcp_method == McpMethod::Initialize && status < 400 {
         mcpr_core::proxy::lock_health(&state.health).confirm_mcp_connected();
     }
 
-    // On successful initialize, emit SessionStart event
+    // On successful initialize, store client info in the session + emit SessionStart.
     if mcp_method == McpMethod::Initialize
         && status < 400
-        && let Some(ref sid) = resp_session_id
+        && let Some(sid) = ctx.session_id.clone()
     {
-        state.sessions.create(sid).await;
+        state.sessions.create(&sid).await;
         state
             .sessions
-            .update_state(sid, SessionState::Initialized)
+            .update_state(&sid, SessionState::Initialized)
             .await;
 
-        let (client_name, client_version, client_platform) = if let Some(info) = client_info {
-            let platform = normalize_platform(&info.name).to_string();
-            let name = info.name.clone();
-            let version = info.version.clone();
-            state.sessions.set_client_info(sid, info).await;
-            (Some(name), version, Some(platform))
-        } else {
-            (None, None, None)
-        };
+        let (client_name, client_version, client_platform) =
+            if let Some(info) = ctx.client_info_from_init.take() {
+                let platform = normalize_platform(&info.name).to_string();
+                let name = info.name.clone();
+                let version = info.version.clone();
+                state.sessions.set_client_info(&sid, info).await;
+                (Some(name), version, Some(platform))
+            } else {
+                (None, None, None)
+            };
 
         state
             .event_bus
             .emit(ProxyEvent::SessionStart(SessionStartEvent {
-                session_id: sid.clone(),
+                session_id: sid,
                 proxy: state.name.clone(),
                 ts: chrono::Utc::now().timestamp_millis(),
                 client_name,
@@ -213,17 +134,8 @@ pub async fn handle_mcp_post(
             }));
     }
 
-    let log_session_id = resp_session_id.or(req_session_id);
-
-    // Look up client info from session store
-    let (session_client_name, session_client_version) = if let Some(ref sid) = log_session_id
-        && let Some(info) = state.sessions.get(sid).await
-        && let Some(ci) = info.client_info
-    {
-        (Some(ci.name), ci.version)
-    } else {
-        (None, None)
-    };
+    // Resolve client info for emit from the (possibly-just-written) session.
+    populate_client_info(state, ctx).await;
 
     // Collect full body for rewriting (POST SSE is finite), capped to prevent OOM
     let resp_bytes = match read_body_capped(resp, state.max_response_body).await {
@@ -240,16 +152,16 @@ pub async fn handle_mcp_post(
     };
 
     if let Ok(mut json_body) = serde_json::from_slice::<Value>(&json_bytes) {
-        let rpc_error =
-            jsonrpc::extract_error_code(&json_body).map(|(code, msg)| (code, msg.to_string()));
+        let rpc_error = jsonrpc::extract_error_code(&json_body)
+            .map(|(code, msg)| (code, msg.to_string()));
 
         // Schema ingest — BEFORE rewrite, so the raw server response is
         // what gets hashed + persisted. `ingest` returns `Some(version)`
         // only when pagination is complete AND the content changed.
-        ingest_schema(state, &mcp_method, method_str, body, &json_body).await;
+        ingest_schema(state, &mcp_method, &method_str, body, &json_body).await;
         observe_schema_stale(state, &json_body);
 
-        rewrite_response(method_str, &mut json_body, &config);
+        rewrite_response(&method_str, &mut json_body, &config);
         let rewritten = serde_json::to_vec(&json_body).unwrap_or(json_bytes);
         let body = if is_sse {
             wrap_as_sse(&rewritten)
@@ -258,47 +170,47 @@ pub async fn handle_mcp_post(
         };
         let note = if is_sse { "rewritten+sse" } else { "rewritten" };
 
-        // Single emit — replaces logger.emit + events.emit + store.record
-        state.event_bus.emit(make_request_event(
-            &state.name,
-            path,
-            method_str,
-            &mcp_method,
-            &call_detail,
-            log_session_id.as_deref(),
-            session_client_name.clone(),
-            session_client_version.clone(),
+        let mut summary = ResponseSummary {
             status,
-            start,
-            Some(upstream_us),
-            raw_body_len,
-            Some(body.len()),
-            rpc_error.as_ref(),
-            note,
-        ));
+            response_size: Some(body.len() as u64),
+            upstream_us: Some(upstream_us),
+            error_code: None,
+            error_msg: None,
+        };
+        if let Some((code, msg)) = rpc_error {
+            summary = summary.with_rpc_error(code, msg);
+        }
+        emit_request_event(state, ctx, &summary, note);
 
         build_response(status, &resp_headers, Body::from(body))
     } else {
         // Non-JSON response — passthrough
-        state.event_bus.emit(make_request_event(
-            &state.name,
-            path,
-            method_str,
-            &mcp_method,
-            &call_detail,
-            log_session_id.as_deref(),
-            session_client_name,
-            session_client_version,
-            status,
-            start,
-            Some(upstream_us),
-            raw_body_len,
-            Some(resp_bytes.len()),
-            None,
+        emit_request_event(
+            state,
+            ctx,
+            &ResponseSummary {
+                status,
+                response_size: Some(resp_bytes.len() as u64),
+                upstream_us: Some(upstream_us),
+                error_code: None,
+                error_msg: None,
+            },
             "passthrough",
-        ));
+        );
 
         build_response(status, &resp_headers, Body::from(resp_bytes))
+    }
+}
+
+/// Look up client name/version from the session store (if a session id is
+/// known) and stash them on the context so `emit_request_event` picks them up.
+async fn populate_client_info(state: &ProxyState, ctx: &mut RequestContext) {
+    if let Some(ref sid) = ctx.session_id
+        && let Some(info) = state.sessions.get(sid).await
+        && let Some(ci) = info.client_info
+    {
+        ctx.client_name = Some(ci.name);
+        ctx.client_version = ci.version;
     }
 }
 
@@ -524,185 +436,6 @@ fn observe_schema_stale(state: &ProxyState, response_body: &Value) {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn make_request_event__includes_client_info() {
-        let event = make_request_event(
-            "proxy",
-            "/mcp",
-            "tools/call",
-            &McpMethod::ToolsCall,
-            &Some("search".into()),
-            Some("sess-1"),
-            Some("claude-desktop".into()),
-            Some("1.2.0".into()),
-            200,
-            Instant::now(),
-            Some(1000),
-            128,
-            Some(256),
-            None,
-            "rewritten",
-        );
-
-        let ProxyEvent::Request(e) = event else {
-            panic!("expected Request variant");
-        };
-        assert_eq!(e.client_name.as_deref(), Some("claude-desktop"));
-        assert_eq!(e.client_version.as_deref(), Some("1.2.0"));
-        assert_eq!(e.session_id.as_deref(), Some("sess-1"));
-        assert_eq!(e.tool.as_deref(), Some("search"));
-    }
-
-    #[test]
-    fn make_request_event__none_client_info() {
-        let event = make_request_event(
-            "proxy",
-            "/mcp",
-            "tools/call",
-            &McpMethod::ToolsCall,
-            &Some("search".into()),
-            None,
-            None,
-            None,
-            200,
-            Instant::now(),
-            None,
-            64,
-            None,
-            None,
-            "passthrough",
-        );
-
-        let ProxyEvent::Request(e) = event else {
-            panic!("expected Request variant");
-        };
-        assert!(e.client_name.is_none());
-        assert!(e.client_version.is_none());
-        assert!(e.session_id.is_none());
-    }
-
-    #[test]
-    fn make_request_event__non_tool_call_has_no_tool() {
-        let event = make_request_event(
-            "proxy",
-            "/mcp",
-            "resources/read",
-            &McpMethod::ResourcesRead,
-            &Some("file://readme.md".into()),
-            Some("sess-2"),
-            Some("cursor".into()),
-            None,
-            200,
-            Instant::now(),
-            Some(500),
-            100,
-            Some(200),
-            None,
-            "rewritten",
-        );
-
-        let ProxyEvent::Request(e) = event else {
-            panic!("expected Request variant");
-        };
-        assert!(e.tool.is_none());
-        assert_eq!(e.client_name.as_deref(), Some("cursor"));
-        assert!(e.client_version.is_none());
-    }
-
-    #[test]
-    fn make_request_event__with_error() {
-        let rpc_err = (-32600i64, "bad request".to_string());
-        let event = make_request_event(
-            "proxy",
-            "/mcp",
-            "tools/call",
-            &McpMethod::ToolsCall,
-            &Some("broken_tool".into()),
-            Some("sess-3"),
-            Some("vscode-copilot".into()),
-            Some("0.9.0".into()),
-            500,
-            Instant::now(),
-            Some(100),
-            50,
-            Some(80),
-            Some(&rpc_err),
-            "upstream error",
-        );
-
-        let ProxyEvent::Request(e) = event else {
-            panic!("expected Request variant");
-        };
-        assert_eq!(e.error_code.as_deref(), Some("-32600"));
-        assert_eq!(e.error_msg.as_deref(), Some("bad request"));
-        assert_eq!(e.client_name.as_deref(), Some("vscode-copilot"));
-        assert_eq!(e.client_version.as_deref(), Some("0.9.0"));
-        assert_eq!(e.status, 500);
-    }
-
-    #[test]
-    fn make_request_event__serializes_client_fields() {
-        let event = make_request_event(
-            "proxy",
-            "/mcp",
-            "tools/call",
-            &McpMethod::ToolsCall,
-            &Some("search".into()),
-            Some("sess-1"),
-            Some("claude-desktop".into()),
-            Some("1.2.0".into()),
-            200,
-            Instant::now(),
-            None,
-            64,
-            None,
-            None,
-            "test",
-        );
-
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"client_name\":\"claude-desktop\""));
-        assert!(json.contains("\"client_version\":\"1.2.0\""));
-        assert!(json.contains("\"type\":\"request\""));
-    }
-
-    #[test]
-    fn make_request_event__omits_null_client_in_json() {
-        let event = make_request_event(
-            "proxy",
-            "/mcp",
-            "tools/call",
-            &McpMethod::ToolsCall,
-            &None,
-            None,
-            None,
-            None,
-            200,
-            Instant::now(),
-            None,
-            0,
-            None,
-            None,
-            "test",
-        );
-
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"client_name\":null"));
-        assert!(json.contains("\"client_version\":null"));
-    }
-
-    #[test]
-    fn normalize_platform__variants() {
-        assert_eq!(normalize_platform("Claude Desktop"), "claude");
-        assert_eq!(normalize_platform("cursor-editor"), "cursor");
-        assert_eq!(normalize_platform("ChatGPT Plugin"), "chatgpt");
-        assert_eq!(normalize_platform("OpenAI Agent"), "chatgpt");
-        assert_eq!(normalize_platform("GitHub Copilot"), "vscode");
-        assert_eq!(normalize_platform("VS-Code Extension"), "vscode");
-        assert_eq!(normalize_platform("Windsurf IDE"), "windsurf");
-        assert_eq!(normalize_platform("my-custom-client"), "unknown");
-    }
 
     // ── Schema ingest / stale observation ─────────────────────────────
 

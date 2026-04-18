@@ -50,5 +50,7 @@ pub mod sse;
 pub use csp::{
     CspConfig, Directive, DirectivePolicy, Mode, WidgetScoped, effective_domains, glob_match,
 };
-pub use health::{ConnectionStatus, ProxyHealth, SharedProxyHealth, lock_health, new_shared_health};
+pub use health::{
+    ConnectionStatus, ProxyHealth, SharedProxyHealth, lock_health, new_shared_health,
+};
 pub use rewrite::{RewriteConfig, rewrite_response};
