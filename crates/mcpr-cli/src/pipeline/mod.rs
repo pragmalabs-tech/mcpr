@@ -4,8 +4,12 @@
 
 pub mod context;
 pub mod emit;
+pub mod mw;
 pub mod parser;
 
-pub use context::RequestContext;
+pub use context::{RequestContext, ResponseContext};
 pub use emit::{ResponseSummary, emit_request_event, normalize_platform};
+pub use mw::{
+    ResponseMw, SchemaIngestMw, SseUnwrapMw, SseWrapMw, StaleMarkMw, UpstreamUrlMapMw, UrlRewriteMw,
+};
 pub use parser::build_request_context;

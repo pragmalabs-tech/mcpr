@@ -1,14 +1,22 @@
-//! The `RequestContext` — a one-pass parse of the incoming HTTP request that
+//! Per-request contexts threaded through the pipeline.
+//!
+//! [`RequestContext`] is a one-pass parse of the incoming HTTP request that
 //! every downstream stage reads from instead of re-parsing. Handlers update
 //! a small set of mutable fields (session id after upstream assigns one,
 //! client name/version after session lookup) before handing off to
 //! [`super::emit::emit_request_event`].
+//!
+//! [`ResponseContext`] carries the accumulating response through the
+//! response middleware chain: the raw body, an optional parsed JSON view,
+//! SSE-wrapping state, and JSON-RPC error info. Middleware mutate it; the
+//! final handler builds the `axum::Response` from `resp.body` + `resp.headers`.
 
 use std::time::Instant;
 
-use axum::http::Method;
+use axum::http::{HeaderMap, Method};
 use mcpr_core::protocol::session::ClientInfo;
 use mcpr_core::protocol::{McpMethod, ParsedBody};
+use serde_json::Value;
 
 pub struct RequestContext {
     pub start: Instant,
@@ -23,8 +31,6 @@ pub struct RequestContext {
     pub session_id: Option<String>,
 
     // ── JSON-RPC / MCP (None when the body is not JSON-RPC) ──
-    /// Parsed JSON-RPC envelope — kept for middleware in later phases.
-    #[allow(dead_code)]
     pub jsonrpc: Option<ParsedBody>,
     pub mcp_method: Option<McpMethod>,
     /// String form for event output. Set to the protocol method for MCP POSTs
@@ -41,4 +47,40 @@ pub struct RequestContext {
     /// Resolved from the session store by the handler before emit.
     pub client_name: Option<String>,
     pub client_version: Option<String>,
+}
+
+/// Response-side state threaded through the response middleware chain.
+///
+/// Middleware mutate `body` and `json` in place. Handlers instantiate after
+/// reading the upstream body and finalize by building an `axum::Response` from
+/// `(status, headers, body)`.
+pub struct ResponseContext {
+    pub status: u16,
+    pub headers: HeaderMap,
+    /// Serialized response body — what gets returned to the client. Mutated
+    /// by the rewrite and SSE-wrap middleware.
+    pub body: Vec<u8>,
+    /// True when the upstream sent SSE-wrapped JSON. `SseUnwrapMw` sets it;
+    /// `SseWrapMw` reads it to decide whether to re-wrap.
+    pub was_sse: bool,
+    /// Parsed JSON view of the body. Populated by `SseUnwrapMw`; mutated by
+    /// later mw; serialized back into `body` by `SseWrapMw`.
+    pub json: Option<Value>,
+    /// JSON-RPC error extracted from `json` (when present).
+    pub rpc_error: Option<(i64, String)>,
+    pub upstream_us: Option<u64>,
+}
+
+impl ResponseContext {
+    pub fn new(status: u16, headers: HeaderMap, body: Vec<u8>, upstream_us: Option<u64>) -> Self {
+        Self {
+            status,
+            headers,
+            body,
+            was_sse: false,
+            json: None,
+            rpc_error: None,
+            upstream_us,
+        }
+    }
 }

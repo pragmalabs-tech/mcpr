@@ -29,6 +29,7 @@ futures-util = { workspace = true }
 http-body-util = "0.1"
 toml = "0.8"
 dashmap = { workspace = true }
+async-trait = { workspace = true }
 url = { workspace = true }
 mcpr-core = { workspace = true }
 

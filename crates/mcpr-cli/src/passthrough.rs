@@ -2,17 +2,20 @@ use std::time::Instant;
 
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 
-use crate::pipeline::{RequestContext, ResponseSummary, emit_request_event};
+use crate::pipeline::{
+    RequestContext, ResponseContext, ResponseMw, ResponseSummary, UpstreamUrlMapMw,
+    emit_request_event,
+};
 use crate::proxy::forward_request;
 use crate::state::ProxyState;
 use mcpr_core::proxy::forwarding::{build_response, read_body_capped};
-use mcpr_core::proxy::sse::split_upstream;
 
-/// Forward a request to upstream and return the response, rewriting upstream URLs in JSON bodies.
+/// Forward a request to upstream and return the response, rewriting upstream
+/// URLs in JSON bodies via [`UpstreamUrlMapMw`].
 pub async fn forward_and_passthrough(
     state: &ProxyState,
     ctx: &mut RequestContext,
@@ -44,42 +47,46 @@ pub async fn forward_and_passthrough(
             };
             let upstream_us = upstream_start.elapsed().as_micros() as u64;
 
-            // Rewrite upstream base URL → proxy URL in JSON responses
-            let is_json = resp_headers
-                .get(header::CONTENT_TYPE)
+            let mut resp_ctx =
+                ResponseContext::new(status, resp_headers, bytes.to_vec(), Some(upstream_us));
+
+            UpstreamUrlMapMw
+                .on_response(state, ctx, &mut resp_ctx)
+                .await;
+
+            // Today's behavior: note="rewritten" if response was JSON,
+            // "passthrough" otherwise. The mw is a no-op for non-JSON so we
+            // can infer the path from content-type on `resp_ctx.headers`.
+            let note = if resp_ctx
+                .headers
+                .get(axum::http::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .map(|ct| ct.contains("json"))
-                .unwrap_or(false);
-
-            let (response_body, note) = if is_json {
-                let config = state.rewrite_config.read().await;
-                let (upstream_base, _) = split_upstream(&config.mcp_upstream);
-                let body_str = String::from_utf8_lossy(&bytes);
-                let rewritten = body_str
-                    .replace(
-                        upstream_base.trim_end_matches('/'),
-                        config.proxy_url.trim_end_matches('/'),
-                    )
-                    .into_bytes();
-                (rewritten, "rewritten")
+                .unwrap_or(false)
+            {
+                "rewritten"
             } else {
-                (bytes.to_vec(), "passthrough")
+                "passthrough"
             };
 
             emit_request_event(
                 state,
                 ctx,
                 &ResponseSummary {
-                    status,
-                    response_size: Some(response_body.len() as u64),
-                    upstream_us: Some(upstream_us),
+                    status: resp_ctx.status,
+                    response_size: Some(resp_ctx.body.len() as u64),
+                    upstream_us: resp_ctx.upstream_us,
                     error_code: None,
                     error_msg: None,
                 },
                 note,
             );
 
-            build_response(status, &resp_headers, Body::from(response_body))
+            build_response(
+                resp_ctx.status,
+                &resp_ctx.headers,
+                Body::from(resp_ctx.body),
+            )
         }
         Err(e) => {
             let upstream_us = upstream_start.elapsed().as_micros() as u64;

@@ -121,8 +121,7 @@ impl mcpr_tunnel::TunnelStatusCallback for TunnelStatusAdapter {
             proxy_health::ConnectionStatus::Disconnected;
     }
     fn on_evicted(&self) {
-        proxy_health::lock_health(&self.0).tunnel_status =
-            proxy_health::ConnectionStatus::Evicted;
+        proxy_health::lock_health(&self.0).tunnel_status = proxy_health::ConnectionStatus::Evicted;
     }
 }
 
@@ -968,11 +967,7 @@ fn validate_mcp_url(url: &str) {
 
 /// Probe the MCP upstream at startup by sending an `initialize` JSON-RPC request.
 /// This validates both connectivity and that the endpoint speaks MCP protocol.
-async fn probe_mcp_upstream(
-    url: &str,
-    client: &reqwest::Client,
-    health_ref: &SharedProxyHealth,
-) {
+async fn probe_mcp_upstream(url: &str, client: &reqwest::Client, health_ref: &SharedProxyHealth) {
     let (status, warning) = check_mcp_endpoint(url, client).await;
     let mut h = proxy_health::lock_health(health_ref);
     h.mcp_status = status;
