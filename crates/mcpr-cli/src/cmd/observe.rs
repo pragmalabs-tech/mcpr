@@ -208,7 +208,10 @@ pub fn session(args: ProxySessionArgs) -> Result<(), String> {
 
 pub fn schema(args: ProxySchemaArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = args.proxy.clone();
+    // Positional `name` takes precedence over the `--proxy` flag so both
+    // `mcpr proxy schema my-proxy` and `mcpr proxy schema --proxy my-proxy`
+    // work.
+    let name = args.name.clone().or_else(|| args.proxy.clone());
     let mode = OutputMode::from(args.json);
 
     if args.unused {
@@ -227,7 +230,7 @@ pub fn schema(args: ProxySchemaArgs) -> Result<(), String> {
     if args.changes {
         let rows = engine
             .schema_changes(&SchemaChangesParams {
-                upstream_url: None,
+                proxy: name.clone(),
                 method: args.method.clone(),
                 limit: args.limit,
             })
@@ -239,7 +242,7 @@ pub fn schema(args: ProxySchemaArgs) -> Result<(), String> {
 
     let rows = engine
         .schema(&SchemaParams {
-            upstream_url: None,
+            proxy: name.clone(),
             method: args.method.clone(),
         })
         .map_err(|e| format!("query failed: {e}"))?;

@@ -6,11 +6,12 @@
 //! - `SessionEnd` → update `ended_at` on the session
 //! - `Heartbeat` → ignored (not stored locally)
 
-use mcpr_core::event::{EventSink, ProxyEvent};
+use mcpr_core::event::{EventSink, ProxyEvent, SchemaVersionCreatedEvent};
 
 use super::engine::Store;
 use super::event::{
-    RequestEvent as StoreRequestEvent, RequestStatus, SessionEvent as StoreSessionEvent, StoreEvent,
+    RequestEvent as StoreRequestEvent, RequestStatus, SchemaVersionEvent,
+    SessionEvent as StoreSessionEvent, StoreEvent,
 };
 
 /// Event sink that writes to the SQLite store.
@@ -76,21 +77,72 @@ impl EventSink for SqliteSink {
                 // Heartbeats are not stored locally.
             }
             ProxyEvent::SchemaVersionCreated(e) => {
-                self.store.record(StoreEvent::SchemaVersion(
-                    super::event::SchemaVersionEvent {
-                        ts: e.ts,
-                        proxy: e.upstream_id.clone(),
-                        upstream_url: e.upstream_url.clone(),
-                        method: e.method.clone(),
-                        payload: e.payload.to_string(),
-                        content_hash: e.content_hash.clone(),
-                    },
-                ));
+                self.store.record(map_schema_version(e));
             }
         }
     }
 
     fn name(&self) -> &'static str {
         "sqlite"
+    }
+}
+
+fn map_schema_version(e: &SchemaVersionCreatedEvent) -> StoreEvent {
+    StoreEvent::SchemaVersion(SchemaVersionEvent {
+        ts: e.ts,
+        proxy: e.upstream_id.clone(),
+        upstream_url: e.upstream_url.clone(),
+        method: e.method.clone(),
+        payload: e.payload.to_string(),
+        content_hash: e.content_hash.clone(),
+    })
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn map_schema_version__copies_fields_correctly() {
+        let event = SchemaVersionCreatedEvent {
+            ts: 1_700_000_000_000,
+            upstream_id: "api".into(),
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            version: 3,
+            version_id: "abc123def4567890".into(),
+            content_hash: "abc123def4567890cafebabe".into(),
+            payload: json!({"tools": [{"name": "search"}]}),
+        };
+
+        let StoreEvent::SchemaVersion(sv) = map_schema_version(&event) else {
+            panic!("expected StoreEvent::SchemaVersion");
+        };
+        assert_eq!(sv.ts, 1_700_000_000_000);
+        assert_eq!(sv.proxy, "api");
+        assert_eq!(sv.upstream_url, "http://localhost:9000");
+        assert_eq!(sv.method, "tools/list");
+        assert_eq!(sv.content_hash, "abc123def4567890cafebabe");
+        assert!(sv.payload.contains("search"));
+    }
+
+    #[test]
+    fn map_schema_version__upstream_id_maps_to_proxy_column() {
+        let event = SchemaVersionCreatedEvent {
+            ts: 0,
+            upstream_id: "proxy-alpha".into(),
+            upstream_url: "".into(),
+            method: "initialize".into(),
+            version: 1,
+            version_id: "0".into(),
+            content_hash: "0".into(),
+            payload: json!({}),
+        };
+        let StoreEvent::SchemaVersion(sv) = map_schema_version(&event) else {
+            panic!();
+        };
+        assert_eq!(sv.proxy, "proxy-alpha");
     }
 }

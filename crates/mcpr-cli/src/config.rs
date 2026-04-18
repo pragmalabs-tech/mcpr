@@ -391,7 +391,12 @@ pub struct ProxySessionArgs {
 /// Arguments for `mcpr proxy schema [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxySchemaArgs {
-    /// Filter to a specific proxy name (omit to show all proxies)
+    /// Filter to a specific proxy name (omit to show all proxies).
+    /// Takes precedence over `--proxy` if both are given.
+    pub name: Option<String>,
+
+    /// Alias for the positional `name` argument, for consistency with
+    /// `mcpr proxy logs`.
     #[arg(long)]
     pub proxy: Option<String>,
 
