@@ -39,16 +39,17 @@
 //! +-- widgets.rs        # Widget HTML serving, asset proxying
 //! +-- passthrough.rs    # Non-MCP request forwarding
 //! +-- admin.rs          # Health/readiness admin server
-//! +-- event_bus.rs      # EventBus — routes ProxyEvents to sinks
 //! +-- stderr_sink.rs    # StderrSink — console output
 //! ```
+//!
+//! The event bus (routes `ProxyEvent` to sinks) lives in
+//! `mcpr_core::event` — this binary just registers sinks via `EventManager`.
 
 mod admin;
 mod cmd;
 mod config;
 #[cfg(unix)]
 mod daemon;
-mod event_bus;
 mod logic;
 mod mcp_handler;
 mod passthrough;
@@ -112,7 +113,7 @@ pub struct AppState {
     pub upstream: UpstreamClient,
     pub proxy_state_ref: SharedProxyState,
     /// Single event pipeline — replaces logger + events + store.
-    pub event_bus: event_bus::EventBus,
+    pub event_bus: mcpr_core::event::EventBus,
     pub sessions: MemorySessionStore,
     /// Top-level view of the upstream MCP server's schema. Fed by
     /// `mcp_handler` on every schema-method response.
@@ -621,10 +622,10 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     };
 
     // Build event sinks — one pipeline, multiple destinations.
-    let mut sinks: Vec<Box<dyn mcpr_core::event::EventSink>> = Vec::new();
+    let mut event_manager = mcpr_core::event::EventManager::new();
 
     // 1. Stderr sink — real-time console output.
-    sinks.push(Box::new(stderr_sink::StderrSink::new(
+    event_manager.register(Box::new(stderr_sink::StderrSink::new(
         cfg.runtime.log_format,
     )));
 
@@ -640,7 +641,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
                     colored::Colorize::dimmed("store"),
                     db_path.display()
                 );
-                sinks.push(Box::new(mcpr_integrations::store::SqliteSink::new(store)));
+                event_manager.register(Box::new(mcpr_integrations::store::SqliteSink::new(store)));
             }
             Err(e) => {
                 eprintln!(
@@ -660,7 +661,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         let cloud_endpoint = format!("{}/api/ingest-events", endpoint.trim_end_matches('/'));
         proxy_state::lock_state(&proxy_state_ref).cloud_endpoint = Some(cloud_endpoint.clone());
         let cloud_state = proxy_state_ref.clone();
-        sinks.push(Box::new(mcpr_integrations::CloudSink::new(
+        event_manager.register(Box::new(mcpr_integrations::CloudSink::new(
             mcpr_integrations::CloudSinkConfig {
                 endpoint: cloud_endpoint,
                 token: token.clone(),
@@ -681,7 +682,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         )));
     }
 
-    let event_bus_handle = event_bus::EventBus::start(sinks);
+    let event_bus_handle = event_manager.start();
 
     let state = AppState {
         mcp_upstream: mcp.clone(),
