@@ -1,23 +1,23 @@
 //! SSE unwrap/wrap middleware — parses `event-stream` wrapped JSON into
 //! `resp.json` on the way in, and re-wraps the serialized body on the way out.
 
+use crate::protocol as jsonrpc;
+use crate::proxy::sse::{extract_json_from_sse, wrap_as_sse};
 use async_trait::async_trait;
-use mcpr_core::protocol as jsonrpc;
-use mcpr_core::proxy::sse::{extract_json_from_sse, wrap_as_sse};
 use serde_json::Value;
 
-use super::ResponseMw;
-use crate::pipeline::context::{RequestContext, ResponseContext};
-use crate::state::ProxyState;
+use super::ResponseMiddleware;
+use crate::proxy::pipeline::context::{RequestContext, ResponseContext};
+use crate::proxy::proxy_state::ProxyState;
 
 /// Parse the raw response body into `resp.json`. If the body was SSE-wrapped,
-/// unwrap it first and set `resp.was_sse = true` so `SseWrapMw` knows to
+/// unwrap it first and set `resp.was_sse = true` so `SseWrapMiddleware` knows to
 /// re-wrap after mutations. Also extracts any JSON-RPC error into
 /// `resp.rpc_error` so later stages / emit can see it.
-pub struct SseUnwrapMw;
+pub struct SseUnwrapMiddleware;
 
 #[async_trait]
-impl ResponseMw for SseUnwrapMw {
+impl ResponseMiddleware for SseUnwrapMiddleware {
     async fn on_response(
         &self,
         _state: &ProxyState,
@@ -41,10 +41,10 @@ impl ResponseMw for SseUnwrapMw {
 /// Re-serialize `resp.json` back into `resp.body`. If `resp.was_sse` is set,
 /// wrap the serialized body in SSE `data:` framing. No-op when `resp.json`
 /// is `None` (non-JSON response — left untouched).
-pub struct SseWrapMw;
+pub struct SseWrapMiddleware;
 
 #[async_trait]
-impl ResponseMw for SseWrapMw {
+impl ResponseMiddleware for SseWrapMiddleware {
     async fn on_response(
         &self,
         _state: &ProxyState,

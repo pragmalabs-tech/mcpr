@@ -2,10 +2,10 @@
 
 use std::time::Instant;
 
+use crate::protocol::session;
+use crate::protocol::{self as jsonrpc, McpMethod};
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, header};
-use mcpr_core::protocol::session;
-use mcpr_core::protocol::{self as jsonrpc, McpMethod};
 
 use super::context::RequestContext;
 
@@ -66,6 +66,7 @@ pub fn build_request_context(
         client_info_from_init,
         client_name: None,
         client_version: None,
+        tags: Vec::new(),
     }
 }
 

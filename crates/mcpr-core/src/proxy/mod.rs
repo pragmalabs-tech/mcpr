@@ -1,51 +1,32 @@
 //! # mcpr-proxy
 //!
-//! Proxy engine for mcpr: request routing, upstream forwarding, SSE streaming,
-//! and widget CSP rewriting.
-//!
-//! This crate sits between MCP clients and upstream MCP servers. It classifies
-//! requests, forwards them over HTTP, relays SSE streams, and rewrites widget
-//! CSP metadata on the way back.
-//!
-//! ## Responsibilities
-//!
-//! - **Request routing** (`router`): Classify incoming HTTP requests into typed
-//!   variants — MCP JSON-RPC POST, MCP SSE GET, widget HTML, widget assets,
-//!   OAuth callbacks, or passthrough.
-//!
-//! - **Upstream forwarding** (`forwarding`): HTTP client with connection pooling,
-//!   semaphore-based concurrency limiting, configurable timeouts, and header
-//!   forwarding (auth, content-type, MCP session ID).
-//!
-//! - **SSE handling** (`sse`): Extract JSON from SSE-wrapped responses, re-wrap
-//!   JSON as SSE, and split upstream URLs into (base, path) components.
-//!
-//! - **Widget CSP** (`csp`, `rewrite`): Declarative CSP config with per-directive
-//!   modes and widget-scoped overrides. `csp::effective_domains` computes the
-//!   final domain list for one directive; `rewrite::rewrite_response` applies
-//!   that to every CSP array in a JSON-RPC response.
-//!
-//! - **Proxy state** (`state`): Shared runtime state tracking MCP upstream
-//!   health, tunnel status, widget discovery, cloud sync, and request counters.
+//! Full MCP proxy engine: per-request pipeline (parse → route → middleware
+//! → forward → emit), upstream forwarding, SSE streaming, widget CSP
+//! rewriting, widget bundle serving, per-proxy health. Embed this crate and
+//! wire a frontend (axum, warp, anything) around [`pipeline::run`].
 //!
 //! ## Module layout
 //!
 //! ```text
 //! proxy/
-//! ├── router.rs       ClassifiedRequest, classify()
-//! ├── forwarding.rs   UpstreamClient, forward_request()
+//! ├── pipeline/       Per-request pipeline (parse → route → mw → emit)
+//! ├── proxy_state.rs  ProxyState — the runtime one proxy instance holds
+//! ├── widgets.rs      Widget HTML bundle serving + discovery
+//! ├── forwarding.rs   UpstreamClient, forward_request, read_body_capped
 //! ├── sse.rs          SSE extract/wrap helpers
-//! ├── csp.rs          CspConfig, DirectivePolicy, WidgetScoped, effective_domains
-//! ├── rewrite.rs      RewriteConfig, rewrite_response()
+//! ├── csp.rs          CspConfig, DirectivePolicy, WidgetScoped
+//! ├── rewrite.rs      RewriteConfig, rewrite_response (widget CSP)
 //! └── health.rs       ProxyHealth, ConnectionStatus, SharedProxyHealth
 //! ```
 
 pub mod csp;
 pub mod forwarding;
 pub mod health;
+pub mod pipeline;
+pub mod proxy_state;
 pub mod rewrite;
-pub mod router;
 pub mod sse;
+pub mod widgets;
 
 pub use csp::{
     CspConfig, Directive, DirectivePolicy, Mode, WidgetScoped, effective_domains, glob_match,
@@ -53,4 +34,6 @@ pub use csp::{
 pub use health::{
     ConnectionStatus, ProxyHealth, SharedProxyHealth, lock_health, new_shared_health,
 };
+pub use proxy_state::ProxyState;
 pub use rewrite::{RewriteConfig, rewrite_response};
+pub use widgets::WidgetSource;

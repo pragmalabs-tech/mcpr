@@ -13,9 +13,9 @@
 
 use std::time::Instant;
 
+use crate::protocol::session::ClientInfo;
+use crate::protocol::{McpMethod, ParsedBody};
 use axum::http::{HeaderMap, Method};
-use mcpr_core::protocol::session::ClientInfo;
-use mcpr_core::protocol::{McpMethod, ParsedBody};
 use serde_json::Value;
 
 pub struct RequestContext {
@@ -47,6 +47,11 @@ pub struct RequestContext {
     /// Resolved from the session store by the handler before emit.
     pub client_name: Option<String>,
     pub client_version: Option<String>,
+
+    /// Transform tags pushed by handlers / middleware. The emit stage joins
+    /// them with `+` to build the `RequestEvent.note` field
+    /// (e.g. `["rewritten", "sse"]` → `"rewritten+sse"`).
+    pub tags: Vec<&'static str>,
 }
 
 /// Response-side state threaded through the response middleware chain.
@@ -60,11 +65,11 @@ pub struct ResponseContext {
     /// Serialized response body — what gets returned to the client. Mutated
     /// by the rewrite and SSE-wrap middleware.
     pub body: Vec<u8>,
-    /// True when the upstream sent SSE-wrapped JSON. `SseUnwrapMw` sets it;
-    /// `SseWrapMw` reads it to decide whether to re-wrap.
+    /// True when the upstream sent SSE-wrapped JSON. `SseUnwrapMiddleware` sets it;
+    /// `SseWrapMiddleware` reads it to decide whether to re-wrap.
     pub was_sse: bool,
-    /// Parsed JSON view of the body. Populated by `SseUnwrapMw`; mutated by
-    /// later mw; serialized back into `body` by `SseWrapMw`.
+    /// Parsed JSON view of the body. Populated by `SseUnwrapMiddleware`; mutated by
+    /// later middleware; serialized back into `body` by `SseWrapMiddleware`.
     pub json: Option<Value>,
     /// JSON-RPC error extracted from `json` (when present).
     pub rpc_error: Option<(i64, String)>,

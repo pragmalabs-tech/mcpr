@@ -1,18 +1,18 @@
 //! Widget CSP rewrite — thin wrapper around
-//! [`mcpr_core::proxy::rewrite_response`]. Applies only to MCP JSON-RPC
+//! [`crate::proxy::rewrite_response`]. Applies only to MCP JSON-RPC
 //! responses (requires a method string and parsed JSON).
 
+use crate::proxy::rewrite_response;
 use async_trait::async_trait;
-use mcpr_core::proxy::rewrite_response;
 
-use super::ResponseMw;
-use crate::pipeline::context::{RequestContext, ResponseContext};
-use crate::state::ProxyState;
+use super::ResponseMiddleware;
+use crate::proxy::pipeline::context::{RequestContext, ResponseContext};
+use crate::proxy::proxy_state::ProxyState;
 
-pub struct UrlRewriteMw;
+pub struct UrlRewriteMiddleware;
 
 #[async_trait]
-impl ResponseMw for UrlRewriteMw {
+impl ResponseMiddleware for UrlRewriteMiddleware {
     async fn on_response(
         &self,
         state: &ProxyState,

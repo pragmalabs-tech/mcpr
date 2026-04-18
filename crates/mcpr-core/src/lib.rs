@@ -9,8 +9,9 @@
 //! - [`event`]: Proxy event types (`ProxyEvent` enum) and sink trait (`EventSink`).
 //! - [`protocol`]: JSON-RPC 2.0 parsing, MCP method classification, session
 //!   management, and schema capture/diffing.
-//! - [`proxy`]: Request routing, upstream forwarding, SSE streaming, CSP
-//!   rewriting, and proxy runtime state.
+//! - [`proxy`]: Full MCP proxy engine — per-request pipeline (parse →
+//!   route → middleware → forward → emit), [`proxy::ProxyState`] runtime,
+//!   widget bundle serving, CSP rewriting, SSE, forwarding, per-proxy health.
 //! - [`time`]: Shared time formatting utilities.
 
 pub mod config;

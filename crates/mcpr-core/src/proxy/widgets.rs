@@ -1,3 +1,15 @@
+//! Widget HTML bundle serving + asset discovery.
+//!
+//! MCP servers can expose UI resources at `ui://widget/<name>`. This module
+//! serves the bundled HTML either from a local directory (`WidgetSource::Static`)
+//! or by reverse-proxying a dev server (`WidgetSource::Proxy`). Asset URLs in
+//! the served HTML are rewritten to point at the proxy so they resolve
+//! through the tunnel instead of the sandbox origin.
+//!
+//! Used by the pipeline's `WidgetOverlayMiddleware` (for `resources/read`
+//! overlays) and by the widget static routes (`/widgets/<name>.html`,
+//! `/widgets`, and arbitrary asset GETs).
+
 use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
@@ -5,7 +17,7 @@ use axum::{
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::state::ProxyState;
+use crate::proxy::proxy_state::ProxyState;
 
 // ── Types ───────────────────────────────────────────────
 
