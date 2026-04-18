@@ -14,7 +14,7 @@
 //! - **Timestamps as unix milliseconds**: Sufficient resolution, avoids i64 overflow,
 //!   and is the natural unit for latency math.
 //! - **UUIDv7 for request_id**: Time-ordered for efficient indexing, globally unique
-//!   for cloud emitter correlation.
+//!   for cloud sink correlation.
 
 /// Current schema version. Stored in the `meta` table and checked on startup.
 /// Bump this when adding migrations.

@@ -7,7 +7,37 @@ use std::io::Write;
 use mcpr_core::event::{EventSink, ProxyEvent};
 use mcpr_core::time::format_latency_us;
 
-use crate::config::LogFormat;
+// ── Log format ──────────────────────────────────────────────────────────
+
+/// Log output format for stderr.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LogFormat {
+    #[default]
+    Json,
+    Pretty,
+}
+
+impl std::str::FromStr for LogFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "json" => Ok(LogFormat::Json),
+            "pretty" | "text" => Ok(LogFormat::Pretty),
+            _ => Err(format!("unknown log format: {s} (expected: json, pretty)")),
+        }
+    }
+}
+
+impl std::fmt::Display for LogFormat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogFormat::Json => write!(f, "json"),
+            LogFormat::Pretty => write!(f, "pretty"),
+        }
+    }
+}
+
+// ── Sink ────────────────────────────────────────────────────────────────
 
 /// Sink that prints proxy events to stderr.
 pub struct StderrSink {
@@ -140,5 +170,13 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"latency_us\":200"));
         assert!(!json.contains("latency_ms"));
+    }
+
+    #[test]
+    fn log_format__parses_known_strings() {
+        assert_eq!("json".parse::<LogFormat>().unwrap(), LogFormat::Json);
+        assert_eq!("pretty".parse::<LogFormat>().unwrap(), LogFormat::Pretty);
+        assert_eq!("text".parse::<LogFormat>().unwrap(), LogFormat::Pretty);
+        assert!("xml".parse::<LogFormat>().is_err());
     }
 }

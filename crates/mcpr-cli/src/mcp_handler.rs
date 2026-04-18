@@ -727,7 +727,7 @@ mod tests {
                 request_timeout: std::time::Duration::from_secs(30),
             },
             proxy_state_ref: mcpr_core::proxy::new_shared_state(),
-            event_bus: crate::event_bus::EventBus::start(vec![]).bus,
+            event_bus: mcpr_core::event::EventManager::new().start().bus,
             sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
             schema_manager: Arc::new(SchemaManager::new("test", MemorySchemaStore::new())),
             max_request_body: 1024 * 1024,

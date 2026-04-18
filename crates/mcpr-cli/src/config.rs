@@ -68,33 +68,10 @@ pub enum CliAction {
 
 // ── Log format ──────────────────────────────────────────────────────────
 
-/// Log output format for stderr.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum LogFormat {
-    #[default]
-    Json,
-    Pretty,
-}
-
-impl std::str::FromStr for LogFormat {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "json" => Ok(LogFormat::Json),
-            "pretty" | "text" => Ok(LogFormat::Pretty),
-            _ => Err(format!("unknown log format: {s} (expected: json, pretty)")),
-        }
-    }
-}
-
-impl std::fmt::Display for LogFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LogFormat::Json => write!(f, "json"),
-            LogFormat::Pretty => write!(f, "pretty"),
-        }
-    }
-}
+/// Log output format for stderr. Defined by `mcpr-integrations::sinks`
+/// alongside `StderrSink`; re-exported here so CLI code keeps referring to
+/// it as `config::LogFormat`.
+pub use mcpr_integrations::sinks::LogFormat;
 
 // ── CLI args ────────────────────────────────────────────────────────────
 
