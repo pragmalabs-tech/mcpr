@@ -72,6 +72,7 @@ use axum::extract::DefaultBodyLimit;
 use tower_http::cors::{Any, CorsLayer};
 
 use config::{CliAction, GatewayConfig, Mode};
+use mcpr_core::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
 use mcpr_core::protocol::session::MemorySessionStore;
 use mcpr_core::proxy::RewriteConfig;
 use mcpr_core::proxy::state::{self as proxy_state, SharedProxyState};
@@ -113,6 +114,9 @@ pub struct AppState {
     /// Single event pipeline — replaces logger + events + store.
     pub event_bus: event_bus::EventBus,
     pub sessions: MemorySessionStore,
+    /// Top-level view of the upstream MCP server's schema. Fed by
+    /// `mcp_handler` on every schema-method response.
+    pub schema_manager: Arc<SchemaManager<MemorySchemaStore>>,
     pub max_request_body: usize,
     pub max_response_body: usize,
     /// Proxy name used to tag events. Derived from upstream URL or config.
@@ -687,6 +691,10 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         proxy_state_ref: proxy_state_ref.clone(),
         event_bus: event_bus_handle.bus.clone(),
         sessions: MemorySessionStore::new(),
+        schema_manager: Arc::new(SchemaManager::new(
+            proxy_name.clone(),
+            MemorySchemaStore::new(),
+        )),
         max_request_body: cfg
             .max_request_body_size
             .unwrap_or(DEFAULT_MAX_REQUEST_BODY_SIZE),

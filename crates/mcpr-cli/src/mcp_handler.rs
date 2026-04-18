@@ -10,9 +10,7 @@ use serde_json::Value;
 use crate::AppState;
 use crate::proxy::forward_request;
 use crate::widgets::fetch_widget_html;
-use mcpr_core::event::{
-    ProxyEvent, RequestEvent, SchemaCaptureEvent, SchemaStaleEvent, SessionStartEvent,
-};
+use mcpr_core::event::{ProxyEvent, RequestEvent, SchemaVersionCreatedEvent, SessionStartEvent};
 use mcpr_core::protocol::schema as proto_schema;
 use mcpr_core::protocol::session::{self as session, SessionState, SessionStore};
 use mcpr_core::protocol::{self as jsonrpc, McpMethod};
@@ -245,9 +243,11 @@ pub async fn handle_mcp_post(
         let rpc_error =
             jsonrpc::extract_error_code(&json_body).map(|(code, msg)| (code, msg.to_string()));
 
-        // Schema capture — BEFORE rewrite, to get raw server response.
-        emit_schema_capture(state, &mcp_method, method_str, body, &json_body);
-        emit_schema_stale(state, &json_body);
+        // Schema ingest — BEFORE rewrite, so the raw server response is
+        // what gets hashed + persisted. `ingest` returns `Some(version)`
+        // only when pagination is complete AND the content changed.
+        ingest_schema(state, &mcp_method, method_str, body, &json_body).await;
+        observe_schema_stale(state, &json_body);
 
         rewrite_response(method_str, &mut json_body, &config);
         let rewritten = serde_json::to_vec(&json_body).unwrap_or(json_bytes);
@@ -462,10 +462,11 @@ async fn handle_resources_read(
     Some(build_response(200, &resp_headers, Body::from(body)))
 }
 
-// ── Schema capture helpers ───────────────────────────────────────────
+// ── Schema ingest helpers ────────────────────────────────────────────
 
-/// Emit a schema capture event if this is a successful schema discovery response.
-fn emit_schema_capture(
+/// Feed a schema-method response into the `SchemaManager` and emit
+/// `SchemaVersionCreated` if a new version was produced.
+async fn ingest_schema(
     state: &AppState,
     mcp_method: &McpMethod,
     method_str: &str,
@@ -475,61 +476,47 @@ fn emit_schema_capture(
     if !proto_schema::is_schema_method(mcp_method) {
         return;
     }
-
-    // Only capture successful responses that have a result field.
-    let result = match response_body.get("result") {
-        Some(r) => r,
-        None => return,
+    let req_val = serde_json::from_slice::<Value>(request_body).unwrap_or_default();
+    let Some(version) = state
+        .schema_manager
+        .ingest(method_str, &req_val, response_body)
+        .await
+    else {
+        return;
     };
 
-    let req_val = serde_json::from_slice::<Value>(request_body).unwrap_or_default();
-    let page_status = proto_schema::detect_page_status(&req_val, response_body);
-    let payload = result.to_string();
-
-    state
-        .event_bus
-        .emit(ProxyEvent::SchemaCapture(SchemaCaptureEvent {
+    state.event_bus.emit(ProxyEvent::SchemaVersionCreated(
+        SchemaVersionCreatedEvent {
             ts: chrono::Utc::now().timestamp_millis(),
-            proxy: state.proxy_name.clone(),
+            upstream_id: state.proxy_name.clone(),
             upstream_url: state.mcp_upstream.clone(),
-            method: method_str.to_string(),
-            payload,
-            page_status,
-        }));
+            method: version.method.clone(),
+            version: version.version,
+            version_id: version.id.to_string(),
+            content_hash: version.content_hash.clone(),
+            payload: (*version.payload).clone(),
+        },
+    ));
 }
 
-/// Check if the response contains a `notifications/tools/list_changed` notification
-/// and emit a schema stale event if so.
-fn emit_schema_stale(state: &AppState, response_body: &Value) {
-    let is_stale_notification = |v: &Value| {
+/// True if `response_body` carries a `notifications/tools/list_changed`
+/// notification — either as a single JSON-RPC message or inside a batch
+/// array.
+fn is_list_changed_response(response_body: &Value) -> bool {
+    let is_notif = |v: &Value| {
         v.get("method").and_then(|m| m.as_str()) == Some(jsonrpc::NOTIFICATIONS_TOOLS_LIST_CHANGED)
     };
+    is_notif(response_body)
+        || response_body
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(is_notif))
+}
 
-    // Check single notification.
-    if is_stale_notification(response_body) {
-        state
-            .event_bus
-            .emit(ProxyEvent::SchemaStale(SchemaStaleEvent {
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                upstream_url: state.mcp_upstream.clone(),
-                method: "tools/list".to_string(),
-            }));
-        return;
-    }
-
-    // Check batch containing the notification.
-    if let Some(arr) = response_body.as_array()
-        && arr.iter().any(is_stale_notification)
-    {
-        state
-            .event_bus
-            .emit(ProxyEvent::SchemaStale(SchemaStaleEvent {
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                upstream_url: state.mcp_upstream.clone(),
-                method: "tools/list".to_string(),
-            }));
+/// Mark the cached `tools/list` schema stale if the response carries
+/// a `notifications/tools/list_changed` notification.
+fn observe_schema_stale(state: &AppState, response_body: &Value) {
+    if is_list_changed_response(response_body) {
+        state.schema_manager.mark_stale(jsonrpc::TOOLS_LIST);
     }
 }
 
@@ -715,5 +702,131 @@ mod tests {
         assert_eq!(normalize_platform("VS-Code Extension"), "vscode");
         assert_eq!(normalize_platform("Windsurf IDE"), "windsurf");
         assert_eq!(normalize_platform("my-custom-client"), "unknown");
+    }
+
+    // ── Schema ingest / stale observation ─────────────────────────────
+
+    use mcpr_core::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn schema_test_state() -> AppState {
+        use tokio::sync::RwLock;
+        AppState {
+            mcp_upstream: "http://upstream:9000".to_string(),
+            widget_source: None,
+            rewrite_config: Arc::new(RwLock::new(mcpr_core::proxy::RewriteConfig {
+                proxy_url: "http://localhost:0".to_string(),
+                proxy_domain: "localhost".to_string(),
+                mcp_upstream: "http://upstream:9000".to_string(),
+                csp: mcpr_core::proxy::CspConfig::default(),
+            })),
+            upstream: mcpr_core::proxy::forwarding::UpstreamClient {
+                http_client: reqwest::Client::builder().build().unwrap(),
+                semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+                request_timeout: std::time::Duration::from_secs(30),
+            },
+            proxy_state_ref: mcpr_core::proxy::new_shared_state(),
+            event_bus: crate::event_bus::EventBus::start(vec![]).bus,
+            sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
+            schema_manager: Arc::new(SchemaManager::new("test", MemorySchemaStore::new())),
+            max_request_body: 1024 * 1024,
+            max_response_body: 1024 * 1024,
+            proxy_name: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn is_list_changed_response__single_notification() {
+        let resp = json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
+        assert!(is_list_changed_response(&resp));
+    }
+
+    #[test]
+    fn is_list_changed_response__batch_with_notification() {
+        let resp = json!([
+            {"jsonrpc": "2.0", "id": 1, "result": {}},
+            {"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}
+        ]);
+        assert!(is_list_changed_response(&resp));
+    }
+
+    #[test]
+    fn is_list_changed_response__unrelated_response_false() {
+        let resp = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}});
+        assert!(!is_list_changed_response(&resp));
+    }
+
+    #[test]
+    fn is_list_changed_response__empty_batch_false() {
+        let resp = json!([]);
+        assert!(!is_list_changed_response(&resp));
+    }
+
+    #[tokio::test]
+    async fn observe_schema_stale__sets_flag_on_notification() {
+        let state = schema_test_state();
+        assert!(!state.schema_manager.is_stale("tools/list"));
+
+        let resp = json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
+        observe_schema_stale(&state, &resp);
+
+        assert!(state.schema_manager.is_stale("tools/list"));
+    }
+
+    #[tokio::test]
+    async fn observe_schema_stale__noop_on_unrelated_response() {
+        let state = schema_test_state();
+        let resp = json!({"jsonrpc": "2.0", "id": 1, "result": {}});
+        observe_schema_stale(&state, &resp);
+        assert!(!state.schema_manager.is_stale("tools/list"));
+    }
+
+    #[tokio::test]
+    async fn ingest_schema__non_schema_method_is_noop() {
+        let state = schema_test_state();
+        let body = Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#);
+        let resp = json!({"jsonrpc": "2.0", "id": 1, "result": {}});
+        ingest_schema(&state, &McpMethod::ToolsCall, "tools/call", &body, &resp).await;
+        assert!(state.schema_manager.latest("tools/list").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest_schema__error_response_is_noop() {
+        let state = schema_test_state();
+        let body = Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        let resp = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}});
+        ingest_schema(&state, &McpMethod::ToolsList, "tools/list", &body, &resp).await;
+        assert!(state.schema_manager.latest("tools/list").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest_schema__schema_method_creates_version() {
+        let state = schema_test_state();
+        let body = Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        let resp = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"tools": [{"name": "search"}]}
+        });
+        ingest_schema(&state, &McpMethod::ToolsList, "tools/list", &body, &resp).await;
+
+        let latest = state.schema_manager.latest("tools/list").await.unwrap();
+        assert_eq!(latest.version, 1);
+        assert_eq!(latest.method, "tools/list");
+    }
+
+    #[tokio::test]
+    async fn ingest_schema__unchanged_payload_no_new_version() {
+        let state = schema_test_state();
+        let body = Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+        let resp = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {"tools": [{"name": "search"}]}
+        });
+        ingest_schema(&state, &McpMethod::ToolsList, "tools/list", &body, &resp).await;
+        ingest_schema(&state, &McpMethod::ToolsList, "tools/list", &body, &resp).await;
+
+        let latest = state.schema_manager.latest("tools/list").await.unwrap();
+        assert_eq!(latest.version, 1);
     }
 }

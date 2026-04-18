@@ -7,13 +7,15 @@ use super::QueryEngine;
 
 /// Parameters for the schema snapshot query.
 pub struct SchemaParams {
-    pub upstream_url: Option<String>,
+    /// Filter to a specific proxy name. `None` returns all proxies.
+    pub proxy: Option<String>,
     pub method: Option<String>,
 }
 
 /// Parameters for the schema changes query.
 pub struct SchemaChangesParams {
-    pub upstream_url: Option<String>,
+    /// Filter to a specific proxy name. `None` returns all proxies.
+    pub proxy: Option<String>,
     pub method: Option<String>,
     pub limit: i64,
 }
@@ -60,7 +62,7 @@ pub struct SchemaToolUsageRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaStatusRow {
     pub upstream_url: String,
-    /// "unknown", "partial", "complete", "stale"
+    /// "unknown", "partial", or "complete".
     pub status: String,
     pub server_name: Option<String>,
     pub server_version: Option<String>,
@@ -71,17 +73,18 @@ pub struct SchemaStatusRow {
 }
 
 impl QueryEngine {
-    /// Fetch all captured schema snapshots, optionally filtered.
+    /// Fetch all captured schema snapshots, optionally filtered by proxy
+    /// name and/or MCP method.
     pub fn schema(&self, params: &SchemaParams) -> Result<Vec<SchemaRow>, rusqlite::Error> {
         let sql = "
             SELECT upstream_url, method, payload, captured_at, schema_hash
             FROM server_schema
-            WHERE (?1 IS NULL OR upstream_url = ?1)
+            WHERE (?1 IS NULL OR proxy = ?1)
               AND (?2 IS NULL OR method = ?2)
             ORDER BY upstream_url, method
         ";
         let mut stmt = self.conn().prepare(sql)?;
-        let rows = stmt.query_map(params![params.upstream_url, params.method], |row| {
+        let rows = stmt.query_map(params![params.proxy, params.method], |row| {
             Ok(SchemaRow {
                 upstream_url: row.get(0)?,
                 method: row.get(1)?,
@@ -93,7 +96,8 @@ impl QueryEngine {
         rows.collect()
     }
 
-    /// Fetch schema change history.
+    /// Fetch schema change history, optionally filtered by proxy name
+    /// and/or MCP method.
     pub fn schema_changes(
         &self,
         params: &SchemaChangesParams,
@@ -101,26 +105,23 @@ impl QueryEngine {
         let sql = "
             SELECT upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at
             FROM schema_changes
-            WHERE (?1 IS NULL OR upstream_url = ?1)
+            WHERE (?1 IS NULL OR proxy = ?1)
               AND (?2 IS NULL OR method = ?2)
             ORDER BY detected_at DESC
             LIMIT ?3
         ";
         let mut stmt = self.conn().prepare(sql)?;
-        let rows = stmt.query_map(
-            params![params.upstream_url, params.method, params.limit],
-            |row| {
-                Ok(SchemaChangeRow {
-                    upstream_url: row.get(0)?,
-                    method: row.get(1)?,
-                    change_type: row.get(2)?,
-                    item_name: row.get(3)?,
-                    old_hash: row.get(4)?,
-                    new_hash: row.get(5)?,
-                    detected_at: row.get(6)?,
-                })
-            },
-        )?;
+        let rows = stmt.query_map(params![params.proxy, params.method, params.limit], |row| {
+            Ok(SchemaChangeRow {
+                upstream_url: row.get(0)?,
+                method: row.get(1)?,
+                change_type: row.get(2)?,
+                item_name: row.get(3)?,
+                old_hash: row.get(4)?,
+                new_hash: row.get(5)?,
+                detected_at: row.get(6)?,
+            })
+        })?;
         rows.collect()
     }
 
@@ -156,22 +157,6 @@ impl QueryEngine {
         let (server_name, server_version, protocol_version, capabilities) =
             self.extract_server_info(upstream_url);
 
-        // Check for stale markers newer than the latest capture for that method.
-        let stale_sql = "
-            SELECT COUNT(*) FROM schema_changes sc
-            WHERE sc.upstream_url = ?1
-              AND sc.change_type = 'stale'
-              AND sc.detected_at > COALESCE(
-                  (SELECT ss.captured_at FROM server_schema ss
-                   WHERE ss.upstream_url = sc.upstream_url AND ss.method = sc.method),
-                  0
-              )
-        ";
-        let stale_count: i64 = self
-            .conn()
-            .query_row(stale_sql, params![upstream_url], |row| row.get(0))?;
-        let is_stale = stale_count > 0;
-
         let has_initialize = method_names.iter().any(|m| m == "initialize");
         let list_methods = [
             "tools/list",
@@ -183,9 +168,7 @@ impl QueryEngine {
             .iter()
             .any(|m| method_names.iter().any(|n| n == m));
 
-        let status = if is_stale {
-            "stale"
-        } else if has_initialize && has_any_list {
+        let status = if has_initialize && has_any_list {
             "complete"
         } else {
             "partial"

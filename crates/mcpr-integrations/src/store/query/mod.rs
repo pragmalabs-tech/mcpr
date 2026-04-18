@@ -907,13 +907,48 @@ mod tests {
             .unwrap();
     }
 
+    /// Insert one `tools/list` schema row + its "initial" change row under
+    /// the given proxy name and URL.
+    fn seed_schema_for_proxy(engine: &QueryEngine, proxy: &str, upstream: &str) {
+        engine
+            .conn()
+            .execute(
+                "INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    proxy,
+                    upstream,
+                    "tools/list",
+                    r#"{"tools":[{"name":"search","description":"search things"}]}"#,
+                    1000i64,
+                    format!("hash-{proxy}")
+                ],
+            )
+            .unwrap();
+        engine
+            .conn()
+            .execute(
+                "INSERT INTO schema_changes (proxy, upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    proxy,
+                    upstream,
+                    "tools/list",
+                    "initial",
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    format!("hash-{proxy}"),
+                    1000i64,
+                ],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn schema__returns_all_snapshots() {
         let engine = seeded_engine();
         seed_schema(&engine);
         let rows = engine
             .schema(&super::schema::SchemaParams {
-                upstream_url: None,
+                proxy: None,
                 method: None,
             })
             .unwrap();
@@ -926,7 +961,7 @@ mod tests {
         seed_schema(&engine);
         let rows = engine
             .schema(&super::schema::SchemaParams {
-                upstream_url: None,
+                proxy: None,
                 method: Some("tools/list".into()),
             })
             .unwrap();
@@ -935,18 +970,77 @@ mod tests {
     }
 
     #[test]
+    fn schema__filter_by_proxy() {
+        let engine = seeded_engine();
+        seed_schema_for_proxy(&engine, "alpha", "http://a:9000");
+        seed_schema_for_proxy(&engine, "beta", "http://b:9000");
+
+        let alpha = engine
+            .schema(&super::schema::SchemaParams {
+                proxy: Some("alpha".into()),
+                method: None,
+            })
+            .unwrap();
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(alpha[0].upstream_url, "http://a:9000");
+
+        let beta = engine
+            .schema(&super::schema::SchemaParams {
+                proxy: Some("beta".into()),
+                method: None,
+            })
+            .unwrap();
+        assert_eq!(beta.len(), 1);
+        assert_eq!(beta[0].upstream_url, "http://b:9000");
+
+        let missing = engine
+            .schema(&super::schema::SchemaParams {
+                proxy: Some("nonexistent".into()),
+                method: None,
+            })
+            .unwrap();
+        assert!(missing.is_empty());
+    }
+
+    #[test]
     fn schema_changes__returns_history() {
         let engine = seeded_engine();
         seed_schema(&engine);
         let rows = engine
             .schema_changes(&super::schema::SchemaChangesParams {
-                upstream_url: None,
+                proxy: None,
                 method: None,
                 limit: 50,
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].change_type, "initial");
+    }
+
+    #[test]
+    fn schema_changes__filter_by_proxy() {
+        let engine = seeded_engine();
+        seed_schema_for_proxy(&engine, "alpha", "http://a:9000");
+        seed_schema_for_proxy(&engine, "beta", "http://b:9000");
+
+        let alpha = engine
+            .schema_changes(&super::schema::SchemaChangesParams {
+                proxy: Some("alpha".into()),
+                method: None,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(alpha.len(), 1);
+        assert_eq!(alpha[0].upstream_url, "http://a:9000");
+
+        let all = engine
+            .schema_changes(&super::schema::SchemaChangesParams {
+                proxy: None,
+                method: None,
+                limit: 50,
+            })
+            .unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     #[test]
@@ -982,21 +1076,6 @@ mod tests {
             .unwrap();
         let status = engine.schema_status("http://partial").unwrap();
         assert_eq!(status.status, "partial");
-    }
-
-    #[test]
-    fn schema_status__stale() {
-        let engine = seeded_engine();
-        seed_schema(&engine);
-        engine
-            .conn()
-            .execute(
-                "INSERT INTO schema_changes (upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params!["http://localhost:9000", "tools/list", "stale", Option::<String>::None, "hash_tools", Option::<String>::None, 9000i64],
-            )
-            .unwrap();
-        let status = engine.schema_status("http://localhost:9000").unwrap();
-        assert_eq!(status.status, "stale");
     }
 
     // ── schema unused ──────────────────────────────────────────────────

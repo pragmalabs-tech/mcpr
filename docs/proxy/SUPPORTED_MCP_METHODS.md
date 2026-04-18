@@ -13,7 +13,7 @@ the proxy does with each one.
 
 | Method | Direction | Type | Proxy Behavior |
 |--------|-----------|------|----------------|
-| `initialize` | client->server | request | Extracts `clientInfo` (name, version, platform) to identify the session. Tracks session state transition to `Initialized`. **Schema capture**: stores server name, version, protocol version, and declared capabilities. |
+| `initialize` | client->server | request | Extracts `clientInfo` (name, version, platform) to identify the session. Tracks session state transition to `Initialized`. **Schema ingest**: `SchemaManager::ingest` captures server name, version, protocol version, and declared capabilities into a new `SchemaVersion`. |
 | `notifications/initialized` | client->server | notification | Transitions session state to `Active`. |
 | `ping` | bidirectional | request | Forwarded as-is. Logged. |
 
@@ -21,16 +21,16 @@ the proxy does with each one.
 
 | Method | Direction | Type | Proxy Behavior |
 |--------|-----------|------|----------------|
-| `tools/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each tool in the response. **Schema capture**: stores tool names, descriptions, and input schemas with change tracking. |
+| `tools/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each tool in the response. **Schema ingest**: `SchemaManager` merges paginated pages, hashes the merged payload, and writes a new `SchemaVersion` only on content change. |
 | `tools/call` | client->server | request | **CSP rewriting**: rewrites `meta` on the response. Extracts **tool name** (`params.name`) for log detail. |
-| `notifications/tools/list_changed` | server->client | notification | Classified and logged. **Schema capture**: marks the cached `tools/list` schema as stale. |
+| `notifications/tools/list_changed` | server->client | notification | Classified and logged. **Schema stale**: `SchemaManager::mark_stale("tools/list")` flips an in-memory flag readable via `SchemaManager::is_stale`. The flag clears on the next ingested `tools/list` response. |
 
 ### Resources
 
 | Method | Direction | Type | Proxy Behavior |
 |--------|-----------|------|----------------|
-| `resources/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each resource in the response. **Schema capture**: stores resource URIs, names, and descriptions. |
-| `resources/templates/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each template in the response (`result.resourceTemplates[]`). **Schema capture**: stores template URIs and descriptions. |
+| `resources/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each resource in the response. **Schema ingest**: `SchemaManager` merges pages and versions resource URIs, names, and descriptions. |
+| `resources/templates/list` | client->server | request | **CSP rewriting**: rewrites `meta` on each template in the response (`result.resourceTemplates[]`). **Schema ingest**: `SchemaManager` versions template URIs and descriptions. |
 | `resources/read` | client->server | request | **CSP rewriting**: rewrites `meta` on each content item. Extracts **resource URI** (`params.uri`) for log detail. HTML text content is never modified. |
 | `resources/subscribe` | client->server | request | Forwarded as-is. Logged. |
 | `resources/unsubscribe` | client->server | request | Forwarded as-is. Logged. |
@@ -39,7 +39,7 @@ the proxy does with each one.
 
 | Method | Direction | Type | Proxy Behavior |
 |--------|-----------|------|----------------|
-| `prompts/list` | client->server | request | Forwarded as-is. Logged. **Schema capture**: stores prompt names, descriptions, and arguments. |
+| `prompts/list` | client->server | request | Forwarded as-is. Logged. **Schema ingest**: `SchemaManager` versions prompt names, descriptions, and arguments. |
 | `prompts/get` | client->server | request | Extracts **prompt name** (`params.name`) for log detail. |
 
 ### Utility
@@ -77,7 +77,14 @@ Every JSON-RPC 2.0 message passing through the proxy is parsed and classified:
 3. **Extract detail**: For methods like `tools/call`, `resources/read`, and
    `notifications/cancelled`, the proxy extracts a short identifier from `params`
    for logging.
-4. **Rewrite** (response path): For methods that return widget metadata, CSP
+4. **Schema ingest** (response path): For `initialize`, `tools/list`,
+   `resources/list`, `resources/templates/list`, and `prompts/list`, the proxy
+   hands the response to `SchemaManager::ingest`. The manager buffers paginated
+   pages, merges on `LastPage` / `Complete`, hashes the merged payload, and
+   writes a new `SchemaVersion` only when the content differs from the current
+   one. A `SchemaVersionCreated` event fires once per new version; unchanged
+   ingests are silent.
+5. **Rewrite** (response path): For methods that return widget metadata, CSP
    domain arrays are rewritten to route through the proxy.
 
 Unknown methods are still forwarded — the proxy never blocks traffic. They just

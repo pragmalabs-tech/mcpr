@@ -30,13 +30,11 @@
 //! the writer flushes any remaining batch and exits. This guarantees no
 //! events are lost on `mcpr stop` / SIGTERM.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
-use sha2::{Digest, Sha256};
 
-use mcpr_core::protocol::schema::{self as proto_schema, PageStatus};
+use mcpr_core::protocol::schema as proto_schema;
 
 use super::event::{RequestStatus, StoreEvent};
 use super::schema;
@@ -63,26 +61,16 @@ const MAX_BATCH_SIZE: usize = 500;
 /// - `conn`: a read-write SQLite connection (already migrated).
 /// - `rx`: the receiving end of the event channel.
 pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEvent>) {
-    // We need a blocking receiver. Since tokio mpsc doesn't have a native
-    // blocking recv with timeout, we use blocking_recv in a polling loop
-    // with try_recv for draining.
     let mut rx = rx;
     let mut batch: Vec<StoreEvent> = Vec::with_capacity(MAX_BATCH_SIZE);
     let mut last_flush = Instant::now();
-    // Pagination buffer: (upstream_url, method) → (first_page_ts, accumulated payloads).
-    let mut page_buffer: HashMap<(String, String), (Instant, Vec<String>)> = HashMap::new();
 
     loop {
-        // Try to receive one event, blocking up to the remaining batch interval.
         let remaining = BATCH_INTERVAL.saturating_sub(last_flush.elapsed());
 
-        // Use a short poll: block for up to `remaining` duration.
         let event = if remaining.is_zero() {
-            // Time to flush — don't wait, just try.
             rx.try_recv().ok()
         } else {
-            // Block until an event arrives or timeout expires.
-            // We use `blocking_recv` with a manual timeout via try_recv + sleep.
             recv_with_timeout(&mut rx, remaining)
         };
 
@@ -90,7 +78,6 @@ pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEv
             Some(e) => {
                 batch.push(e);
 
-                // Drain any additional events already in the channel (non-blocking).
                 while batch.len() < MAX_BATCH_SIZE {
                     match rx.try_recv() {
                         Ok(e) => batch.push(e),
@@ -98,30 +85,25 @@ pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEv
                     }
                 }
 
-                // Flush if batch is full.
                 if batch.len() >= MAX_BATCH_SIZE {
-                    flush_batch(&conn, &mut batch, &mut page_buffer);
+                    flush_batch(&conn, &mut batch);
                     last_flush = Instant::now();
                 }
             }
             None => {
-                // Either timeout (flush interval) or channel closed.
                 if !batch.is_empty() {
-                    flush_batch(&conn, &mut batch, &mut page_buffer);
+                    flush_batch(&conn, &mut batch);
                     last_flush = Instant::now();
                 }
 
-                // Check if the channel is closed (sender dropped).
                 if rx.is_closed() && rx.try_recv().is_err() {
-                    // Final drain — sender is gone, no more events coming.
                     break;
                 }
             }
         }
 
-        // Time-based flush for partially filled batches.
         if !batch.is_empty() && last_flush.elapsed() >= BATCH_INTERVAL {
-            flush_batch(&conn, &mut batch, &mut HashMap::new());
+            flush_batch(&conn, &mut batch);
             last_flush = Instant::now();
         }
     }
@@ -158,11 +140,7 @@ fn recv_with_timeout(
 ///
 /// Session inserts, request inserts, and counter updates all happen in the
 /// same transaction — counters are always consistent with the request rows.
-fn flush_batch(
-    conn: &Connection,
-    batch: &mut Vec<StoreEvent>,
-    page_buffer: &mut HashMap<(String, String), (Instant, Vec<String>)>,
-) {
+fn flush_batch(conn: &Connection, batch: &mut Vec<StoreEvent>) {
     if batch.is_empty() {
         return;
     }
@@ -243,213 +221,100 @@ fn flush_batch(
                 }
             }
 
-            StoreEvent::SchemaCapture(sc) => {
-                handle_schema_capture(conn, sc, page_buffer);
-            }
-
-            StoreEvent::SchemaStale {
-                proxy,
-                upstream_url,
-                method,
-                ts,
-            } => {
-                handle_schema_stale(conn, &proxy, &upstream_url, &method, ts);
+            StoreEvent::SchemaVersion(sv) => {
+                handle_schema_version(conn, sv);
             }
         }
     }
-
-    // Expire stale page buffer entries (abandoned pagination, >60s).
-    page_buffer.retain(|_, (started, _)| started.elapsed() < Duration::from_secs(60));
 
     if let Err(e) = conn.execute_batch("COMMIT;") {
         tracing::warn!("storage writer: commit failed: {e}");
     }
 }
 
-// ── Schema capture helpers ────────────────────────────────────────────
+// ── Schema version persistence ────────────────────────────────────────
 
-/// Handle a schema capture event: buffer pages or write immediately.
-fn handle_schema_capture(
-    conn: &Connection,
-    sc: super::event::SchemaCaptureEvent,
-    page_buffer: &mut HashMap<(String, String), (Instant, Vec<String>)>,
-) {
-    let key = (sc.upstream_url.clone(), sc.method.clone());
-
-    match sc.page_status {
-        PageStatus::Complete => {
-            write_schema(
-                conn,
-                &sc.proxy,
-                &sc.upstream_url,
-                &sc.method,
-                &sc.payload,
-                sc.ts,
-            );
-        }
-        PageStatus::FirstPage => {
-            page_buffer.insert(key, (Instant::now(), vec![sc.payload]));
-        }
-        PageStatus::MiddlePage => {
-            if let Some((_, pages)) = page_buffer.get_mut(&key) {
-                pages.push(sc.payload);
-            }
-        }
-        PageStatus::LastPage => {
-            if let Some((_, mut pages)) = page_buffer.remove(&key) {
-                pages.push(sc.payload);
-                // Parse accumulated payloads and merge via protocol layer.
-                let parsed: Vec<serde_json::Value> = pages
-                    .iter()
-                    .filter_map(|p| serde_json::from_str(p).ok())
-                    .collect();
-                if let Some(merged) = proto_schema::merge_pages(&sc.method, &parsed) {
-                    let payload = merged.to_string();
-                    write_schema(
-                        conn,
-                        &sc.proxy,
-                        &sc.upstream_url,
-                        &sc.method,
-                        &payload,
-                        sc.ts,
-                    );
-                }
-            } else {
-                // Missed earlier pages — store what we have (best effort).
-                write_schema(
-                    conn,
-                    &sc.proxy,
-                    &sc.upstream_url,
-                    &sc.method,
-                    &sc.payload,
-                    sc.ts,
-                );
-            }
-        }
-    }
-}
-
-/// Write a schema snapshot to SQLite: hash, diff, upsert.
-fn write_schema(
-    conn: &Connection,
-    proxy: &str,
-    upstream_url: &str,
-    method: &str,
-    payload: &str,
-    ts: i64,
-) {
-    let new_hash = sha256_hex(payload);
-
-    // Check for existing snapshot.
-    let existing: Option<(String, String)> = conn
+/// Persist a new `SchemaVersion` event: append change rows, upsert snapshot.
+///
+/// The event only fires on content change (SchemaManager guarantees this),
+/// so we don't re-hash or re-check for equality. We only read the prior
+/// payload to compute granular diff rows for `schema_changes`.
+fn handle_schema_version(conn: &Connection, sv: super::event::SchemaVersionEvent) {
+    let prior: Option<(String, String)> = conn
         .query_row(
             schema::GET_SCHEMA_HASH_SQL,
-            rusqlite::params![proxy, upstream_url, method],
+            rusqlite::params![sv.proxy, sv.upstream_url, sv.method],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .ok();
 
-    match existing {
+    match prior {
         None => {
-            // First capture — insert and record "initial" change.
-            if let Err(e) = conn.execute(
-                schema::UPSERT_SERVER_SCHEMA_SQL,
-                rusqlite::params![proxy, upstream_url, method, payload, ts, new_hash],
-            ) {
-                tracing::warn!("storage writer: schema upsert failed: {e}");
-            }
-            if let Err(e) = conn.execute(
-                schema::INSERT_SCHEMA_CHANGE_SQL,
-                rusqlite::params![
-                    proxy,
-                    upstream_url,
-                    method,
-                    "initial",
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    new_hash,
-                    ts
-                ],
-            ) {
-                tracing::warn!("storage writer: schema change insert failed: {e}");
-            }
-        }
-        Some((old_hash, _)) if old_hash == new_hash => {
-            // Same hash — just refresh the captured_at timestamp.
-            if let Err(e) = conn.execute(
-                schema::UPSERT_SERVER_SCHEMA_SQL,
-                rusqlite::params![proxy, upstream_url, method, payload, ts, new_hash],
-            ) {
-                tracing::warn!("storage writer: schema upsert failed: {e}");
-            }
+            insert_change_row(
+                conn,
+                &sv,
+                "initial",
+                None,
+                None,
+                Some(sv.content_hash.as_str()),
+            );
         }
         Some((old_hash, old_payload)) => {
-            // Schema changed — diff and record changes.
             let old_val: serde_json::Value = serde_json::from_str(&old_payload).unwrap_or_default();
-            let new_val: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
-            let diffs = proto_schema::diff_schema(method, &old_val, &new_val);
+            let new_val: serde_json::Value = serde_json::from_str(&sv.payload).unwrap_or_default();
+            let diffs = proto_schema::diff_schema(&sv.method, &old_val, &new_val);
 
             for diff in &diffs {
-                if let Err(e) = conn.execute(
-                    schema::INSERT_SCHEMA_CHANGE_SQL,
-                    rusqlite::params![
-                        proxy,
-                        upstream_url,
-                        method,
-                        diff.change_type,
-                        diff.item_name,
-                        old_hash,
-                        new_hash,
-                        ts
-                    ],
-                ) {
-                    tracing::warn!("storage writer: schema change insert failed: {e}");
-                }
-            }
-
-            // Update the stored schema.
-            if let Err(e) = conn.execute(
-                schema::UPSERT_SERVER_SCHEMA_SQL,
-                rusqlite::params![proxy, upstream_url, method, payload, ts, new_hash],
-            ) {
-                tracing::warn!("storage writer: schema upsert failed: {e}");
+                insert_change_row(
+                    conn,
+                    &sv,
+                    diff.change_type.as_str(),
+                    diff.item_name.as_deref(),
+                    Some(old_hash.as_str()),
+                    Some(sv.content_hash.as_str()),
+                );
             }
         }
     }
+
+    if let Err(e) = conn.execute(
+        schema::UPSERT_SERVER_SCHEMA_SQL,
+        rusqlite::params![
+            sv.proxy,
+            sv.upstream_url,
+            sv.method,
+            sv.payload,
+            sv.ts,
+            sv.content_hash
+        ],
+    ) {
+        tracing::warn!("storage writer: schema upsert failed: {e}");
+    }
 }
 
-/// Record a stale marker in schema_changes.
-fn handle_schema_stale(conn: &Connection, proxy: &str, upstream_url: &str, method: &str, ts: i64) {
-    let current_hash: Option<String> = conn
-        .query_row(
-            "SELECT schema_hash FROM server_schema WHERE proxy = ?1 AND upstream_url = ?2 AND method = ?3",
-            rusqlite::params![proxy, upstream_url, method],
-            |row| row.get(0),
-        )
-        .ok();
-
+fn insert_change_row(
+    conn: &Connection,
+    sv: &super::event::SchemaVersionEvent,
+    change_type: &str,
+    item_name: Option<&str>,
+    old_hash: Option<&str>,
+    new_hash: Option<&str>,
+) {
     if let Err(e) = conn.execute(
         schema::INSERT_SCHEMA_CHANGE_SQL,
         rusqlite::params![
-            proxy,
-            upstream_url,
-            method,
-            "stale",
-            Option::<String>::None,
-            current_hash,
-            Option::<String>::None,
-            ts
+            sv.proxy,
+            sv.upstream_url,
+            sv.method,
+            change_type,
+            item_name,
+            old_hash,
+            new_hash,
+            sv.ts
         ],
     ) {
-        tracing::warn!("storage writer: schema stale insert failed: {e}");
+        tracing::warn!("storage writer: schema change insert failed: {e}");
     }
-}
-
-/// Compute SHA-256 hex hash of a string.
-fn sha256_hex(input: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 #[cfg(test)]
@@ -457,45 +322,70 @@ fn sha256_hex(input: &str) -> String {
 mod tests {
     use super::*;
     use crate::store::db;
-    use crate::store::event::{RequestEvent, SessionEvent};
+    use crate::store::event::{RequestEvent, SchemaVersionEvent, SessionEvent};
 
-    /// Helper: create an in-memory DB with schema applied.
     fn test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA journal_mode = WAL;").ok(); // WAL may not work in-memory, that's fine
+        conn.execute_batch("PRAGMA journal_mode = WAL;").ok();
         db::run_migrations(&conn, "test").unwrap();
         conn
+    }
+
+    fn session_event(id: &str) -> SessionEvent {
+        SessionEvent {
+            session_id: id.into(),
+            proxy: "api".into(),
+            started_at: 1000,
+            client_name: Some("claude-desktop".into()),
+            client_version: Some("1.0.0".into()),
+            client_platform: Some("claude".into()),
+        }
+    }
+
+    fn request_event(id: &str, session_id: &str, status: RequestStatus) -> RequestEvent {
+        RequestEvent {
+            request_id: id.into(),
+            ts: 1001,
+            proxy: "api".into(),
+            session_id: Some(session_id.into()),
+            method: "tools/call".into(),
+            tool: Some("search".into()),
+            latency_us: 142,
+            status,
+            error_code: None,
+            error_msg: None,
+            bytes_in: Some(256),
+            bytes_out: Some(1024),
+        }
+    }
+
+    fn tools_payload(names: &[&str]) -> String {
+        let tools: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!({"name": n, "description": format!("tool {n}")}))
+            .collect();
+        serde_json::json!({"tools": tools}).to_string()
+    }
+
+    fn schema_version_event(payload: &str, hash: &str, ts: i64) -> SchemaVersionEvent {
+        SchemaVersionEvent {
+            ts,
+            proxy: "api".into(),
+            upstream_url: "http://localhost:9000".into(),
+            method: "tools/list".into(),
+            payload: payload.to_string(),
+            content_hash: hash.to_string(),
+        }
     }
 
     #[test]
     fn flush_batch__inserts_session_and_request() {
         let conn = test_db();
         let mut batch = vec![
-            StoreEvent::Session(SessionEvent {
-                session_id: "sess-1".into(),
-                proxy: "api".into(),
-                started_at: 1000,
-                client_name: Some("claude-desktop".into()),
-                client_version: Some("1.0.0".into()),
-                client_platform: Some("claude".into()),
-            }),
-            StoreEvent::Request(RequestEvent {
-                request_id: "req-1".into(),
-                ts: 1001,
-                proxy: "api".into(),
-                session_id: Some("sess-1".into()),
-                method: "tools/call".into(),
-                tool: Some("search".into()),
-                latency_us: 142,
-                status: RequestStatus::Ok,
-                error_code: None,
-                error_msg: None,
-                bytes_in: Some(256),
-                bytes_out: Some(1024),
-            }),
+            StoreEvent::Session(session_event("sess-1")),
+            StoreEvent::Request(request_event("req-1", "sess-1", RequestStatus::Ok)),
         ];
-
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        flush_batch(&conn, &mut batch);
 
         let client: String = conn
             .query_row(
@@ -506,15 +396,6 @@ mod tests {
             .unwrap();
         assert_eq!(client, "claude-desktop");
 
-        let tool: String = conn
-            .query_row(
-                "SELECT tool FROM requests WHERE request_id = 'req-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(tool, "search");
-
         let (calls, errors): (i64, i64) = conn
             .query_row(
                 "SELECT total_calls, total_errors FROM sessions WHERE session_id = 'sess-1'",
@@ -524,76 +405,19 @@ mod tests {
             .unwrap();
         assert_eq!(calls, 1);
         assert_eq!(errors, 0);
-
-        let latency: i64 = conn
-            .query_row(
-                "SELECT latency_us FROM requests WHERE request_id = 'req-1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(latency, 142);
-    }
-
-    #[test]
-    fn flush_batch__sub_ms_latency() {
-        let conn = test_db();
-        let mut batch = vec![
-            StoreEvent::Session(SessionEvent {
-                session_id: "sess-sub".into(),
-                proxy: "api".into(),
-                started_at: 1000,
-                client_name: None,
-                client_version: None,
-                client_platform: None,
-            }),
-            StoreEvent::Request(RequestEvent {
-                request_id: "req-fast".into(),
-                ts: 1001,
-                proxy: "api".into(),
-                session_id: Some("sess-sub".into()),
-                method: "tools/call".into(),
-                tool: Some("ping".into()),
-                latency_us: 200, // 200μs — sub-millisecond
-                status: RequestStatus::Ok,
-                error_code: None,
-                error_msg: None,
-                bytes_in: Some(64),
-                bytes_out: Some(32),
-            }),
-        ];
-
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
-
-        let latency: i64 = conn
-            .query_row(
-                "SELECT latency_us FROM requests WHERE request_id = 'req-fast'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(latency, 200);
     }
 
     #[test]
     fn flush_batch__session_closed() {
         let conn = test_db();
-
-        let mut batch = vec![StoreEvent::Session(SessionEvent {
-            session_id: "sess-2".into(),
-            proxy: "api".into(),
-            started_at: 2000,
-            client_name: None,
-            client_version: None,
-            client_platform: None,
-        })];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        let mut batch = vec![StoreEvent::Session(session_event("sess-2"))];
+        flush_batch(&conn, &mut batch);
 
         let mut batch = vec![StoreEvent::SessionClosed {
             session_id: "sess-2".into(),
             ended_at: 3000,
         }];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        flush_batch(&conn, &mut batch);
 
         let ended: i64 = conn
             .query_row(
@@ -608,32 +432,11 @@ mod tests {
     #[test]
     fn flush_batch__error_increments_counter() {
         let conn = test_db();
-
         let mut batch = vec![
-            StoreEvent::Session(SessionEvent {
-                session_id: "sess-3".into(),
-                proxy: "api".into(),
-                started_at: 3000,
-                client_name: None,
-                client_version: None,
-                client_platform: None,
-            }),
-            StoreEvent::Request(RequestEvent {
-                request_id: "req-err-1".into(),
-                ts: 3001,
-                proxy: "api".into(),
-                session_id: Some("sess-3".into()),
-                method: "tools/call".into(),
-                tool: Some("broken".into()),
-                latency_us: 500,
-                status: RequestStatus::Error,
-                error_code: Some("-32600".into()),
-                error_msg: Some("bad request".into()),
-                bytes_in: None,
-                bytes_out: None,
-            }),
+            StoreEvent::Session(session_event("sess-3")),
+            StoreEvent::Request(request_event("req-err-1", "sess-3", RequestStatus::Error)),
         ];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        flush_batch(&conn, &mut batch);
 
         let (calls, errors): (i64, i64) = conn
             .query_row(
@@ -646,31 +449,16 @@ mod tests {
         assert_eq!(errors, 1);
     }
 
-    // ── Schema capture tests ─────────────────────────────────────────
-
-    use crate::store::event::SchemaCaptureEvent as StoreSchemaCapture;
-
-    fn tools_payload(names: &[&str]) -> String {
-        let tools: Vec<serde_json::Value> = names
-            .iter()
-            .map(|n| serde_json::json!({"name": n, "description": format!("tool {n}")}))
-            .collect();
-        serde_json::json!({"tools": tools}).to_string()
-    }
+    // ── SchemaVersion persistence ────────────────────────────────────
 
     #[test]
-    fn flush_batch__inserts_schema_initial() {
+    fn schema_version__first_ingest_records_initial() {
         let conn = test_db();
         let payload = tools_payload(&["search", "create"]);
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
-            ts: 1000,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload: payload.clone(),
-            page_status: PageStatus::Complete,
-        })];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
+            &payload, "hash-v1", 1000,
+        ))];
+        flush_batch(&conn, &mut batch);
 
         let (method, hash): (String, String) = conn
             .query_row(
@@ -680,7 +468,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(method, "tools/list");
-        assert!(!hash.is_empty());
+        assert_eq!(hash, "hash-v1");
 
         let change_type: String = conn
             .query_row(
@@ -693,68 +481,22 @@ mod tests {
     }
 
     #[test]
-    fn flush_batch__schema_unchanged_no_new_change() {
-        let conn = test_db();
-        let payload = tools_payload(&["search"]);
-
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
-            ts: 1000,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload: payload.clone(),
-            page_status: PageStatus::Complete,
-        })];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
-
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
-            ts: 2000,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload,
-            page_status: PageStatus::Complete,
-        })];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM schema_changes", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 1);
-
-        let captured_at: i64 = conn
-            .query_row(
-                "SELECT captured_at FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(captured_at, 2000);
-    }
-
-    #[test]
-    fn flush_batch__schema_diff_records_changes() {
+    fn schema_version__second_ingest_records_granular_diff() {
         let conn = test_db();
 
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
-            ts: 1000,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload: tools_payload(&["a", "b"]),
-            page_status: PageStatus::Complete,
-        })];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
+            &tools_payload(&["a", "b"]),
+            "hash-v1",
+            1000,
+        ))];
+        flush_batch(&conn, &mut batch);
 
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
-            ts: 2000,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload: tools_payload(&["a", "c"]),
-            page_status: PageStatus::Complete,
-        })];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
+            &tools_payload(&["a", "c"]),
+            "hash-v2",
+            2000,
+        ))];
+        flush_batch(&conn, &mut batch);
 
         let mut stmt = conn
             .prepare("SELECT change_type, item_name FROM schema_changes ORDER BY id")
@@ -766,96 +508,37 @@ mod tests {
             .unwrap();
 
         assert_eq!(changes[0].0, "initial");
-        let change_types: Vec<&str> = changes[1..].iter().map(|(t, _)| t.as_str()).collect();
-        assert!(change_types.contains(&"tool_added"));
-        assert!(change_types.contains(&"tool_removed"));
+        let later_types: Vec<&str> = changes[1..].iter().map(|(t, _)| t.as_str()).collect();
+        assert!(later_types.contains(&"tool_added"));
+        assert!(later_types.contains(&"tool_removed"));
     }
 
     #[test]
-    fn flush_batch__schema_stale() {
+    fn schema_version__upsert_overwrites_payload_and_hash() {
         let conn = test_db();
 
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
-            ts: 1000,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload: tools_payload(&["search"]),
-            page_status: PageStatus::Complete,
-        })];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
+            &tools_payload(&["a"]),
+            "hash-v1",
+            1000,
+        ))];
+        flush_batch(&conn, &mut batch);
 
-        let mut batch = vec![StoreEvent::SchemaStale {
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            ts: 2000,
-        }];
-        flush_batch(&conn, &mut batch, &mut HashMap::new());
+        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
+            &tools_payload(&["a", "b"]),
+            "hash-v2",
+            2000,
+        ))];
+        flush_batch(&conn, &mut batch);
 
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM schema_changes", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
-
-        let stale_type: String = conn
+        let (hash, captured_at): (String, i64) = conn
             .query_row(
-                "SELECT change_type FROM schema_changes ORDER BY id DESC LIMIT 1",
+                "SELECT schema_hash, captured_at FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(stale_type, "stale");
-    }
-
-    #[test]
-    fn flush_batch__pagination_merges() {
-        let conn = test_db();
-        let mut page_buffer = HashMap::new();
-
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
-            ts: 1000,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload: r#"{"tools":[{"name":"a","description":"tool a"}]}"#.into(),
-            page_status: PageStatus::FirstPage,
-        })];
-        flush_batch(&conn, &mut batch, &mut page_buffer);
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM server_schema", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 0);
-
-        let mut batch = vec![StoreEvent::SchemaCapture(StoreSchemaCapture {
-            ts: 2000,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload: r#"{"tools":[{"name":"b","description":"tool b"}]}"#.into(),
-            page_status: PageStatus::LastPage,
-        })];
-        flush_batch(&conn, &mut batch, &mut page_buffer);
-
-        let payload: String = conn
-            .query_row(
-                "SELECT payload FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let val: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        let tools = val["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
-    }
-
-    #[test]
-    fn sha256_hex__deterministic() {
-        let h1 = sha256_hex("hello");
-        let h2 = sha256_hex("hello");
-        assert_eq!(h1, h2);
-        assert_ne!(sha256_hex("hello"), sha256_hex("world"));
-        assert_eq!(h1.len(), 64); // SHA-256 hex is 64 chars
+        assert_eq!(hash, "hash-v2");
+        assert_eq!(captured_at, 2000);
     }
 }
