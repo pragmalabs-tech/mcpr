@@ -31,16 +31,9 @@ pub enum StoreEvent {
         ended_at: i64,
     },
 
-    /// A captured schema discovery response, ready for storage.
-    SchemaCapture(SchemaCaptureEvent),
-
-    /// Mark a schema method as stale (e.g., `notifications/tools/list_changed`).
-    SchemaStale {
-        proxy: String,
-        upstream_url: String,
-        method: String,
-        ts: i64,
-    },
+    /// A new `SchemaVersion` was created by the proxy's SchemaManager.
+    /// Writer UPSERTs `server_schema` and appends change rows.
+    SchemaVersion(SchemaVersionEvent),
 }
 
 /// One completed MCP request, ready to be written to the `requests` table.
@@ -127,21 +120,23 @@ pub struct SessionEvent {
     pub client_platform: Option<String>,
 }
 
-/// A schema discovery response captured from the proxy, ready for storage.
+/// A new `SchemaVersion` produced by the proxy's `SchemaManager`.
+///
+/// The writer trusts the event: `SchemaManager` guarantees the payload
+/// differs from the previous version (unchanged ingests return `None`
+/// and produce no event). The writer only diffs against the prior row
+/// to populate `schema_changes`.
 #[derive(Debug)]
-pub struct SchemaCaptureEvent {
-    /// Unix milliseconds (UTC).
+pub struct SchemaVersionEvent {
     pub ts: i64,
-    /// Proxy name from config.
+    /// Proxy name from config (upstream identity).
     pub proxy: String,
-    /// Upstream MCP server URL.
     pub upstream_url: String,
-    /// MCP method (e.g., "initialize", "tools/list").
     pub method: String,
-    /// JSON string of the `result` field.
+    /// Merged `result` payload as JSON string.
     pub payload: String,
-    /// Pagination state.
-    pub page_status: mcpr_core::protocol::schema::PageStatus,
+    /// SHA-256 hex digest of the canonical payload.
+    pub content_hash: String,
 }
 
 /// Outcome of a single MCP request.

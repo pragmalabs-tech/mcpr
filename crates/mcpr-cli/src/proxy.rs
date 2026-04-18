@@ -125,6 +125,10 @@ mod tests {
             proxy_state_ref: mcpr_core::proxy::new_shared_state(),
             event_bus: crate::event_bus::EventBus::start(vec![]).bus,
             sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
+            schema_manager: Arc::new(mcpr_core::protocol::schema_manager::SchemaManager::new(
+                "test",
+                mcpr_core::protocol::schema_manager::MemorySchemaStore::new(),
+            )),
             max_request_body: max_request,
             max_response_body: max_response,
             proxy_name: "test".to_string(),

@@ -7,8 +7,8 @@
 //! - Emit events (proxy engine)
 //! - Consume events (sinks: stderr, sqlite, cloud, prometheus, etc.)
 
-use crate::protocol::schema::PageStatus;
 use serde::Serialize;
+use serde_json::Value;
 
 // ── Event types ────────────────────────────────────────────────────────
 
@@ -27,13 +27,10 @@ pub enum ProxyEvent {
     SessionEnd(SessionEndEvent),
     /// Periodic health snapshot emitted by the health check loop.
     Heartbeat(HeartbeatEvent),
-    /// A schema discovery response was captured (before proxy rewrite).
-    SchemaCapture(SchemaCaptureEvent),
-    /// Server indicated its schema changed (e.g., `notifications/tools/list_changed`).
-    SchemaStale(SchemaStaleEvent),
     /// A new `SchemaVersion` was created inside the proxy's `SchemaManager`.
-    /// Emitted after pagination merge + change detection; consumers fetch
-    /// the full version payload from a `SchemaStore` by id.
+    /// Emitted after pagination merge + change detection. Consumers
+    /// (SQLite writer, cloud sink) persist or forward the version directly
+    /// from the event — no secondary lookup required.
     SchemaVersionCreated(SchemaVersionCreatedEvent),
 }
 
@@ -116,49 +113,28 @@ pub struct HeartbeatEvent {
     pub request_count: u64,
 }
 
-/// Captured MCP schema discovery response, emitted BEFORE proxy rewrite.
-#[derive(Clone, Debug, Serialize)]
-pub struct SchemaCaptureEvent {
-    /// Unix milliseconds (UTC).
-    pub ts: i64,
-    /// Proxy name.
-    pub proxy: String,
-    /// Upstream MCP server URL.
-    pub upstream_url: String,
-    /// MCP method that produced this response (e.g., "initialize", "tools/list").
-    pub method: String,
-    /// The raw `result` field from the JSON-RPC response, serialized as JSON.
-    pub payload: String,
-    /// Pagination state — used by the writer to buffer multi-page responses.
-    pub page_status: PageStatus,
-}
-
-/// Server indicated its schema changed (e.g., `notifications/tools/list_changed`).
-#[derive(Clone, Debug, Serialize)]
-pub struct SchemaStaleEvent {
-    /// Unix milliseconds (UTC).
-    pub ts: i64,
-    /// Proxy name.
-    pub proxy: String,
-    /// Upstream MCP server URL.
-    pub upstream_url: String,
-    /// The method whose schema is now stale (e.g., "tools/list").
-    pub method: String,
-}
-
 /// A new `SchemaVersion` was persisted for an upstream.
+///
+/// Carries the full merged payload so consumers (SQLite writer, cloud
+/// sink) can persist or forward without a secondary lookup.
 #[derive(Clone, Debug, Serialize)]
 pub struct SchemaVersionCreatedEvent {
     /// Unix milliseconds (UTC).
     pub ts: i64,
     /// Proxy config name (upstream identity).
     pub upstream_id: String,
-    /// Opaque `SchemaVersionId` (hex string).
-    pub version_id: String,
+    /// Upstream MCP server URL (for legacy table rows keyed on url).
+    pub upstream_url: String,
     /// MCP method that produced this version.
     pub method: String,
     /// Monotonic version number per (upstream, method).
     pub version: u32,
+    /// Opaque `SchemaVersionId` (first 16 hex chars of `content_hash`).
+    pub version_id: String,
+    /// Full SHA-256 hex digest of the merged payload.
+    pub content_hash: String,
+    /// Merged `result` payload (post-pagination).
+    pub payload: Value,
 }
 
 // ── Event sink trait ───────────────────────────────────────────────────

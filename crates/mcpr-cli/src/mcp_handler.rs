@@ -10,9 +10,7 @@ use serde_json::Value;
 use crate::AppState;
 use crate::proxy::forward_request;
 use crate::widgets::fetch_widget_html;
-use mcpr_core::event::{
-    ProxyEvent, RequestEvent, SchemaCaptureEvent, SchemaStaleEvent, SessionStartEvent,
-};
+use mcpr_core::event::{ProxyEvent, RequestEvent, SchemaVersionCreatedEvent, SessionStartEvent};
 use mcpr_core::protocol::schema as proto_schema;
 use mcpr_core::protocol::session::{self as session, SessionState, SessionStore};
 use mcpr_core::protocol::{self as jsonrpc, McpMethod};
@@ -245,9 +243,11 @@ pub async fn handle_mcp_post(
         let rpc_error =
             jsonrpc::extract_error_code(&json_body).map(|(code, msg)| (code, msg.to_string()));
 
-        // Schema capture — BEFORE rewrite, to get raw server response.
-        emit_schema_capture(state, &mcp_method, method_str, body, &json_body);
-        emit_schema_stale(state, &json_body);
+        // Schema ingest — BEFORE rewrite, so the raw server response is
+        // what gets hashed + persisted. `ingest` returns `Some(version)`
+        // only when pagination is complete AND the content changed.
+        ingest_schema(state, &mcp_method, method_str, body, &json_body).await;
+        observe_schema_stale(state, &json_body);
 
         rewrite_response(method_str, &mut json_body, &config);
         let rewritten = serde_json::to_vec(&json_body).unwrap_or(json_bytes);
@@ -462,10 +462,11 @@ async fn handle_resources_read(
     Some(build_response(200, &resp_headers, Body::from(body)))
 }
 
-// ── Schema capture helpers ───────────────────────────────────────────
+// ── Schema ingest helpers ────────────────────────────────────────────
 
-/// Emit a schema capture event if this is a successful schema discovery response.
-fn emit_schema_capture(
+/// Feed a schema-method response into the `SchemaManager` and emit
+/// `SchemaVersionCreated` if a new version was produced.
+async fn ingest_schema(
     state: &AppState,
     mcp_method: &McpMethod,
     method_str: &str,
@@ -475,61 +476,43 @@ fn emit_schema_capture(
     if !proto_schema::is_schema_method(mcp_method) {
         return;
     }
-
-    // Only capture successful responses that have a result field.
-    let result = match response_body.get("result") {
-        Some(r) => r,
-        None => return,
+    let req_val = serde_json::from_slice::<Value>(request_body).unwrap_or_default();
+    let Some(version) = state
+        .schema_manager
+        .ingest(method_str, &req_val, response_body)
+        .await
+    else {
+        return;
     };
 
-    let req_val = serde_json::from_slice::<Value>(request_body).unwrap_or_default();
-    let page_status = proto_schema::detect_page_status(&req_val, response_body);
-    let payload = result.to_string();
-
-    state
-        .event_bus
-        .emit(ProxyEvent::SchemaCapture(SchemaCaptureEvent {
+    state.event_bus.emit(ProxyEvent::SchemaVersionCreated(
+        SchemaVersionCreatedEvent {
             ts: chrono::Utc::now().timestamp_millis(),
-            proxy: state.proxy_name.clone(),
+            upstream_id: state.proxy_name.clone(),
             upstream_url: state.mcp_upstream.clone(),
-            method: method_str.to_string(),
-            payload,
-            page_status,
-        }));
+            method: version.method.clone(),
+            version: version.version,
+            version_id: version.id.to_string(),
+            content_hash: version.content_hash.clone(),
+            payload: (*version.payload).clone(),
+        },
+    ));
 }
 
-/// Check if the response contains a `notifications/tools/list_changed` notification
-/// and emit a schema stale event if so.
-fn emit_schema_stale(state: &AppState, response_body: &Value) {
+/// Mark the cached `tools/list` schema stale if the response carries
+/// a `notifications/tools/list_changed` notification (single or batch).
+fn observe_schema_stale(state: &AppState, response_body: &Value) {
     let is_stale_notification = |v: &Value| {
         v.get("method").and_then(|m| m.as_str()) == Some(jsonrpc::NOTIFICATIONS_TOOLS_LIST_CHANGED)
     };
 
-    // Check single notification.
-    if is_stale_notification(response_body) {
-        state
-            .event_bus
-            .emit(ProxyEvent::SchemaStale(SchemaStaleEvent {
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                upstream_url: state.mcp_upstream.clone(),
-                method: "tools/list".to_string(),
-            }));
-        return;
-    }
+    let seen = is_stale_notification(response_body)
+        || response_body
+            .as_array()
+            .is_some_and(|arr| arr.iter().any(is_stale_notification));
 
-    // Check batch containing the notification.
-    if let Some(arr) = response_body.as_array()
-        && arr.iter().any(is_stale_notification)
-    {
-        state
-            .event_bus
-            .emit(ProxyEvent::SchemaStale(SchemaStaleEvent {
-                ts: chrono::Utc::now().timestamp_millis(),
-                proxy: state.proxy_name.clone(),
-                upstream_url: state.mcp_upstream.clone(),
-                method: "tools/list".to_string(),
-            }));
+    if seen {
+        state.schema_manager.mark_stale(jsonrpc::TOOLS_LIST);
     }
 }
 

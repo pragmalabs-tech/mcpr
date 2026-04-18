@@ -75,30 +75,17 @@ impl EventSink for SqliteSink {
             ProxyEvent::Heartbeat(_) => {
                 // Heartbeats are not stored locally.
             }
-            ProxyEvent::SchemaCapture(e) => {
-                self.store.record(StoreEvent::SchemaCapture(
-                    super::event::SchemaCaptureEvent {
+            ProxyEvent::SchemaVersionCreated(e) => {
+                self.store.record(StoreEvent::SchemaVersion(
+                    super::event::SchemaVersionEvent {
                         ts: e.ts,
-                        proxy: e.proxy.clone(),
+                        proxy: e.upstream_id.clone(),
                         upstream_url: e.upstream_url.clone(),
                         method: e.method.clone(),
-                        payload: e.payload.clone(),
-                        page_status: e.page_status.clone(),
+                        payload: e.payload.to_string(),
+                        content_hash: e.content_hash.clone(),
                     },
                 ));
-            }
-            ProxyEvent::SchemaStale(e) => {
-                self.store.record(StoreEvent::SchemaStale {
-                    proxy: e.proxy.clone(),
-                    upstream_url: e.upstream_url.clone(),
-                    method: e.method.clone(),
-                    ts: e.ts,
-                });
-            }
-            ProxyEvent::SchemaVersionCreated(_) => {
-                // Not stored locally in this step — the SchemaManager owns
-                // version persistence via its `SchemaStore`. A later step
-                // adds a sqlite-backed `SchemaStore` impl.
             }
         }
     }
