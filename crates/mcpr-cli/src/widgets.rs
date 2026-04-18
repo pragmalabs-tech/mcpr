@@ -5,7 +5,7 @@ use axum::{
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::AppState;
+use crate::state::ProxyState;
 
 // ── Types ───────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ pub enum WidgetSource {
 // ── Asset serving ───────────────────────────────────────
 
 /// Serve a widget asset by path. Called from proxy's catch-all handler for static asset requests.
-pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
+pub async fn serve_widget_asset(state: &ProxyState, path: &str) -> Response {
     match &state.widget_source {
         Some(WidgetSource::Proxy(base_url)) => {
             let url = format!("{}{}", base_url.trim_end_matches('/'), path);
@@ -70,7 +70,7 @@ pub async fn serve_widget_asset(state: &AppState, path: &str) -> Response {
 
 /// Fetch widget HTML for a given widget name (used by resources/read interception).
 /// Asset URLs are made absolute so they resolve through the tunnel, not the sandbox origin.
-pub async fn fetch_widget_html(state: &AppState, widget_name: &str) -> Option<String> {
+pub async fn fetch_widget_html(state: &ProxyState, widget_name: &str) -> Option<String> {
     let html = match &state.widget_source {
         Some(WidgetSource::Proxy(base_url)) => {
             let url = format!(
@@ -105,7 +105,7 @@ pub async fn fetch_widget_html(state: &AppState, widget_name: &str) -> Option<St
 }
 
 /// Serve raw widget HTML at `/widgets/{name}.html`.
-pub async fn serve_widget_html(state: &AppState, name: &str) -> Response {
+pub async fn serve_widget_html(state: &ProxyState, name: &str) -> Response {
     let Some(html) = fetch_widget_html(state, name).await else {
         return (StatusCode::NOT_FOUND, format!("Widget '{name}' not found")).into_response();
     };
@@ -122,7 +122,7 @@ pub async fn serve_widget_html(state: &AppState, name: &str) -> Response {
 // ── Widget listing ──────────────────────────────────────
 
 /// JSON list of available widgets at `/widgets`.
-pub async fn list_widgets(state: &AppState) -> Response {
+pub async fn list_widgets(state: &ProxyState) -> Response {
     let names = discover_widget_names(state).await;
     let body = serde_json::json!({
         "widgets": names.iter().map(|n| {
@@ -145,7 +145,7 @@ pub async fn list_widgets(state: &AppState) -> Response {
 // ── Widget discovery ────────────────────────────────────
 
 /// Discover available widget names from the widget source.
-pub async fn discover_widget_names(state: &AppState) -> Vec<String> {
+pub async fn discover_widget_names(state: &ProxyState) -> Vec<String> {
     match &state.widget_source {
         Some(WidgetSource::Static(dir)) => {
             let src_dir = PathBuf::from(dir).join("src");

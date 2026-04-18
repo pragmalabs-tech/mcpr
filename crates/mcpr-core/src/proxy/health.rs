@@ -1,14 +1,12 @@
-//! Proxy runtime state — shared across the proxy process.
+//! Per-proxy connection health and display state.
 //!
-//! Tracks the health and status of all proxy connections: MCP upstream,
-//! tunnel, widgets, cloud sync, and request counters. This is the single
-//! source of truth for "what is the proxy doing right now?"
+//! Tracks what one proxy instance is currently doing — MCP upstream health,
+//! tunnel connection status, widget discovery, cloud sync, request counters.
+//! Updated by background tasks (health checks, request handlers, tunnel
+//! callbacks) and read by the admin API, TUI, and status commands.
 //!
-//! Used by:
-//! - `mcpr start` — populates state during operation.
-//! - `mcpr status` — could read state via admin API (future).
-//! - `mcpr proxy view` — TUI viewer will read this state (future).
-//! - Health check loop — updates MCP/widget/tunnel status periodically.
+//! Lives behind an `Arc<Mutex<_>>` because updates come from many callers and
+//! readers pull snapshots; contention is negligible (updates are infrequent).
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -49,12 +47,8 @@ pub enum CloudSyncStatus {
     Failed { message: String },
 }
 
-/// Runtime state of a running proxy instance.
-///
-/// All fields are updated by background tasks (health checks, request handlers)
-/// and read by status/admin endpoints. Protected by a Mutex for simplicity —
-/// contention is negligible since updates are infrequent (every few seconds).
-pub struct ProxyState {
+/// Display + health state for one proxy instance.
+pub struct ProxyHealth {
     /// Public URL where AI clients connect (e.g., http://localhost:3000 or tunnel URL).
     pub proxy_url: String,
     /// Tunnel public URL (empty if tunnel disabled).
@@ -88,7 +82,7 @@ pub struct ProxyState {
     pub request_count: u64,
 }
 
-impl ProxyState {
+impl ProxyHealth {
     pub fn new() -> Self {
         Self {
             proxy_url: String::new(),
@@ -132,26 +126,22 @@ impl ProxyState {
     }
 }
 
-impl Default for ProxyState {
+impl Default for ProxyHealth {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Thread-safe shared proxy state.
-///
-/// Use [`lock_state`] instead of `.lock().unwrap()` to handle mutex
-/// poisoning gracefully (recovers instead of panicking).
-pub type SharedProxyState = Arc<Mutex<ProxyState>>;
+/// Thread-safe shared proxy health. Prefer [`lock_health`] over `.lock().unwrap()`
+/// to handle poisoning without panic.
+pub type SharedProxyHealth = Arc<Mutex<ProxyHealth>>;
 
-/// Create a new shared proxy state.
-pub fn new_shared_state() -> SharedProxyState {
-    Arc::new(Mutex::new(ProxyState::new()))
+/// Create a new shared proxy health container.
+pub fn new_shared_health() -> SharedProxyHealth {
+    Arc::new(Mutex::new(ProxyHealth::new()))
 }
 
-/// Lock the shared state, recovering from poison if a thread panicked.
-///
-/// Prefer this over `.lock().unwrap()` — it never panics.
-pub fn lock_state(state: &SharedProxyState) -> std::sync::MutexGuard<'_, ProxyState> {
-    state.lock().unwrap_or_else(|e| e.into_inner())
+/// Lock the shared health, recovering from poison if a thread panicked.
+pub fn lock_health(health: &SharedProxyHealth) -> std::sync::MutexGuard<'_, ProxyHealth> {
+    health.lock().unwrap_or_else(|e| e.into_inner())
 }

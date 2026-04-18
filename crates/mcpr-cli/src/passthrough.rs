@@ -6,15 +6,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::AppState;
 use crate::proxy::forward_request;
+use crate::state::ProxyState;
 use mcpr_core::event::{ProxyEvent, RequestEvent};
 use mcpr_core::proxy::forwarding::{build_response, read_body_capped};
 use mcpr_core::proxy::sse::split_upstream;
 
 /// Forward a request to upstream and return the response, rewriting upstream URLs in JSON bodies.
 pub async fn forward_and_passthrough(
-    state: &AppState,
+    state: &ProxyState,
     url: &str,
     method: Method,
     log_path: &str,
@@ -65,7 +65,7 @@ pub async fn forward_and_passthrough(
                 .emit(ProxyEvent::Request(Box::new(RequestEvent {
                     id: uuid::Uuid::new_v4().to_string(),
                     ts: chrono::Utc::now().timestamp_millis(),
-                    proxy: state.proxy_name.clone(),
+                    proxy: state.name.clone(),
                     session_id: None,
                     method: method.to_string(),
                     path: log_path.to_string(),
@@ -92,7 +92,7 @@ pub async fn forward_and_passthrough(
                 .emit(ProxyEvent::Request(Box::new(RequestEvent {
                     id: uuid::Uuid::new_v4().to_string(),
                     ts: chrono::Utc::now().timestamp_millis(),
-                    proxy: state.proxy_name.clone(),
+                    proxy: state.name.clone(),
                     session_id: None,
                     method: method.to_string(),
                     path: log_path.to_string(),

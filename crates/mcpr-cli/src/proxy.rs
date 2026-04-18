@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
@@ -9,18 +10,18 @@ use axum::{
     routing::any,
 };
 
-use crate::AppState;
 use crate::mcp_handler::{handle_mcp_post, handle_mcp_sse};
 use crate::passthrough::forward_and_passthrough;
+use crate::state::{AppState, ProxyState};
 use crate::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
 use mcpr_core::event::{ProxyEvent, SessionEndEvent};
 use mcpr_core::protocol::session::SessionStore;
 use mcpr_core::proxy::router::{ClassifiedRequest, classify};
 use mcpr_core::proxy::sse::split_upstream;
 
-/// Convenience wrapper: forward a request using this app's state.
+/// Convenience wrapper: forward a request using this proxy's upstream client.
 pub(crate) async fn forward_request(
-    state: &AppState,
+    proxy: &ProxyState,
     url: &str,
     method: Method,
     headers: &HeaderMap,
@@ -28,7 +29,7 @@ pub(crate) async fn forward_request(
     is_streaming: bool,
 ) -> Result<reqwest::Response, reqwest::Error> {
     mcpr_core::proxy::forwarding::forward_request(
-        &state.upstream,
+        &proxy.upstream,
         url,
         method,
         headers,
@@ -45,7 +46,7 @@ pub fn proxy_routes(router: Router<AppState>) -> Router<AppState> {
 
 /// Catch-all handler: classify the request, then dispatch to the appropriate handler.
 async fn handle_request(
-    State(state): State<AppState>,
+    State(proxy): State<Arc<ProxyState>>,
     method: Method,
     headers: HeaderMap,
     uri: axum::http::Uri,
@@ -53,38 +54,38 @@ async fn handle_request(
 ) -> Response {
     let start = Instant::now();
     let path = uri.path();
-    let has_widgets = state.widget_source.is_some();
+    let has_widgets = proxy.widget_source.is_some();
 
     match classify(&method, path, &headers, &body, has_widgets) {
-        ClassifiedRequest::WidgetHtml { name } => serve_widget_html(&state, &name).await,
+        ClassifiedRequest::WidgetHtml { name } => serve_widget_html(&proxy, &name).await,
 
-        ClassifiedRequest::WidgetList => list_widgets(&state).await,
+        ClassifiedRequest::WidgetList => list_widgets(&proxy).await,
 
-        ClassifiedRequest::WidgetAsset => serve_widget_asset(&state, path).await,
+        ClassifiedRequest::WidgetAsset => serve_widget_asset(&proxy, path).await,
 
         ClassifiedRequest::McpPost { parsed } => {
-            handle_mcp_post(&state, path, &headers, &body, parsed, start).await
+            handle_mcp_post(&proxy, path, &headers, &body, parsed, start).await
         }
 
-        ClassifiedRequest::McpSse => handle_mcp_sse(&state, path, &headers, start).await,
+        ClassifiedRequest::McpSse => handle_mcp_sse(&proxy, path, &headers, start).await,
 
         ClassifiedRequest::Passthrough => {
             // DELETE session cleanup (pre-processing before passthrough)
             if method == Method::DELETE
                 && let Some(sid) = headers.get("mcp-session-id").and_then(|v| v.to_str().ok())
             {
-                state
+                proxy
                     .event_bus
                     .emit(ProxyEvent::SessionEnd(SessionEndEvent {
                         session_id: sid.to_string(),
                         ts: chrono::Utc::now().timestamp_millis(),
                     }));
-                state.sessions.remove(sid).await;
+                proxy.sessions.remove(sid).await;
             }
 
-            let (base, _) = split_upstream(&state.mcp_upstream);
+            let (base, _) = split_upstream(&proxy.mcp_upstream);
             let upstream_url = format!("{}{}", base.trim_end_matches('/'), path);
-            forward_and_passthrough(&state, &upstream_url, method, path, &headers, &body, start)
+            forward_and_passthrough(&proxy, &upstream_url, method, path, &headers, &body, start)
                 .await
         }
     }
@@ -102,18 +103,12 @@ mod tests {
         upstream_url: &str,
         max_request: usize,
         max_response: usize,
-    ) -> crate::AppState {
+    ) -> crate::state::AppState {
         use std::sync::Arc;
         use tokio::sync::RwLock;
-        crate::AppState {
+        let proxy = Arc::new(crate::state::ProxyState {
+            name: "test".to_string(),
             mcp_upstream: upstream_url.to_string(),
-            widget_source: None,
-            rewrite_config: Arc::new(RwLock::new(mcpr_core::proxy::RewriteConfig {
-                proxy_url: "http://localhost:0".to_string(),
-                proxy_domain: "localhost".to_string(),
-                mcp_upstream: upstream_url.to_string(),
-                csp: mcpr_core::proxy::CspConfig::default(),
-            })),
             upstream: mcpr_core::proxy::forwarding::UpstreamClient {
                 http_client: reqwest::Client::builder()
                     .connect_timeout(std::time::Duration::from_secs(5))
@@ -122,17 +117,24 @@ mod tests {
                 semaphore: Arc::new(tokio::sync::Semaphore::new(100)),
                 request_timeout: std::time::Duration::from_secs(30),
             },
-            proxy_state_ref: mcpr_core::proxy::new_shared_state(),
-            event_bus: mcpr_core::event::EventManager::new().start().bus,
+            max_request_body: max_request,
+            max_response_body: max_response,
+            rewrite_config: Arc::new(RwLock::new(mcpr_core::proxy::RewriteConfig {
+                proxy_url: "http://localhost:0".to_string(),
+                proxy_domain: "localhost".to_string(),
+                mcp_upstream: upstream_url.to_string(),
+                csp: mcpr_core::proxy::CspConfig::default(),
+            })),
+            widget_source: None,
             sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
             schema_manager: Arc::new(mcpr_core::protocol::schema_manager::SchemaManager::new(
                 "test",
                 mcpr_core::protocol::schema_manager::MemorySchemaStore::new(),
             )),
-            max_request_body: max_request,
-            max_response_body: max_response,
-            proxy_name: "test".to_string(),
-        }
+            health: mcpr_core::proxy::new_shared_health(),
+            event_bus: mcpr_core::event::EventManager::new().start().bus,
+        });
+        crate::state::AppState { proxy }
     }
 
     #[tokio::test]

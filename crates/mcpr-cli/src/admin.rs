@@ -7,20 +7,20 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 
 use crate::IS_DRAINING;
-use mcpr_core::proxy::state::{ConnectionStatus, SharedProxyState};
+use mcpr_core::proxy::health::{ConnectionStatus, SharedProxyHealth};
 
 #[derive(Clone)]
 struct AdminState {
-    proxy_state: SharedProxyState,
+    health: SharedProxyHealth,
 }
 
 /// Start the admin API server on the given bind address.
 pub async fn start_admin_server(
     bind: &str,
-    proxy_state: SharedProxyState,
+    health: SharedProxyHealth,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
-    let state = AdminState { proxy_state };
+    let state = AdminState { health };
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -79,8 +79,8 @@ async fn ready(State(state): State<AdminState>) -> impl IntoResponse {
     }
 
     let mcp_connected = {
-        let s = mcpr_core::proxy::lock_state(&state.proxy_state);
-        matches!(s.mcp_status, ConnectionStatus::Connected)
+        let h = mcpr_core::proxy::lock_health(&state.health);
+        matches!(h.mcp_status, ConnectionStatus::Connected)
     };
 
     if !mcp_connected {

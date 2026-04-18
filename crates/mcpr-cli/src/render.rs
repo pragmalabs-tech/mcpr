@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use mcpr_core::proxy::state::SharedProxyState;
+use mcpr_core::proxy::health::SharedProxyHealth;
 use mcpr_integrations::store::query::{
     clients::ClientRow,
     logs::LogRow,
@@ -113,19 +113,19 @@ pub fn print_json(value: &impl serde::Serialize) {
 
 /// Populate the proxy state with startup info and print a startup banner to stderr.
 pub fn log_startup(
-    state: &SharedProxyState,
+    health: &SharedProxyHealth,
     port: u16,
     public_url: &str,
     mcp_upstream: &str,
     widgets: Option<&str>,
     cloud_server: Option<&str>,
 ) {
-    let mut s = mcpr_core::proxy::lock_state(state);
-    s.proxy_url = format!("http://localhost:{port}");
-    s.tunnel_url = public_url.to_string();
-    s.mcp_upstream = mcp_upstream.to_string();
-    s.widgets = widgets.unwrap_or("(none)").to_string();
-    drop(s);
+    let mut h = mcpr_core::proxy::lock_health(health);
+    h.proxy_url = format!("http://localhost:{port}");
+    h.tunnel_url = public_url.to_string();
+    h.mcp_upstream = mcp_upstream.to_string();
+    h.widgets = widgets.unwrap_or("(none)").to_string();
+    drop(h);
 
     let localhost = format!("http://localhost:{port}");
     let has_tunnel = public_url != localhost;

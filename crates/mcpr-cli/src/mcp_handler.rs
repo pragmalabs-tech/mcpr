@@ -7,8 +7,8 @@ use axum::{
 };
 use serde_json::Value;
 
-use crate::AppState;
 use crate::proxy::forward_request;
+use crate::state::ProxyState;
 use crate::widgets::fetch_widget_html;
 use mcpr_core::event::{ProxyEvent, RequestEvent, SchemaVersionCreatedEvent, SessionStartEvent};
 use mcpr_core::protocol::schema as proto_schema;
@@ -85,7 +85,7 @@ fn make_request_event(
 
 /// Handle MCP JSON-RPC POST — intercept resources/read, forward, rewrite response.
 pub async fn handle_mcp_post(
-    state: &AppState,
+    state: &ProxyState,
     path: &str,
     headers: &HeaderMap,
     body: &Bytes,
@@ -146,7 +146,7 @@ pub async fn handle_mcp_post(
                 (None, None)
             };
             state.event_bus.emit(make_request_event(
-                &state.proxy_name,
+                &state.name,
                 path,
                 method_str,
                 &mcp_method,
@@ -177,7 +177,7 @@ pub async fn handle_mcp_post(
         .map(String::from);
 
     if mcp_method == McpMethod::Initialize && status < 400 {
-        mcpr_core::proxy::lock_state(&state.proxy_state_ref).confirm_mcp_connected();
+        mcpr_core::proxy::lock_health(&state.health).confirm_mcp_connected();
     }
 
     // On successful initialize, emit SessionStart event
@@ -205,7 +205,7 @@ pub async fn handle_mcp_post(
             .event_bus
             .emit(ProxyEvent::SessionStart(SessionStartEvent {
                 session_id: sid.clone(),
-                proxy: state.proxy_name.clone(),
+                proxy: state.name.clone(),
                 ts: chrono::Utc::now().timestamp_millis(),
                 client_name,
                 client_version,
@@ -260,7 +260,7 @@ pub async fn handle_mcp_post(
 
         // Single emit — replaces logger.emit + events.emit + store.record
         state.event_bus.emit(make_request_event(
-            &state.proxy_name,
+            &state.name,
             path,
             method_str,
             &mcp_method,
@@ -281,7 +281,7 @@ pub async fn handle_mcp_post(
     } else {
         // Non-JSON response — passthrough
         state.event_bus.emit(make_request_event(
-            &state.proxy_name,
+            &state.name,
             path,
             method_str,
             &mcp_method,
@@ -304,7 +304,7 @@ pub async fn handle_mcp_post(
 
 /// Handle MCP SSE GET — stream from upstream.
 pub async fn handle_mcp_sse(
-    state: &AppState,
+    state: &ProxyState,
     path: &str,
     headers: &HeaderMap,
     start: Instant,
@@ -330,7 +330,7 @@ pub async fn handle_mcp_sse(
                 .emit(ProxyEvent::Request(Box::new(RequestEvent {
                     id: uuid::Uuid::new_v4().to_string(),
                     ts: chrono::Utc::now().timestamp_millis(),
-                    proxy: state.proxy_name.clone(),
+                    proxy: state.name.clone(),
                     session_id: None,
                     method: "GET".to_string(),
                     path: path.to_string(),
@@ -360,7 +360,7 @@ pub async fn handle_mcp_sse(
                 .emit(ProxyEvent::Request(Box::new(RequestEvent {
                     id: uuid::Uuid::new_v4().to_string(),
                     ts: chrono::Utc::now().timestamp_millis(),
-                    proxy: state.proxy_name.clone(),
+                    proxy: state.name.clone(),
                     session_id: None,
                     method: "GET".to_string(),
                     path: path.to_string(),
@@ -385,7 +385,7 @@ pub async fn handle_mcp_sse(
 
 /// Handle resources/read interception: serve local widget HTML + upstream metadata.
 async fn handle_resources_read(
-    state: &AppState,
+    state: &ProxyState,
     headers: &HeaderMap,
     raw_body: &Bytes,
     parsed: &Value,
@@ -439,7 +439,7 @@ async fn handle_resources_read(
         .emit(ProxyEvent::Request(Box::new(RequestEvent {
             id: uuid::Uuid::new_v4().to_string(),
             ts: chrono::Utc::now().timestamp_millis(),
-            proxy: state.proxy_name.clone(),
+            proxy: state.name.clone(),
             session_id: None,
             method: "POST".to_string(),
             path: "/*".to_string(),
@@ -467,7 +467,7 @@ async fn handle_resources_read(
 /// Feed a schema-method response into the `SchemaManager` and emit
 /// `SchemaVersionCreated` if a new version was produced.
 async fn ingest_schema(
-    state: &AppState,
+    state: &ProxyState,
     mcp_method: &McpMethod,
     method_str: &str,
     request_body: &Bytes,
@@ -488,7 +488,7 @@ async fn ingest_schema(
     state.event_bus.emit(ProxyEvent::SchemaVersionCreated(
         SchemaVersionCreatedEvent {
             ts: chrono::Utc::now().timestamp_millis(),
-            upstream_id: state.proxy_name.clone(),
+            upstream_id: state.name.clone(),
             upstream_url: state.mcp_upstream.clone(),
             method: version.method.clone(),
             version: version.version,
@@ -514,7 +514,7 @@ fn is_list_changed_response(response_body: &Value) -> bool {
 
 /// Mark the cached `tools/list` schema stale if the response carries
 /// a `notifications/tools/list_changed` notification.
-fn observe_schema_stale(state: &AppState, response_body: &Value) {
+fn observe_schema_stale(state: &ProxyState, response_body: &Value) {
     if is_list_changed_response(response_body) {
         state.schema_manager.mark_stale(jsonrpc::TOOLS_LIST);
     }
@@ -710,29 +710,29 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
 
-    fn schema_test_state() -> AppState {
+    fn schema_test_state() -> ProxyState {
         use tokio::sync::RwLock;
-        AppState {
+        ProxyState {
+            name: "test".to_string(),
             mcp_upstream: "http://upstream:9000".to_string(),
-            widget_source: None,
+            upstream: mcpr_core::proxy::forwarding::UpstreamClient {
+                http_client: reqwest::Client::builder().build().unwrap(),
+                semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
+                request_timeout: std::time::Duration::from_secs(30),
+            },
+            max_request_body: 1024 * 1024,
+            max_response_body: 1024 * 1024,
             rewrite_config: Arc::new(RwLock::new(mcpr_core::proxy::RewriteConfig {
                 proxy_url: "http://localhost:0".to_string(),
                 proxy_domain: "localhost".to_string(),
                 mcp_upstream: "http://upstream:9000".to_string(),
                 csp: mcpr_core::proxy::CspConfig::default(),
             })),
-            upstream: mcpr_core::proxy::forwarding::UpstreamClient {
-                http_client: reqwest::Client::builder().build().unwrap(),
-                semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
-                request_timeout: std::time::Duration::from_secs(30),
-            },
-            proxy_state_ref: mcpr_core::proxy::new_shared_state(),
-            event_bus: mcpr_core::event::EventManager::new().start().bus,
+            widget_source: None,
             sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
             schema_manager: Arc::new(SchemaManager::new("test", MemorySchemaStore::new())),
-            max_request_body: 1024 * 1024,
-            max_response_body: 1024 * 1024,
-            proxy_name: "test".to_string(),
+            health: mcpr_core::proxy::new_shared_health(),
+            event_bus: mcpr_core::event::EventManager::new().start().bus,
         }
     }
 

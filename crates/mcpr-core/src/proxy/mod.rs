@@ -37,18 +37,18 @@
 //! ├── sse.rs          SSE extract/wrap helpers
 //! ├── csp.rs          CspConfig, DirectivePolicy, WidgetScoped, effective_domains
 //! ├── rewrite.rs      RewriteConfig, rewrite_response()
-//! └── state.rs        ProxyState, ConnectionStatus, SharedProxyState
+//! └── health.rs       ProxyHealth, ConnectionStatus, SharedProxyHealth
 //! ```
 
 pub mod csp;
 pub mod forwarding;
+pub mod health;
 pub mod rewrite;
 pub mod router;
 pub mod sse;
-pub mod state;
 
 pub use csp::{
     CspConfig, Directive, DirectivePolicy, Mode, WidgetScoped, effective_domains, glob_match,
 };
+pub use health::{ConnectionStatus, ProxyHealth, SharedProxyHealth, lock_health, new_shared_health};
 pub use rewrite::{RewriteConfig, rewrite_response};
-pub use state::{ConnectionStatus, ProxyState, SharedProxyState, lock_state, new_shared_state};

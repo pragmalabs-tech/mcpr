@@ -59,6 +59,7 @@ mod proxy;
 mod proxy_lock;
 mod relay_lock;
 mod render;
+mod state;
 mod widgets;
 
 use std::sync::Arc;
@@ -76,8 +77,9 @@ use config::{CliAction, GatewayConfig, Mode};
 use mcpr_core::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
 use mcpr_core::protocol::session::MemorySessionStore;
 use mcpr_core::proxy::RewriteConfig;
-use mcpr_core::proxy::state::{self as proxy_state, SharedProxyState};
+use mcpr_core::proxy::health::{self as proxy_health, SharedProxyHealth};
 use proxy::proxy_routes;
+use state::{AppState, ProxyState};
 use widgets::WidgetSource;
 
 /// Global drain flag — set to true when graceful shutdown begins.
@@ -89,54 +91,37 @@ pub const DEFAULT_MAX_CONCURRENT_UPSTREAM: usize = 100;
 pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
-pub fn build_app(state: AppState) -> Router {
+pub fn build_app(app_state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any)
         .expose_headers(Any);
 
-    let max_request = state.max_request_body;
+    let max_request = app_state.proxy.max_request_body;
 
     let app: Router<AppState> = Router::new();
     let app = proxy_routes(app);
-    app.with_state(state)
+    app.with_state(app_state)
         .layer(DefaultBodyLimit::max(max_request))
         .layer(cors)
 }
 
-#[derive(Clone)]
-pub struct AppState {
-    pub mcp_upstream: String,
-    pub widget_source: Option<WidgetSource>,
-    pub rewrite_config: Arc<RwLock<RewriteConfig>>,
-    pub upstream: UpstreamClient,
-    pub proxy_state_ref: SharedProxyState,
-    /// Single event pipeline — replaces logger + events + store.
-    pub event_bus: mcpr_core::event::EventBus,
-    pub sessions: MemorySessionStore,
-    /// Top-level view of the upstream MCP server's schema. Fed by
-    /// `mcp_handler` on every schema-method response.
-    pub schema_manager: Arc<SchemaManager<MemorySchemaStore>>,
-    pub max_request_body: usize,
-    pub max_response_body: usize,
-    /// Proxy name used to tag events. Derived from upstream URL or config.
-    pub proxy_name: String,
-}
-
-/// Adapter to bridge mcpr-tunnel's TunnelStatusCallback to proxy state.
-struct TunnelStatusAdapter(SharedProxyState);
+/// Adapter to bridge mcpr-tunnel's TunnelStatusCallback to proxy health.
+struct TunnelStatusAdapter(SharedProxyHealth);
 
 impl mcpr_tunnel::TunnelStatusCallback for TunnelStatusAdapter {
     fn on_connected(&self, _url: &str) {
-        proxy_state::lock_state(&self.0).tunnel_status = proxy_state::ConnectionStatus::Connected;
+        proxy_health::lock_health(&self.0).tunnel_status =
+            proxy_health::ConnectionStatus::Connected;
     }
     fn on_disconnected(&self) {
-        proxy_state::lock_state(&self.0).tunnel_status =
-            proxy_state::ConnectionStatus::Disconnected;
+        proxy_health::lock_health(&self.0).tunnel_status =
+            proxy_health::ConnectionStatus::Disconnected;
     }
     fn on_evicted(&self) {
-        proxy_state::lock_state(&self.0).tunnel_status = proxy_state::ConnectionStatus::Evicted;
+        proxy_health::lock_health(&self.0).tunnel_status =
+            proxy_health::ConnectionStatus::Evicted;
     }
 }
 
@@ -488,7 +473,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
 /// The proxy always writes a lockfile and monitors the daemon's health.
 #[allow(unused_variables)]
 async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_path: String) {
-    let proxy_state_ref = proxy_state::new_shared_state();
+    let proxy_health_ref = proxy_health::new_shared_health();
 
     let mcp = match cfg.mcp {
         Some(url) => url,
@@ -546,8 +531,8 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     // Determine public URL
     let public_url = if !cfg.tunnel {
         // No tunnel — mark as connected (local-only)
-        proxy_state::lock_state(&proxy_state_ref).tunnel_status =
-            proxy_state::ConnectionStatus::Connected;
+        proxy_health::lock_health(&proxy_health_ref).tunnel_status =
+            proxy_health::ConnectionStatus::Connected;
         format!("http://localhost:{actual_port}")
     } else {
         let relay_url = cfg.relay_url.as_deref().unwrap();
@@ -564,15 +549,15 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         let (token, desired_subdomain) =
             GatewayConfig::resolve_tunnel_identity(cfg.tunnel_subdomain, cfg.tunnel_token);
 
-        proxy_state::lock_state(&proxy_state_ref).tunnel_status =
-            proxy_state::ConnectionStatus::Connecting;
+        proxy_health::lock_health(&proxy_health_ref).tunnel_status =
+            proxy_health::ConnectionStatus::Connecting;
 
         match mcpr_tunnel::start_tunnel_client(
             actual_port,
             relay_url,
             &token,
             desired_subdomain.as_deref(),
-            TunnelStatusAdapter(proxy_state_ref.clone()),
+            TunnelStatusAdapter(proxy_health_ref.clone()),
         )
         .await
         {
@@ -659,8 +644,8 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
             .clone()
             .unwrap_or_else(|| "https://api.mcpr.app".to_string());
         let cloud_endpoint = format!("{}/api/ingest-events", endpoint.trim_end_matches('/'));
-        proxy_state::lock_state(&proxy_state_ref).cloud_endpoint = Some(cloud_endpoint.clone());
-        let cloud_state = proxy_state_ref.clone();
+        proxy_health::lock_health(&proxy_health_ref).cloud_endpoint = Some(cloud_endpoint.clone());
+        let cloud_health = proxy_health_ref.clone();
         event_manager.register(Box::new(mcpr_integrations::CloudSink::new(
             mcpr_integrations::CloudSinkConfig {
                 endpoint: cloud_endpoint,
@@ -670,11 +655,11 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
                 flush_interval: Duration::from_millis(cfg.cloud_flush_interval_ms.unwrap_or(5000)),
                 on_flush: Some(std::sync::Arc::new(move |status| {
                     use mcpr_integrations::sinks::cloud_sink::SyncStatus;
-                    let mut state = proxy_state::lock_state(&cloud_state);
-                    state.cloud_sync = Some(match status {
-                        SyncStatus::Ok { count } => proxy_state::CloudSyncStatus::Ok { count },
+                    let mut h = proxy_health::lock_health(&cloud_health);
+                    h.cloud_sync = Some(match status {
+                        SyncStatus::Ok { count } => proxy_health::CloudSyncStatus::Ok { count },
                         SyncStatus::Failed { message } => {
-                            proxy_state::CloudSyncStatus::Failed { message }
+                            proxy_health::CloudSyncStatus::Failed { message }
                         }
                     });
                 })),
@@ -684,36 +669,39 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
 
     let event_bus_handle = event_manager.start();
 
-    let state = AppState {
+    let proxy = Arc::new(ProxyState {
+        name: proxy_name.clone(),
         mcp_upstream: mcp.clone(),
-        widget_source,
-        rewrite_config: Arc::new(RwLock::new(rewrite_config)),
         upstream: upstream.clone(),
-        proxy_state_ref: proxy_state_ref.clone(),
-        event_bus: event_bus_handle.bus.clone(),
-        sessions: MemorySessionStore::new(),
-        schema_manager: Arc::new(SchemaManager::new(
-            proxy_name.clone(),
-            MemorySchemaStore::new(),
-        )),
         max_request_body: cfg
             .max_request_body_size
             .unwrap_or(DEFAULT_MAX_REQUEST_BODY_SIZE),
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
-        proxy_name,
+        rewrite_config: Arc::new(RwLock::new(rewrite_config)),
+        widget_source,
+        sessions: MemorySessionStore::new(),
+        schema_manager: Arc::new(SchemaManager::new(
+            proxy_name.clone(),
+            MemorySchemaStore::new(),
+        )),
+        health: proxy_health_ref.clone(),
+        event_bus: event_bus_handle.bus.clone(),
+    });
+    let app_state = AppState {
+        proxy: proxy.clone(),
     };
 
     // Initial connectivity probe — warn early if the MCP URL seems wrong
-    probe_mcp_upstream(&mcp, &upstream.http_client, &proxy_state_ref).await;
+    probe_mcp_upstream(&mcp, &upstream.http_client, &proxy_health_ref).await;
 
-    let health_state = state.clone();
+    let health_proxy = proxy.clone();
 
-    let app = build_app(state);
+    let app = build_app(app_state);
 
     render::log_startup(
-        &proxy_state_ref,
+        &proxy_health_ref,
         actual_port,
         &public_url,
         &mcp,
@@ -748,16 +736,16 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
 
     // Spawn admin server (health + readiness endpoints)
     if admin_bind != "none" {
-        let admin_proxy_state_ref = proxy_state_ref.clone();
+        let admin_health_ref = proxy_health_ref.clone();
         let admin_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {
-            admin::start_admin_server(&admin_bind, admin_proxy_state_ref, admin_shutdown).await;
+            admin::start_admin_server(&admin_bind, admin_health_ref, admin_shutdown).await;
         });
     }
 
     // Spawn health check task: periodically probe MCP + widgets status
     tokio::spawn(async move {
-        health_check_loop(health_state).await;
+        health_check_loop(health_proxy).await;
     });
 
     // Spawn signal handler
@@ -982,12 +970,12 @@ fn validate_mcp_url(url: &str) {
 async fn probe_mcp_upstream(
     url: &str,
     client: &reqwest::Client,
-    proxy_state_ref: &SharedProxyState,
+    health_ref: &SharedProxyHealth,
 ) {
     let (status, warning) = check_mcp_endpoint(url, client).await;
-    let mut s = proxy_state::lock_state(proxy_state_ref);
-    s.mcp_status = status;
-    s.mcp_warning = warning;
+    let mut h = proxy_health::lock_health(health_ref);
+    h.mcp_status = status;
+    h.mcp_warning = warning;
 }
 
 /// Send an MCP `initialize` request and classify the result.
@@ -995,7 +983,7 @@ async fn probe_mcp_upstream(
 async fn check_mcp_endpoint(
     url: &str,
     client: &reqwest::Client,
-) -> (proxy_state::ConnectionStatus, Option<String>) {
+) -> (proxy_health::ConnectionStatus, Option<String>) {
     let init_body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 0,
@@ -1029,7 +1017,7 @@ async fn check_mcp_endpoint(
                 "Cannot reach server. Check the URL."
             };
             return (
-                proxy_state::ConnectionStatus::Disconnected,
+                proxy_health::ConnectionStatus::Disconnected,
                 Some(hint.to_string()),
             );
         }
@@ -1042,7 +1030,7 @@ async fn check_mcp_endpoint(
     // initialize will confirm status.
     if status_code == 401 || status_code == 403 {
         return (
-            proxy_state::ConnectionStatus::Connected,
+            proxy_health::ConnectionStatus::Connected,
             Some(
                 "Server requires authentication. Status will update on first client connection."
                     .to_string(),
@@ -1055,7 +1043,7 @@ async fn check_mcp_endpoint(
         Ok(b) => b,
         Err(_) => {
             return (
-                proxy_state::ConnectionStatus::Connected,
+                proxy_health::ConnectionStatus::Connected,
                 Some("Server reachable but response unreadable".to_string()),
             );
         }
@@ -1092,7 +1080,7 @@ async fn check_mcp_endpoint(
                 "Did not return JSON-RPC. Not an MCP endpoint?"
             };
             return (
-                proxy_state::ConnectionStatus::NotMcp,
+                proxy_health::ConnectionStatus::NotMcp,
                 Some(hint.to_string()),
             );
         }
@@ -1101,7 +1089,7 @@ async fn check_mcp_endpoint(
     // Check if it's a JSON-RPC 2.0 response
     if parsed.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
         return (
-            proxy_state::ConnectionStatus::NotMcp,
+            proxy_health::ConnectionStatus::NotMcp,
             Some("Response is JSON but not JSON-RPC 2.0.".to_string()),
         );
     }
@@ -1116,12 +1104,12 @@ async fn check_mcp_endpoint(
         // Method not found means it's JSON-RPC but doesn't support MCP
         if code == -32601 {
             return (
-                proxy_state::ConnectionStatus::NotMcp,
+                proxy_health::ConnectionStatus::NotMcp,
                 Some("JSON-RPC server but 'initialize' method not found.".to_string()),
             );
         }
         return (
-            proxy_state::ConnectionStatus::Connected,
+            proxy_health::ConnectionStatus::Connected,
             Some(format!("MCP init error: {msg}")),
         );
     }
@@ -1130,21 +1118,21 @@ async fn check_mcp_endpoint(
     if let Some(result) = parsed.get("result") {
         if result.get("serverInfo").is_some() || result.get("capabilities").is_some() {
             // Valid MCP server
-            return (proxy_state::ConnectionStatus::Connected, None);
+            return (proxy_health::ConnectionStatus::Connected, None);
         }
         // Has a result but no serverInfo — might be MCP-ish but unexpected
         return (
-            proxy_state::ConnectionStatus::Connected,
+            proxy_health::ConnectionStatus::Connected,
             Some("Server responded but missing serverInfo in initialize result.".to_string()),
         );
     }
 
     // Fallback — got JSON-RPC but couldn't classify
-    (proxy_state::ConnectionStatus::Connected, None)
+    (proxy_health::ConnectionStatus::Connected, None)
 }
 
 /// Periodically check MCP upstream and widget source connectivity.
-async fn health_check_loop(app_state: AppState) {
+async fn health_check_loop(proxy: Arc<ProxyState>) {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -1152,16 +1140,16 @@ async fn health_check_loop(app_state: AppState) {
 
     loop {
         // Check MCP upstream with protocol-level validation
-        let (mcp_status, mcp_warning) = check_mcp_endpoint(&app_state.mcp_upstream, &http).await;
+        let (mcp_status, mcp_warning) = check_mcp_endpoint(&proxy.mcp_upstream, &http).await;
 
         // Discover widgets (reuses shared logic from widgets.rs)
-        let names = widgets::discover_widget_names(&app_state).await;
-        let widgets_status = if app_state.widget_source.is_none() {
-            proxy_state::ConnectionStatus::Unknown
+        let names = widgets::discover_widget_names(&proxy).await;
+        let widgets_status = if proxy.widget_source.is_none() {
+            proxy_health::ConnectionStatus::Unknown
         } else if names.is_empty() {
-            proxy_state::ConnectionStatus::Disconnected
+            proxy_health::ConnectionStatus::Disconnected
         } else {
-            proxy_state::ConnectionStatus::Connected
+            proxy_health::ConnectionStatus::Connected
         };
         let widget_count = if names.is_empty() {
             None
@@ -1170,28 +1158,28 @@ async fn health_check_loop(app_state: AppState) {
         };
 
         {
-            let mut s = proxy_state::lock_state(&app_state.proxy_state_ref);
-            s.mcp_status = mcp_status;
-            s.mcp_warning = mcp_warning;
-            s.widgets_status = widgets_status;
-            s.widget_count = widget_count;
-            s.widget_names = names;
+            let mut h = proxy_health::lock_health(&proxy.health);
+            h.mcp_status = mcp_status;
+            h.mcp_warning = mcp_warning;
+            h.widgets_status = widgets_status;
+            h.widget_count = widget_count;
+            h.widget_names = names;
         }
 
         // Emit heartbeat event via the event bus.
         {
-            let s = proxy_state::lock_state(&app_state.proxy_state_ref);
-            app_state
+            let h = proxy_health::lock_health(&proxy.health);
+            proxy
                 .event_bus
                 .emit(mcpr_core::event::ProxyEvent::Heartbeat(
                     mcpr_core::event::HeartbeatEvent {
                         ts: chrono::Utc::now().timestamp_millis(),
-                        proxy: app_state.proxy_name.clone(),
-                        mcp_status: s.mcp_status.label().to_string(),
-                        tunnel_status: s.tunnel_status.label().to_string(),
-                        widgets_status: s.widgets_status.label().to_string(),
-                        uptime_secs: s.started_at.elapsed().as_secs(),
-                        request_count: s.request_count,
+                        proxy: proxy.name.clone(),
+                        mcp_status: h.mcp_status.label().to_string(),
+                        tunnel_status: h.tunnel_status.label().to_string(),
+                        widgets_status: h.widgets_status.label().to_string(),
+                        uptime_secs: h.started_at.elapsed().as_secs(),
+                        request_count: h.request_count,
                     },
                 ));
         }
