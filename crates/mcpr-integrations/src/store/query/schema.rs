@@ -62,7 +62,7 @@ pub struct SchemaToolUsageRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaStatusRow {
     pub upstream_url: String,
-    /// "unknown", "partial", "complete", "stale"
+    /// "unknown", "partial", or "complete".
     pub status: String,
     pub server_name: Option<String>,
     pub server_version: Option<String>,
@@ -157,22 +157,6 @@ impl QueryEngine {
         let (server_name, server_version, protocol_version, capabilities) =
             self.extract_server_info(upstream_url);
 
-        // Check for stale markers newer than the latest capture for that method.
-        let stale_sql = "
-            SELECT COUNT(*) FROM schema_changes sc
-            WHERE sc.upstream_url = ?1
-              AND sc.change_type = 'stale'
-              AND sc.detected_at > COALESCE(
-                  (SELECT ss.captured_at FROM server_schema ss
-                   WHERE ss.upstream_url = sc.upstream_url AND ss.method = sc.method),
-                  0
-              )
-        ";
-        let stale_count: i64 = self
-            .conn()
-            .query_row(stale_sql, params![upstream_url], |row| row.get(0))?;
-        let is_stale = stale_count > 0;
-
         let has_initialize = method_names.iter().any(|m| m == "initialize");
         let list_methods = [
             "tools/list",
@@ -184,9 +168,7 @@ impl QueryEngine {
             .iter()
             .any(|m| method_names.iter().any(|n| n == m));
 
-        let status = if is_stale {
-            "stale"
-        } else if has_initialize && has_any_list {
+        let status = if has_initialize && has_any_list {
             "complete"
         } else {
             "partial"

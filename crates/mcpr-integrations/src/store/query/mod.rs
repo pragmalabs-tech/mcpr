@@ -1078,21 +1078,6 @@ mod tests {
         assert_eq!(status.status, "partial");
     }
 
-    #[test]
-    fn schema_status__stale() {
-        let engine = seeded_engine();
-        seed_schema(&engine);
-        engine
-            .conn()
-            .execute(
-                "INSERT INTO schema_changes (upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params!["http://localhost:9000", "tools/list", "stale", Option::<String>::None, "hash_tools", Option::<String>::None, 9000i64],
-            )
-            .unwrap();
-        let status = engine.schema_status("http://localhost:9000").unwrap();
-        assert_eq!(status.status, "stale");
-    }
-
     // ── schema unused ──────────────────────────────────────────────────
 
     #[test]

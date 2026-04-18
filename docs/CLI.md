@@ -291,12 +291,14 @@ CLIENTS — localhost-9000 — last 7d
 
 #### `mcpr proxy schema [name]`
 
-Show the captured MCP server schema — tools, resources, prompts, and server capabilities. Schema is passively captured from discovery responses (`initialize`, `tools/list`, `resources/list`, `prompts/list`, `resources/templates/list`) as they flow through the proxy.
+Show the captured MCP server schema — tools, resources, prompts, and server capabilities. The proxy feeds every schema discovery response (`initialize`, `tools/list`, `resources/list`, `prompts/list`, `resources/templates/list`) into a `SchemaManager` that merges paginated responses, hashes the result, and only writes a new row when the content changes.
 
 ```bash
-mcpr proxy schema                        # show current schema
-mcpr proxy schema --changes              # show change history
-mcpr proxy schema --unused               # show tool usage — highlight unused tools
+mcpr proxy schema                        # all proxies, current snapshot
+mcpr proxy schema my-api                 # filter to one proxy by name
+mcpr proxy schema --proxy my-api         # same, flag form
+mcpr proxy schema my-api --changes       # change history for one proxy
+mcpr proxy schema --unused               # tools listed but never called
 mcpr proxy schema --unused --since 30d   # usage window (default: 7d)
 mcpr proxy schema --method tools/list    # filter to a specific method
 mcpr proxy schema --json                 # JSON output
@@ -332,7 +334,6 @@ Schema status is computed from captured data:
 | `unknown` | No schema captured yet |
 | `partial` | Some discovery methods captured, but not all |
 | `complete` | `initialize` + at least one list method captured |
-| `stale` | Server sent `notifications/tools/list_changed` after last capture |
 
 Unused tools (`--unused`):
 ```
@@ -350,6 +351,7 @@ TOOL USAGE — localhost-9000 — last 7d   2/5 unused
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--proxy NAME` | — | Filter to one proxy. Same as the positional `name` argument. |
 | `--changes` | false | Show change history instead of current schema |
 | `--unused` | false | Show tool usage — listed vs actually called |
 | `--since DURATION` | 7d | Usage lookback window (with `--unused`) |
