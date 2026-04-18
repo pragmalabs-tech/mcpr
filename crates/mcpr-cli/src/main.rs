@@ -39,11 +39,12 @@
 //! +-- widgets.rs        # Widget HTML serving, asset proxying
 //! +-- passthrough.rs    # Non-MCP request forwarding
 //! +-- admin.rs          # Health/readiness admin server
-//! +-- stderr_sink.rs    # StderrSink — console output
 //! ```
 //!
 //! The event bus (routes `ProxyEvent` to sinks) lives in
-//! `mcpr_core::event` — this binary just registers sinks via `EventManager`.
+//! `mcpr_core::event`; sink implementations (stderr, sqlite, cloud) live
+//! in `mcpr_integrations`. This binary just registers them via
+//! `EventManager`.
 
 mod admin;
 mod cmd;
@@ -58,7 +59,6 @@ mod proxy;
 mod proxy_lock;
 mod relay_lock;
 mod render;
-mod stderr_sink;
 mod widgets;
 
 use std::sync::Arc;
@@ -625,7 +625,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     let mut event_manager = mcpr_core::event::EventManager::new();
 
     // 1. Stderr sink — real-time console output.
-    event_manager.register(Box::new(stderr_sink::StderrSink::new(
+    event_manager.register(Box::new(mcpr_integrations::StderrSink::new(
         cfg.runtime.log_format,
     )));
 
@@ -641,7 +641,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
                     colored::Colorize::dimmed("store"),
                     db_path.display()
                 );
-                event_manager.register(Box::new(mcpr_integrations::store::SqliteSink::new(store)));
+                event_manager.register(Box::new(mcpr_integrations::SqliteSink::new(store)));
             }
             Err(e) => {
                 eprintln!(
@@ -669,7 +669,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
                 batch_size: cfg.cloud_batch_size.unwrap_or(100),
                 flush_interval: Duration::from_millis(cfg.cloud_flush_interval_ms.unwrap_or(5000)),
                 on_flush: Some(std::sync::Arc::new(move |status| {
-                    use mcpr_integrations::emitter::cloud_sink::SyncStatus;
+                    use mcpr_integrations::sinks::cloud_sink::SyncStatus;
                     let mut state = proxy_state::lock_state(&cloud_state);
                     state.cloud_sync = Some(match status {
                         SyncStatus::Ok { count } => proxy_state::CloudSyncStatus::Ok { count },

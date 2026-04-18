@@ -8,8 +8,8 @@
 
 use mcpr_core::event::{EventSink, ProxyEvent, SchemaVersionCreatedEvent};
 
-use super::engine::Store;
-use super::event::{
+use crate::store::engine::Store;
+use crate::store::event::{
     RequestEvent as StoreRequestEvent, RequestStatus, SchemaVersionEvent,
     SessionEvent as StoreSessionEvent, StoreEvent,
 };
