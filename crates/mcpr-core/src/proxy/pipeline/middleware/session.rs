@@ -19,6 +19,88 @@ use crate::proxy::pipeline::context::{RequestContext, ResponseContext};
 use crate::proxy::pipeline::emit::normalize_platform;
 use crate::proxy::proxy_state::ProxyState;
 
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::RwLock;
+
+    use super::*;
+    use crate::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
+    use crate::protocol::session::{MemorySessionStore, SessionInfo};
+    use crate::proxy::forwarding::UpstreamClient;
+    use crate::proxy::{CspConfig, RewriteConfig, new_shared_health};
+
+    fn test_state() -> ProxyState {
+        ProxyState {
+            name: "t".into(),
+            mcp_upstream: "http://u".into(),
+            upstream: UpstreamClient {
+                http_client: reqwest::Client::builder().build().unwrap(),
+                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
+                request_timeout: Duration::from_secs(1),
+            },
+            max_request_body: 1024,
+            max_response_body: 1024,
+            rewrite_config: Arc::new(RwLock::new(RewriteConfig {
+                proxy_url: "http://p".into(),
+                proxy_domain: "p".into(),
+                mcp_upstream: "http://u".into(),
+                csp: CspConfig::default(),
+            })),
+            widget_source: None,
+            sessions: MemorySessionStore::new(),
+            schema_manager: Arc::new(SchemaManager::new("t", MemorySchemaStore::new())),
+            health: new_shared_health(),
+            event_bus: crate::event::EventManager::new().start().bus,
+        }
+    }
+
+    fn ctx_with(method: Option<McpMethod>, session_id: Option<&str>) -> RequestContext {
+        RequestContext {
+            start: Instant::now(),
+            http_method: Method::POST,
+            path: "/mcp".into(),
+            request_size: 0,
+            wants_sse: false,
+            session_id: session_id.map(String::from),
+            jsonrpc: None,
+            mcp_method: method,
+            mcp_method_str: None,
+            tool: None,
+            is_batch: false,
+            client_info_from_init: None,
+            client_name: None,
+            client_version: None,
+            tags: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_touch__initialized_transitions_to_active() {
+        let state = test_state();
+        state.sessions.create("sess-1").await;
+        // Initialize first so the session reaches the `Initialized` state —
+        // that's the one that transitions to Active.
+        state
+            .sessions
+            .update_state("sess-1", SessionState::Initialized)
+            .await;
+
+        let mut ctx = ctx_with(Some(McpMethod::Initialized), Some("sess-1"));
+        assert!(
+            SessionTouchMiddleware
+                .on_request(&state, &mut ctx)
+                .await
+                .is_none()
+        );
+
+        let info: SessionInfo = state.sessions.get("sess-1").await.unwrap();
+        assert_eq!(info.state, SessionState::Active);
+    }
+}
+
 pub struct SessionTouchMiddleware;
 
 #[async_trait]
