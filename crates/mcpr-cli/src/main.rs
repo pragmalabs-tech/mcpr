@@ -18,33 +18,35 @@
 //! ```text
 //! mcpr-cli/src/
 //! +-- main.rs           # Entry point, daemon bootstrap, gateway runtime
+//! +-- state.rs          # AppState (axum host container wrapping ProxyState)
+//! +-- proxy.rs          # Axum fallback handler → mcpr_core::proxy::pipeline::run
 //! +-- config.rs         # CLI args (clap), TOML config, subcommands
 //! +-- render.rs         # All terminal output — tables, colors, formatting
+//! +-- admin.rs          # Health/readiness admin server
+//! +-- daemon.rs         # mcprd supervisor (fork, PID file, health monitor)
+//! +-- proxy_lock.rs     # Per-proxy lockfiles under ~/.mcpr/proxies/
+//! +-- relay_lock.rs     # Singleton relay lockfile under ~/.mcpr/relay/
 //! +-- logic/            # Core business logic (no printing)
 //! |   +-- daemon.rs     #   Daemon status queries
 //! |   +-- proxy.rs      #   Proxy lifecycle (start/stop/restart)
 //! |   +-- relay.rs      #   Relay lifecycle (stop/restart/status)
 //! |   +-- query.rs      #   DB engine, time parsing, threshold parsing
 //! +-- cmd/              # Thin command handlers (logic → render)
-//! |   +-- proxy.rs      #   Proxy lifecycle commands
-//! |   +-- relay.rs      #   Relay lifecycle commands
-//! |   +-- observe.rs    #   Observability commands (logs, stats, sessions, …)
-//! |   +-- store.rs      #   Store maintenance commands
-//! |   +-- setup.rs      #   Interactive setup wizard (mcpr proxy setup)
-//! +-- daemon.rs         # mcprd supervisor (fork, PID file, health monitor)
-//! +-- proxy_lock.rs     # Per-proxy lockfiles under ~/.mcpr/proxies/
-//! +-- relay_lock.rs     # Singleton relay lockfile under ~/.mcpr/relay/
-//! +-- proxy.rs          # Request dispatcher (classify → handle)
-//! +-- mcp_handler.rs    # MCP POST/SSE handling, session tracking, store events
-//! +-- widgets.rs        # Widget HTML serving, asset proxying
-//! +-- passthrough.rs    # Non-MCP request forwarding
-//! +-- admin.rs          # Health/readiness admin server
+//!     +-- proxy.rs      #   Proxy lifecycle commands
+//!     +-- relay.rs      #   Relay lifecycle commands
+//!     +-- observe.rs    #   Observability commands (logs, stats, sessions, …)
+//!     +-- store.rs      #   Store maintenance commands
+//!     +-- setup.rs      #   Interactive setup wizard (mcpr proxy setup)
 //! ```
 //!
-//! The event bus (routes `ProxyEvent` to sinks) lives in
-//! `mcpr_core::event`; sink implementations (stderr, sqlite, cloud) live
-//! in `mcpr_integrations`. This binary just registers them via
-//! `EventManager`.
+//! The proxy engine (pipeline, middleware, `ProxyState`, widgets,
+//! forwarding, rewrite, SSE, health) lives in `mcpr_core::proxy`. This
+//! binary assembles a `ProxyState` at boot, wires it into axum, and
+//! delegates every request to `pipeline::run`.
+//!
+//! The event bus (routes `ProxyEvent` to sinks) lives in `mcpr_core::event`;
+//! sink implementations (stderr, sqlite, cloud) live in `mcpr_integrations`.
+//! This binary just registers them via `EventManager`.
 
 mod admin;
 mod cmd;
@@ -52,16 +54,13 @@ mod config;
 #[cfg(unix)]
 mod daemon;
 mod logic;
-mod mcp_handler;
-mod passthrough;
-mod pipeline;
+
 mod proxy;
 #[allow(dead_code)]
 mod proxy_lock;
 mod relay_lock;
 mod render;
 mod state;
-mod widgets;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -77,11 +76,12 @@ use tower_http::cors::{Any, CorsLayer};
 use config::{CliAction, GatewayConfig, Mode};
 use mcpr_core::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
 use mcpr_core::protocol::session::MemorySessionStore;
+use mcpr_core::proxy::ProxyState;
 use mcpr_core::proxy::RewriteConfig;
+use mcpr_core::proxy::WidgetSource;
 use mcpr_core::proxy::health::{self as proxy_health, SharedProxyHealth};
 use proxy::proxy_routes;
-use state::{AppState, ProxyState};
-use widgets::WidgetSource;
+use state::AppState;
 
 /// Global drain flag — set to true when graceful shutdown begins.
 static IS_DRAINING: AtomicBool = AtomicBool::new(false);
@@ -1139,7 +1139,7 @@ async fn health_check_loop(proxy: Arc<ProxyState>) {
         let (mcp_status, mcp_warning) = check_mcp_endpoint(&proxy.mcp_upstream, &http).await;
 
         // Discover widgets (reuses shared logic from widgets.rs)
-        let names = widgets::discover_widget_names(&proxy).await;
+        let names = mcpr_core::proxy::widgets::discover_widget_names(&proxy).await;
         let widgets_status = if proxy.widget_source.is_none() {
             proxy_health::ConnectionStatus::Unknown
         } else if names.is_empty() {

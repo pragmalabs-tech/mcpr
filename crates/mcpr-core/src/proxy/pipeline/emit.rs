@@ -3,10 +3,10 @@
 //! before returning. Handlers populate mutable ctx fields (session id,
 //! client name/version) before calling in.
 
-use mcpr_core::event::{ProxyEvent, RequestEvent};
+use crate::event::{ProxyEvent, RequestEvent};
 
 use super::context::RequestContext;
-use crate::state::ProxyState;
+use crate::proxy::proxy_state::ProxyState;
 
 /// Response-side data the handler collects and passes to [`emit_request_event`].
 pub struct ResponseSummary {
@@ -54,7 +54,6 @@ pub fn build_request_event(
     proxy_name: &str,
     ctx: &RequestContext,
     resp: &ResponseSummary,
-    note: &'static str,
 ) -> RequestEvent {
     RequestEvent {
         id: uuid::Uuid::new_v4().to_string(),
@@ -77,25 +76,20 @@ pub fn build_request_event(
             .map(|m| m.chars().take(512).collect()),
         client_name: ctx.client_name.clone(),
         client_version: ctx.client_version.clone(),
-        note: note.to_string(),
+        note: ctx.tags.join("+"),
     }
 }
 
 /// Emit a `Request` event to the proxy's event bus. The single construction
-/// site for every request path.
-pub fn emit_request_event(
-    state: &ProxyState,
-    ctx: &RequestContext,
-    resp: &ResponseSummary,
-    note: &'static str,
-) {
+/// site for every request path. Handlers / middleware push onto `ctx.tags`
+/// beforehand to set the event's `note` field.
+pub fn emit_request_event(state: &ProxyState, ctx: &RequestContext, resp: &ResponseSummary) {
     state
         .event_bus
         .emit(ProxyEvent::Request(Box::new(build_request_event(
             &state.name,
             ctx,
             resp,
-            note,
         ))));
 }
 
@@ -104,11 +98,11 @@ pub fn emit_request_event(
 mod tests {
     use std::time::Instant;
 
+    use crate::protocol::McpMethod;
     use axum::http::Method;
-    use mcpr_core::protocol::McpMethod;
 
     use super::*;
-    use crate::pipeline::context::RequestContext;
+    use crate::proxy::pipeline::context::RequestContext;
 
     fn base_ctx() -> RequestContext {
         RequestContext {
@@ -126,6 +120,7 @@ mod tests {
             client_info_from_init: None,
             client_name: None,
             client_version: None,
+            tags: vec!["rewritten"],
         }
     }
 
@@ -146,7 +141,7 @@ mod tests {
         ctx.client_name = Some("claude-desktop".into());
         ctx.client_version = Some("1.2.0".into());
 
-        let ev = build_request_event("proxy", &ctx, &base_resp(), "rewritten");
+        let ev = build_request_event("proxy", &ctx, &base_resp());
         assert_eq!(ev.client_name.as_deref(), Some("claude-desktop"));
         assert_eq!(ev.client_version.as_deref(), Some("1.2.0"));
         assert_eq!(ev.session_id.as_deref(), Some("sess-1"));
@@ -156,12 +151,29 @@ mod tests {
     }
 
     #[test]
+    fn tags_join_with_plus() {
+        let mut ctx = base_ctx();
+        ctx.tags = vec!["rewritten", "sse"];
+        let ev = build_request_event("proxy", &ctx, &base_resp());
+        assert_eq!(ev.note, "rewritten+sse");
+    }
+
+    #[test]
+    fn empty_tags__empty_note() {
+        let mut ctx = base_ctx();
+        ctx.tags.clear();
+        let ev = build_request_event("proxy", &ctx, &base_resp());
+        assert_eq!(ev.note, "");
+    }
+
+    #[test]
     fn none_client_info() {
-        let ctx = base_ctx();
+        let mut ctx = base_ctx();
+        ctx.tags = vec!["passthrough"];
         let mut resp = base_resp();
         resp.response_size = None;
         resp.upstream_us = None;
-        let ev = build_request_event("proxy", &ctx, &resp, "passthrough");
+        let ev = build_request_event("proxy", &ctx, &resp);
         assert!(ev.client_name.is_none());
         assert!(ev.client_version.is_none());
         assert!(ev.session_id.is_none());
@@ -178,7 +190,7 @@ mod tests {
         ctx.tool = None;
         ctx.client_name = Some("cursor".into());
 
-        let ev = build_request_event("proxy", &ctx, &base_resp(), "rewritten");
+        let ev = build_request_event("proxy", &ctx, &base_resp());
         assert!(ev.tool.is_none());
         assert_eq!(ev.client_name.as_deref(), Some("cursor"));
     }
@@ -189,6 +201,7 @@ mod tests {
         ctx.session_id = Some("sess-3".into());
         ctx.client_name = Some("vscode-copilot".into());
         ctx.client_version = Some("0.9.0".into());
+        ctx.tags = vec!["upstream error"];
         let resp = ResponseSummary {
             status: 500,
             response_size: Some(80),
@@ -197,7 +210,7 @@ mod tests {
             error_msg: None,
         }
         .with_rpc_error(-32600i64, "bad request");
-        let ev = build_request_event("proxy", &ctx, &resp, "upstream error");
+        let ev = build_request_event("proxy", &ctx, &resp);
         assert_eq!(ev.error_code.as_deref(), Some("-32600"));
         assert_eq!(ev.error_msg.as_deref(), Some("bad request"));
         assert_eq!(ev.status, 500);
@@ -210,7 +223,7 @@ mod tests {
         ctx.session_id = Some("sess-1".into());
         ctx.client_name = Some("claude-desktop".into());
         ctx.client_version = Some("1.2.0".into());
-        let ev = build_request_event("proxy", &ctx, &base_resp(), "test");
+        let ev = build_request_event("proxy", &ctx, &base_resp());
         let event = ProxyEvent::Request(Box::new(ev));
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"client_name\":\"claude-desktop\""));
@@ -222,7 +235,7 @@ mod tests {
     fn omits_null_client_in_json() {
         let mut ctx = base_ctx();
         ctx.tool = None;
-        let ev = build_request_event("proxy", &ctx, &base_resp(), "test");
+        let ev = build_request_event("proxy", &ctx, &base_resp());
         let event = ProxyEvent::Request(Box::new(ev));
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"client_name\":null"));

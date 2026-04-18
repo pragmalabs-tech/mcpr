@@ -1,26 +1,26 @@
 //! Schema ingest / stale-mark middleware.
 //!
-//! `SchemaIngestMw` feeds schema-method responses (tools/list,
+//! `SchemaIngestMiddleware` feeds schema-method responses (tools/list,
 //! resources/list, etc.) into the [`SchemaManager`] and emits
 //! `SchemaVersionCreated` when the content changed.
 //!
-//! `StaleMarkMw` flips the `tools/list` stale flag when the response carries
+//! `StaleMarkMiddleware` flips the `tools/list` stale flag when the response carries
 //! a `notifications/tools/list_changed` notification.
 
+use crate::event::{ProxyEvent, SchemaVersionCreatedEvent};
+use crate::protocol as jsonrpc;
+use crate::protocol::schema as proto_schema;
 use async_trait::async_trait;
-use mcpr_core::event::{ProxyEvent, SchemaVersionCreatedEvent};
-use mcpr_core::protocol as jsonrpc;
-use mcpr_core::protocol::schema as proto_schema;
 use serde_json::Value;
 
-use super::ResponseMw;
-use crate::pipeline::context::{RequestContext, ResponseContext};
-use crate::state::ProxyState;
+use super::ResponseMiddleware;
+use crate::proxy::pipeline::context::{RequestContext, ResponseContext};
+use crate::proxy::proxy_state::ProxyState;
 
-pub struct SchemaIngestMw;
+pub struct SchemaIngestMiddleware;
 
 #[async_trait]
-impl ResponseMw for SchemaIngestMw {
+impl ResponseMiddleware for SchemaIngestMiddleware {
     async fn on_response(
         &self,
         state: &ProxyState,
@@ -82,10 +82,10 @@ impl ResponseMw for SchemaIngestMw {
     }
 }
 
-pub struct StaleMarkMw;
+pub struct StaleMarkMiddleware;
 
 #[async_trait]
-impl ResponseMw for StaleMarkMw {
+impl ResponseMiddleware for StaleMarkMiddleware {
     async fn on_response(
         &self,
         state: &ProxyState,
@@ -118,36 +118,36 @@ fn is_list_changed_response(response_body: &Value) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use mcpr_core::protocol::McpMethod;
-    use mcpr_core::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
+    use crate::protocol::McpMethod;
+    use crate::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
     use serde_json::json;
 
     use super::*;
-    use crate::pipeline::context::{RequestContext, ResponseContext};
+    use crate::proxy::pipeline::context::{RequestContext, ResponseContext};
 
     fn test_state() -> ProxyState {
         use tokio::sync::RwLock;
         ProxyState {
             name: "test".to_string(),
             mcp_upstream: "http://upstream:9000".to_string(),
-            upstream: mcpr_core::proxy::forwarding::UpstreamClient {
+            upstream: crate::proxy::forwarding::UpstreamClient {
                 http_client: reqwest::Client::builder().build().unwrap(),
                 semaphore: Arc::new(tokio::sync::Semaphore::new(10)),
                 request_timeout: std::time::Duration::from_secs(30),
             },
             max_request_body: 1024 * 1024,
             max_response_body: 1024 * 1024,
-            rewrite_config: Arc::new(RwLock::new(mcpr_core::proxy::RewriteConfig {
+            rewrite_config: Arc::new(RwLock::new(crate::proxy::RewriteConfig {
                 proxy_url: "http://localhost:0".to_string(),
                 proxy_domain: "localhost".to_string(),
                 mcp_upstream: "http://upstream:9000".to_string(),
-                csp: mcpr_core::proxy::CspConfig::default(),
+                csp: crate::proxy::CspConfig::default(),
             })),
             widget_source: None,
-            sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
+            sessions: crate::protocol::session::MemorySessionStore::new(),
             schema_manager: Arc::new(SchemaManager::new("test", MemorySchemaStore::new())),
-            health: mcpr_core::proxy::new_shared_health(),
-            event_bus: mcpr_core::event::EventManager::new().start().bus,
+            health: crate::proxy::new_shared_health(),
+            event_bus: crate::event::EventManager::new().start().bus,
         }
     }
 
@@ -168,6 +168,7 @@ mod tests {
             client_info_from_init: None,
             client_name: None,
             client_version: None,
+            tags: Vec::new(),
         }
     }
 
@@ -206,7 +207,7 @@ mod tests {
         assert!(!is_list_changed_response(&v));
     }
 
-    // ── StaleMarkMw ──
+    // ── StaleMarkMiddleware ──
 
     #[tokio::test]
     async fn stale_mark_mw__sets_flag_on_notification() {
@@ -215,7 +216,9 @@ mod tests {
         let mut resp =
             resp_with(json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}));
         assert!(!state.schema_manager.is_stale("tools/list"));
-        StaleMarkMw.on_response(&state, &req, &mut resp).await;
+        StaleMarkMiddleware
+            .on_response(&state, &req, &mut resp)
+            .await;
         assert!(state.schema_manager.is_stale("tools/list"));
     }
 
@@ -224,18 +227,22 @@ mod tests {
         let state = test_state();
         let req = ctx_with(None);
         let mut resp = resp_with(json!({"jsonrpc": "2.0", "id": 1, "result": {}}));
-        StaleMarkMw.on_response(&state, &req, &mut resp).await;
+        StaleMarkMiddleware
+            .on_response(&state, &req, &mut resp)
+            .await;
         assert!(!state.schema_manager.is_stale("tools/list"));
     }
 
-    // ── SchemaIngestMw ──
+    // ── SchemaIngestMiddleware ──
 
     #[tokio::test]
     async fn schema_ingest_mw__non_schema_method_is_noop() {
         let state = test_state();
         let req = ctx_with(Some(McpMethod::ToolsCall));
         let mut resp = resp_with(json!({"jsonrpc": "2.0", "id": 1, "result": {}}));
-        SchemaIngestMw.on_response(&state, &req, &mut resp).await;
+        SchemaIngestMiddleware
+            .on_response(&state, &req, &mut resp)
+            .await;
         assert!(state.schema_manager.latest("tools/list").await.is_none());
     }
 
@@ -246,7 +253,9 @@ mod tests {
         let mut resp = resp_with(
             json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "x"}}),
         );
-        SchemaIngestMw.on_response(&state, &req, &mut resp).await;
+        SchemaIngestMiddleware
+            .on_response(&state, &req, &mut resp)
+            .await;
         assert!(state.schema_manager.latest("tools/list").await.is_none());
     }
 
@@ -258,7 +267,9 @@ mod tests {
             "jsonrpc": "2.0", "id": 1,
             "result": {"tools": [{"name": "search"}]}
         }));
-        SchemaIngestMw.on_response(&state, &req, &mut resp).await;
+        SchemaIngestMiddleware
+            .on_response(&state, &req, &mut resp)
+            .await;
         let latest = state.schema_manager.latest("tools/list").await.unwrap();
         assert_eq!(latest.version, 1);
         assert_eq!(latest.method, "tools/list");
@@ -273,9 +284,13 @@ mod tests {
             "result": {"tools": [{"name": "search"}]}
         });
         let mut resp = resp_with(body.clone());
-        SchemaIngestMw.on_response(&state, &req, &mut resp).await;
+        SchemaIngestMiddleware
+            .on_response(&state, &req, &mut resp)
+            .await;
         let mut resp2 = resp_with(body);
-        SchemaIngestMw.on_response(&state, &req, &mut resp2).await;
+        SchemaIngestMiddleware
+            .on_response(&state, &req, &mut resp2)
+            .await;
         let latest = state.schema_manager.latest("tools/list").await.unwrap();
         assert_eq!(latest.version, 1);
     }

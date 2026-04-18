@@ -2,23 +2,23 @@
 //! inside JSON response bodies so clients following server-returned links
 //! stay on the proxy.
 //!
-//! Different from [`super::UrlRewriteMw`]: that one does structured CSP
+//! Different from [`super::UrlRewriteMiddleware`]: that one does structured CSP
 //! rewriting on MCP responses. This one does naive string replacement on
 //! non-MCP JSON (OAuth endpoints, health probes, etc.) — different concerns,
 //! different algorithms.
 
+use crate::proxy::sse::split_upstream;
 use async_trait::async_trait;
 use axum::http::header;
-use mcpr_core::proxy::sse::split_upstream;
 
-use super::ResponseMw;
-use crate::pipeline::context::{RequestContext, ResponseContext};
-use crate::state::ProxyState;
+use super::ResponseMiddleware;
+use crate::proxy::pipeline::context::{RequestContext, ResponseContext};
+use crate::proxy::proxy_state::ProxyState;
 
-pub struct UpstreamUrlMapMw;
+pub struct UpstreamUrlMapMiddleware;
 
 #[async_trait]
-impl ResponseMw for UpstreamUrlMapMw {
+impl ResponseMiddleware for UpstreamUrlMapMiddleware {
     async fn on_response(
         &self,
         state: &ProxyState,

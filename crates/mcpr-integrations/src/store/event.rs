@@ -9,7 +9,8 @@
 //! `mcpr-integrations` has its own `McprEvent` for cloud/stdout emission.
 //! `StoreEvent` is intentionally independent — different schema, different
 //! lifecycle, no coupling between crates. The conversion happens at the
-//! call site in `mcp_handler.rs` where both are built from the same locals.
+//! proxy's emit stage (`mcpr_core::proxy::pipeline::emit`) where both are
+//! built from the same locals.
 
 /// Top-level event enum sent through the storage channel.
 ///

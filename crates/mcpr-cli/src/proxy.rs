@@ -1,5 +1,6 @@
+//! Axum glue — wraps the per-request pipeline in a catch-all fallback route.
+
 use std::sync::Arc;
-use std::time::Instant;
 
 use axum::{
     Router,
@@ -10,42 +11,16 @@ use axum::{
     routing::any,
 };
 
-use crate::mcp_handler::{handle_mcp_post, handle_mcp_sse};
-use crate::passthrough::forward_and_passthrough;
-use crate::pipeline::build_request_context;
-use crate::state::{AppState, ProxyState};
-use crate::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
-use mcpr_core::event::{ProxyEvent, SessionEndEvent};
-use mcpr_core::protocol::session::SessionStore;
-use mcpr_core::proxy::router::{ClassifiedRequest, classify};
-use mcpr_core::proxy::sse::split_upstream;
-
-/// Convenience wrapper: forward a request using this proxy's upstream client.
-pub(crate) async fn forward_request(
-    proxy: &ProxyState,
-    url: &str,
-    method: Method,
-    headers: &HeaderMap,
-    body: &Bytes,
-    is_streaming: bool,
-) -> Result<reqwest::Response, reqwest::Error> {
-    mcpr_core::proxy::forwarding::forward_request(
-        &proxy.upstream,
-        url,
-        method,
-        headers,
-        body,
-        is_streaming,
-    )
-    .await
-}
+use crate::state::AppState;
+use mcpr_core::proxy::ProxyState;
+use mcpr_core::proxy::pipeline;
 
 /// All proxy routes — catch-all that routes by method + content-type.
 pub fn proxy_routes(router: Router<AppState>) -> Router<AppState> {
     router.fallback(any(handle_request))
 }
 
-/// Catch-all handler: parse once, classify, then dispatch.
+/// Catch-all axum handler — delegates every request to [`pipeline::run`].
 async fn handle_request(
     State(proxy): State<Arc<ProxyState>>,
     method: Method,
@@ -53,45 +28,7 @@ async fn handle_request(
     uri: axum::http::Uri,
     body: Bytes,
 ) -> Response {
-    let start = Instant::now();
-    let path = uri.path();
-    let has_widgets = proxy.widget_source.is_some();
-
-    // Stage ① Parse — classify() re-parses the body for now; removed in Phase 7.
-    let mut ctx = build_request_context(method.clone(), path, &headers, &body, start);
-
-    match classify(&method, path, &headers, &body, has_widgets) {
-        ClassifiedRequest::WidgetHtml { name } => serve_widget_html(&proxy, &name).await,
-
-        ClassifiedRequest::WidgetList => list_widgets(&proxy).await,
-
-        ClassifiedRequest::WidgetAsset => serve_widget_asset(&proxy, path).await,
-
-        ClassifiedRequest::McpPost { .. } => {
-            handle_mcp_post(&proxy, &mut ctx, &headers, &body).await
-        }
-
-        ClassifiedRequest::McpSse => handle_mcp_sse(&proxy, path, &headers, start).await,
-
-        ClassifiedRequest::Passthrough => {
-            // DELETE session cleanup (pre-processing before passthrough)
-            if method == Method::DELETE
-                && let Some(sid) = headers.get("mcp-session-id").and_then(|v| v.to_str().ok())
-            {
-                proxy
-                    .event_bus
-                    .emit(ProxyEvent::SessionEnd(SessionEndEvent {
-                        session_id: sid.to_string(),
-                        ts: chrono::Utc::now().timestamp_millis(),
-                    }));
-                proxy.sessions.remove(sid).await;
-            }
-
-            let (base, _) = split_upstream(&proxy.mcp_upstream);
-            let upstream_url = format!("{}{}", base.trim_end_matches('/'), path);
-            forward_and_passthrough(&proxy, &mut ctx, &upstream_url, &headers, &body).await
-        }
-    }
+    pipeline::run(proxy, method, headers, uri, body).await
 }
 
 #[cfg(test)]
@@ -109,7 +46,7 @@ mod tests {
     ) -> crate::state::AppState {
         use std::sync::Arc;
         use tokio::sync::RwLock;
-        let proxy = Arc::new(crate::state::ProxyState {
+        let proxy = Arc::new(mcpr_core::proxy::ProxyState {
             name: "test".to_string(),
             mcp_upstream: upstream_url.to_string(),
             upstream: mcpr_core::proxy::forwarding::UpstreamClient {
