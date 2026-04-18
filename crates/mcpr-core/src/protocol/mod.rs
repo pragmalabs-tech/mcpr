@@ -23,18 +23,24 @@
 //!   (`Created -> Initialized -> Active -> Closed`), `SessionStore` trait for
 //!   pluggable storage backends, and `MemorySessionStore` for in-memory use.
 //!
-//! - **Schema capture** (`schema` module): Types and logic for passively
-//!   capturing MCP server schemas from discovery responses. Includes pagination
-//!   detection/merging, schema diffing (detect added/removed/modified tools,
-//!   resources, prompts), and schema method classification.
+//! - **Schema primitives** (`schema` module): Pagination detection/merging,
+//!   schema diffing (detect added/removed/modified tools, resources,
+//!   prompts), and schema method classification. Pure helpers, no state.
+//!
+//! - **Schema manager** (`schema_manager` module): Top-level per-upstream
+//!   view of an MCP server. Owns versioned snapshots built from ingested
+//!   discovery responses, exposes query APIs (list_tools, get_tool, ...),
+//!   tracks stale flags, and defines the `SchemaScanner` trait for active
+//!   discovery.
 //!
 //! ## Module Structure
 //!
 //! ```text
 //! mcpr-protocol/src/
-//! +-- lib.rs          # JSON-RPC 2.0 types, parsing, MCP method classification
-//! +-- schema.rs       # Schema capture types, pagination merge, diff logic
-//! +-- session.rs      # Session state, SessionStore trait, MemorySessionStore
+//! +-- lib.rs              # JSON-RPC 2.0 types, parsing, MCP method classification
+//! +-- schema.rs           # Pagination merge + diff primitives
+//! +-- schema_manager/     # SchemaManager, SchemaStore, SchemaScanner, SchemaVersion
+//! +-- session.rs          # Session state, SessionStore trait, MemorySessionStore
 //! ```
 //!
 //! ## Dependencies
@@ -42,6 +48,7 @@
 //! Minimal: `serde`, `serde_json`, `chrono`, `dashmap`. No HTTP framework deps.
 
 pub mod schema;
+pub mod schema_manager;
 pub mod session;
 
 use serde_json::Value;

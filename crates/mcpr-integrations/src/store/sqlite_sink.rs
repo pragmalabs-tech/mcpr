@@ -95,6 +95,11 @@ impl EventSink for SqliteSink {
                     ts: e.ts,
                 });
             }
+            ProxyEvent::SchemaVersionCreated(_) => {
+                // Not stored locally in this step — the SchemaManager owns
+                // version persistence via its `SchemaStore`. A later step
+                // adds a sqlite-backed `SchemaStore` impl.
+            }
         }
     }
 

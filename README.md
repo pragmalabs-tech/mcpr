@@ -213,18 +213,19 @@ The CLI manages the daemon, proxies, and relay, and queries the local SQLite sto
 - [x] JSON-RPC routing 
 - [x] Widget CSP rewriting (at widget resource level)
 - [ ] Widgets mode (Server endpoint, statics)
-- [ ] Multi-server routing (one mcpr URL, many MCP backends)
+- [ ] Multi-server routing (one mcpr schema/url, merge many MCP backends)
 
 **Observability**
 - [x] MCP request logs, session tracking, AI client tracking
 - [x] MCP schema capture with change tracking
-- [x] Per-tool metrics (calls, error%, p50, p95, max, bytes)
+- [x] Per-tool metrics (calls, error%, p50, p95, max, request size, response size)
 - [x] Cloud dashboard sync ([mcpr.app](https://cloud.mcpr.app))
 
 **Auth**
-- [ ] OAuth 2.1 (Auth Provider, Legacy Auth)
+- [ ] OAuth 2.1 for Auth Provider
+- [ ] OAuth 2.1 for legacy auth (non oauth standard)
+- [ ] Token API auth
 - [ ] Multiple Auth Mode for one server
-- [ ] Token API auth (Optional because mcp apps support oauth 2.1 only)
 
 **Security**
 - [ ] Per-tool access control

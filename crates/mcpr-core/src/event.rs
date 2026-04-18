@@ -31,6 +31,10 @@ pub enum ProxyEvent {
     SchemaCapture(SchemaCaptureEvent),
     /// Server indicated its schema changed (e.g., `notifications/tools/list_changed`).
     SchemaStale(SchemaStaleEvent),
+    /// A new `SchemaVersion` was created inside the proxy's `SchemaManager`.
+    /// Emitted after pagination merge + change detection; consumers fetch
+    /// the full version payload from a `SchemaStore` by id.
+    SchemaVersionCreated(SchemaVersionCreatedEvent),
 }
 
 /// An MCP request that flowed through the proxy.
@@ -140,6 +144,21 @@ pub struct SchemaStaleEvent {
     pub upstream_url: String,
     /// The method whose schema is now stale (e.g., "tools/list").
     pub method: String,
+}
+
+/// A new `SchemaVersion` was persisted for an upstream.
+#[derive(Clone, Debug, Serialize)]
+pub struct SchemaVersionCreatedEvent {
+    /// Unix milliseconds (UTC).
+    pub ts: i64,
+    /// Proxy config name (upstream identity).
+    pub upstream_id: String,
+    /// Opaque `SchemaVersionId` (hex string).
+    pub version_id: String,
+    /// MCP method that produced this version.
+    pub method: String,
+    /// Monotonic version number per (upstream, method).
+    pub version: u32,
 }
 
 // ── Event sink trait ───────────────────────────────────────────────────
