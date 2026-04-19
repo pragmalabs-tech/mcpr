@@ -4,7 +4,8 @@
 //! `Arc<ProxyState>`.
 
 use std::sync::Arc;
-use tokio::sync::RwLock;
+
+use arc_swap::ArcSwap;
 
 use crate::event::EventBus;
 use crate::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
@@ -27,7 +28,9 @@ pub struct ProxyState {
     pub max_response_body: usize,
 
     // ── response shaping ──
-    pub rewrite_config: Arc<RwLock<RewriteConfig>>,
+    /// Lock-free: readers call `.load()` (sync, ~5 ns); a writer
+    /// wanting to swap config does `.store(Arc::new(new))`.
+    pub rewrite_config: Arc<ArcSwap<RewriteConfig>>,
     pub widget_source: Option<WidgetSource>,
 
     // ── runtime tracking ──

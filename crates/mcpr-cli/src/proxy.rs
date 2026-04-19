@@ -45,7 +45,6 @@ mod tests {
         max_response: usize,
     ) -> crate::state::AppState {
         use std::sync::Arc;
-        use tokio::sync::RwLock;
         let proxy = Arc::new(mcpr_core::proxy::ProxyState {
             name: "test".to_string(),
             mcp_upstream: upstream_url.to_string(),
@@ -59,12 +58,13 @@ mod tests {
             },
             max_request_body: max_request,
             max_response_body: max_response,
-            rewrite_config: Arc::new(RwLock::new(mcpr_core::proxy::RewriteConfig {
+            rewrite_config: mcpr_core::proxy::RewriteConfig {
                 proxy_url: "http://localhost:0".to_string(),
                 proxy_domain: "localhost".to_string(),
                 mcp_upstream: upstream_url.to_string(),
                 csp: mcpr_core::proxy::CspConfig::default(),
-            })),
+            }
+            .into_swap(),
             widget_source: None,
             sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
             schema_manager: Arc::new(mcpr_core::protocol::schema_manager::SchemaManager::new(

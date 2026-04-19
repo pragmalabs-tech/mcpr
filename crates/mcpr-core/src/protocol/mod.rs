@@ -189,6 +189,26 @@ pub enum McpMethod {
     Unknown(String),
 }
 
+impl McpMethod {
+    /// `true` for methods whose responses may need body rewriting (CSP
+    /// injection in `meta`, widget overlay substitution in `contents`).
+    /// Callers use this to pick buffer-vs-stream strategy pre-forward.
+    ///
+    /// Only the five methods that carry `_meta` / widget payloads return
+    /// `true`. Everything else — initialize, ping, notifications, prompts,
+    /// completion, logging — can safely stream.
+    pub fn needs_response_buffering(&self) -> bool {
+        matches!(
+            self,
+            McpMethod::ToolsList
+                | McpMethod::ToolsCall
+                | McpMethod::ResourcesList
+                | McpMethod::ResourcesTemplatesList
+                | McpMethod::ResourcesRead
+        )
+    }
+}
+
 // MCP method name constants — single source of truth for string matching.
 pub const INITIALIZE: &str = "initialize";
 pub const INITIALIZED: &str = "notifications/initialized";
