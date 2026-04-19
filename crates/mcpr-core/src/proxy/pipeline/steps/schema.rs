@@ -5,7 +5,7 @@
 //! explicitly from the buffered handler after the response JSON has
 //! been parsed.
 
-use crate::event::{ProxyEvent, SchemaVersionCreatedEvent};
+use crate::event::{EventBus, ProxyEvent, SchemaVersionCreatedEvent};
 use crate::protocol as jsonrpc;
 use crate::protocol::schema as proto_schema;
 use serde_json::Value;
@@ -13,10 +13,19 @@ use serde_json::Value;
 use crate::proxy::ProxyState;
 use crate::proxy::pipeline::context::RequestContext;
 
-/// Feed a schema-method response into the `SchemaManager` and emit
-/// `SchemaVersionCreated` if the content changed. No-op unless the
-/// method is one the schema manager tracks (`is_schema_method`).
-pub async fn ingest(state: &ProxyState, ctx: &RequestContext, parsed: &Value) {
+/// Fire-and-forget version of schema ingest.
+///
+/// Checks method eligibility synchronously (no clone if the method is
+/// not a schema method), builds a minimal JSON-RPC request envelope,
+/// and hands ownership of the cloned response body to a spawned task.
+/// Returns immediately — the hot path never waits for merge_pages,
+/// hash_payload, or store.put_version.
+///
+/// The per-proxy `SchemaManager` tracks in-flight spawns; callers that
+/// need to observe the resulting `SchemaVersionCreated` event (tests,
+/// shutdown) should `schema_manager.wait_idle().await` before
+/// snapshotting the event sink.
+pub fn spawn_ingest(state: &ProxyState, ctx: &RequestContext, parsed: &Value) {
     let (Some(mcp_method), Some(method_str)) = (&ctx.mcp_method, &ctx.mcp_method_str) else {
         return;
     };
@@ -24,9 +33,6 @@ pub async fn ingest(state: &ProxyState, ctx: &RequestContext, parsed: &Value) {
         return;
     }
 
-    // The ingest function reads method + detail from a request envelope.
-    // Rebuild a minimal JSON-RPC request shape from ctx fields — ingest's
-    // only use of the request is the pagination cursor inside params.
     let req_val = ctx
         .jsonrpc
         .as_ref()
@@ -40,24 +46,28 @@ pub async fn ingest(state: &ProxyState, ctx: &RequestContext, parsed: &Value) {
         })
         .unwrap_or(Value::Null);
 
-    if let Some(version) = state
+    let method_owned = method_str.clone();
+    let response_owned = parsed.clone();
+    let bus: EventBus = state.event_bus.clone();
+    let upstream_id = state.name.clone();
+    let upstream_url = state.mcp_upstream.clone();
+
+    state
         .schema_manager
-        .ingest(method_str, &req_val, parsed)
-        .await
-    {
-        state.event_bus.emit(ProxyEvent::SchemaVersionCreated(
-            SchemaVersionCreatedEvent {
-                ts: chrono::Utc::now().timestamp_millis(),
-                upstream_id: state.name.clone(),
-                upstream_url: state.mcp_upstream.clone(),
-                method: version.method.clone(),
-                version: version.version,
-                version_id: version.id.to_string(),
-                content_hash: version.content_hash.clone(),
-                payload: (*version.payload).clone(),
-            },
-        ));
-    }
+        .spawn_ingest(method_owned, req_val, response_owned, move |version| {
+            bus.emit(ProxyEvent::SchemaVersionCreated(
+                SchemaVersionCreatedEvent {
+                    ts: chrono::Utc::now().timestamp_millis(),
+                    upstream_id,
+                    upstream_url,
+                    method: version.method.clone(),
+                    version: version.version,
+                    version_id: version.id.to_string(),
+                    content_hash: version.content_hash.clone(),
+                    payload: (*version.payload).clone(),
+                },
+            ));
+        });
 }
 
 /// Flip the `tools/list` stale flag when the response carries a
