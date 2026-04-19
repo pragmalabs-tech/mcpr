@@ -45,7 +45,6 @@ mod tests {
         max_response: usize,
     ) -> crate::state::AppState {
         use std::sync::Arc;
-        use tokio::sync::RwLock;
         let proxy = Arc::new(mcpr_core::proxy::ProxyState {
             name: "test".to_string(),
             mcp_upstream: upstream_url.to_string(),

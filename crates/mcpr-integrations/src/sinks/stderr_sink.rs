@@ -140,6 +140,7 @@ mod tests {
             client_name: None,
             client_version: None,
             note: "test".into(),
+            stage_timings: None,
         }))
     }
 

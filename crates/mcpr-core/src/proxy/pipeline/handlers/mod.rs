@@ -22,6 +22,11 @@ use crate::proxy::forwarding::{UpstreamClient, forward_request};
 use crate::proxy::pipeline::context::RequestContext;
 use crate::proxy::pipeline::emit::{ResponseSummary, emit_request_event};
 
+// Per-stage instrumentation moved to `crate::timing`. It's gated on
+// the `MCPR_STAGE_TIMING` env var, so hot-path overhead is ~1 ns when
+// disabled (the default). See `crate::timing::StageTimer`.
+pub(super) use crate::timing::{Stage, StageTimer};
+
 /// Forward to upstream, returning either the `reqwest::Response` or a
 /// pre-built 502 `Response` (which the caller should return directly).
 /// Consolidates the upstream-error → 502 block that was copy-pasted
@@ -64,6 +69,7 @@ pub(super) fn emit_upstream_error(
             upstream_us: Some(upstream_us),
             error_code: None,
             error_msg: Some(err.err_string.clone()),
+            stage_timings: None,
         },
     );
     (

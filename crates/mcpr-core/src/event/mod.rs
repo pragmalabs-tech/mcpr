@@ -31,7 +31,7 @@ pub use manager::EventManager;
 pub use sink::{EventSink, NoopSink};
 pub use types::{
     HeartbeatEvent, ProxyEvent, RequestEvent, SchemaVersionCreatedEvent, SessionEndEvent,
-    SessionStartEvent,
+    SessionStartEvent, StageTimings,
 };
 
 #[cfg(test)]
@@ -91,6 +91,7 @@ mod tests {
             client_name: None,
             client_version: None,
             note: note.into(),
+            stage_timings: None,
         }))
     }
 

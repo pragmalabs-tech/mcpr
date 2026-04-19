@@ -55,6 +55,7 @@ pub async fn stream_sse(
             upstream_us: Some(upstream_us),
             error_code: None,
             error_msg: None,
+            stage_timings: None,
         },
     );
     build_response(

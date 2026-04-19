@@ -19,7 +19,10 @@ use crate::proxy::pipeline::emit::{ResponseSummary, emit_request_event};
 use crate::proxy::pipeline::steps::{health, rewrite, schema, session, widget};
 use crate::proxy::sse::{extract_json_from_sse, wrap_as_sse};
 
-use super::{capture_session_id, emit_upstream_error, forward_or_502, populate_client_info};
+use super::{
+    Stage, StageTimer, capture_session_id, emit_upstream_error, forward_or_502,
+    populate_client_info,
+};
 
 pub async fn forward_and_buffer(
     state: &ProxyState,
@@ -56,13 +59,18 @@ pub async fn forward_and_buffer(
     };
     let upstream_us = upstream_start.elapsed().as_micros() as u64;
 
+    // Start the stage timer *after* upstream — `upstream_us` is already
+    // tracked separately.
+    let mut timer = StageTimer::new();
+
     // Try SSE unwrap. If the body is text/event-stream with exactly
-    // one JSON `data:` event, extract the inner bytes so middleware
-    // sees the JSON. Multi-event or non-SSE bodies go through as-is.
+    // one JSON `data:` event, extract the inner bytes. Multi-event or
+    // non-SSE bodies go through as-is.
     let (json_bytes, was_sse): (Vec<u8>, bool) = match extract_json_from_sse(&raw) {
         Some(v) => (v, true),
         None => (raw.to_vec(), false),
     };
+    timer.mark(Stage::SseUnwrap);
 
     // Parse JSON once. Error bodies and non-JSON SSE fall through here
     // with `parsed = None` → schema/widget/rewrite all no-op.
@@ -70,37 +78,48 @@ pub async fn forward_and_buffer(
     let rpc_error = parsed
         .as_ref()
         .and_then(|v| jsonrpc::extract_error_code(v).map(|(c, m)| (c, m.to_string())));
+    timer.mark(Stage::JsonParse);
 
     let mut mutated = false;
     if let Some(json) = parsed.as_mut() {
         schema::ingest(state, ctx, json).await;
         schema::mark_stale_if_listchanged(state, json);
+        timer.mark(Stage::Schema);
 
         if widget::maybe_overlay(state, ctx, json).await {
             mutated = true;
         }
+        timer.mark(Stage::WidgetOverlay);
 
-        if let Some(method_str) = ctx.mcp_method_str.as_deref()
-            && rewrite::has_markers(&json_bytes)
+        let markers_present =
+            ctx.mcp_method_str.is_some() && rewrite::has_markers(&json_bytes);
+        timer.mark(Stage::MarkerScan);
+
+        if markers_present
+            && let Some(method_str) = ctx.mcp_method_str.as_deref()
             && rewrite::rewrite_in_place(&state.rewrite_config, method_str, json)
         {
             mutated = true;
         }
+        timer.mark(Stage::Rewrite);
     }
 
     // Method-aware side effects.
     health::track_post_response(state, method, status);
     session::maybe_record_start(state, ctx, method, status).await;
     populate_client_info(state, ctx).await;
+    timer.mark(Stage::SideEffects);
 
     // Final response body — byte-pass when nothing mutated, reserialize
     // + rewrap when something did.
     let final_body: Vec<u8> = if mutated {
-        match parsed.as_ref().and_then(|v| serde_json::to_vec(v).ok()) {
+        let bytes = match parsed.as_ref().and_then(|v| serde_json::to_vec(v).ok()) {
             Some(serialized) if was_sse => wrap_as_sse(&serialized),
             Some(serialized) => serialized,
             None => raw.to_vec(),
-        }
+        };
+        timer.mark(Stage::Reserialize);
+        bytes
     } else {
         raw.to_vec()
     };
@@ -123,6 +142,7 @@ pub async fn forward_and_buffer(
         upstream_us: Some(upstream_us),
         error_code: None,
         error_msg: None,
+        stage_timings: timer.finish(),
     };
     if let Some((code, msg)) = rpc_error {
         summary = summary.with_rpc_error(code, msg);

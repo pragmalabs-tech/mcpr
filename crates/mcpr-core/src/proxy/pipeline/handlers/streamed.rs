@@ -72,6 +72,10 @@ pub async fn forward_and_stream(
             upstream_us: Some(upstream_us),
             error_code: None,
             error_msg: None,
+            // Streamed path has no per-stage breakdown — upstream_us
+            // already captured above and everything else is just
+            // method-aware side effects (negligible on this path).
+            stage_timings: None,
         },
     );
 

@@ -3,7 +3,7 @@
 //! before returning. Handlers populate mutable ctx fields (session id,
 //! client name/version) before calling in.
 
-use crate::event::{ProxyEvent, RequestEvent};
+use crate::event::{ProxyEvent, RequestEvent, StageTimings};
 
 use super::context::RequestContext;
 use crate::proxy::proxy_state::ProxyState;
@@ -18,6 +18,9 @@ pub struct ResponseSummary {
     pub error_code: Option<String>,
     /// Free-form error message. Truncated to 512 chars at emit time.
     pub error_msg: Option<String>,
+    /// Per-stage timing breakdown. `None` on paths that don't
+    /// instrument (e.g. 502 error responses, widget handlers).
+    pub stage_timings: Option<StageTimings>,
 }
 
 impl ResponseSummary {
@@ -77,6 +80,7 @@ pub fn build_request_event(
         client_name: ctx.client_name.clone(),
         client_version: ctx.client_version.clone(),
         note: ctx.tags.join("+"),
+        stage_timings: resp.stage_timings.clone(),
     }
 }
 
@@ -131,6 +135,7 @@ mod tests {
             upstream_us: Some(1000),
             error_code: None,
             error_msg: None,
+            stage_timings: None,
         }
     }
 
@@ -208,6 +213,7 @@ mod tests {
             upstream_us: Some(100),
             error_code: None,
             error_msg: None,
+            stage_timings: None,
         }
         .with_rpc_error(-32600i64, "bad request");
         let ev = build_request_event("proxy", &ctx, &resp);

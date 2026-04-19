@@ -61,7 +61,9 @@ pub async fn passthrough(
             Err(err_resp) => return err_resp,
         };
         let upstream_us = upstream_start.elapsed().as_micros() as u64;
+        let mut timer = super::StageTimer::new();
         let rewritten = url_map::rewrite_passthrough_urls(&state.rewrite_config, bytes);
+        timer.mark(super::Stage::UrlMap);
         ctx.tags.push("rewritten");
         emit_request_event(
             state,
@@ -72,6 +74,7 @@ pub async fn passthrough(
                 upstream_us: Some(upstream_us),
                 error_code: None,
                 error_msg: None,
+                stage_timings: timer.finish(),
             },
         );
         build_response(status, &upstream_headers, Body::from(rewritten.to_vec()))
@@ -88,6 +91,7 @@ pub async fn passthrough(
                 upstream_us: Some(upstream_us),
                 error_code: None,
                 error_msg: None,
+                stage_timings: None,
             },
         );
         build_response(
