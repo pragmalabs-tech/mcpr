@@ -7,14 +7,44 @@
 //! without re-hitting the store per item.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde_json::Value;
+use tokio::sync::Notify;
 
 use super::store::SchemaStore;
 use super::version::{SchemaVersion, SchemaVersionId, hash_payload};
 use crate::protocol::schema::{PageStatus, detect_page_status, merge_pages};
+
+/// Tracks in-flight `spawn_ingest` tasks so callers (shutdown handlers,
+/// tests) can wait until the async ingest queue has drained.
+#[derive(Default)]
+struct PendingTracker {
+    count: AtomicUsize,
+    notify: Notify,
+}
+
+impl PendingTracker {
+    fn begin(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+    }
+    fn end(&self) {
+        if self.count.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.notify.notify_waiters();
+        }
+    }
+    async fn wait_idle(&self) {
+        while self.count.load(Ordering::SeqCst) > 0 {
+            let notified = self.notify.notified();
+            if self.count.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
 
 /// Per-method runtime state held in memory. Separate from the
 /// `SchemaStore` because these fields serve the hot path — change
@@ -38,6 +68,7 @@ pub struct SchemaManager<S: SchemaStore> {
     upstream_id: String,
     store: S,
     state: Arc<DashMap<String, MethodState>>,
+    pending: Arc<PendingTracker>,
 }
 
 impl<S: SchemaStore> SchemaManager<S> {
@@ -46,7 +77,16 @@ impl<S: SchemaStore> SchemaManager<S> {
             upstream_id: upstream_id.into(),
             store,
             state: Arc::new(DashMap::new()),
+            pending: Arc::new(PendingTracker::default()),
         }
+    }
+
+    /// Wait until every task spawned via [`spawn_ingest`] has finished.
+    ///
+    /// Used by shutdown/test code so the bus sees every
+    /// `SchemaVersionCreated` event before it drains.
+    pub async fn wait_idle(&self) {
+        self.pending.wait_idle().await;
     }
 
     pub fn upstream_id(&self) -> &str {
@@ -143,6 +183,35 @@ impl<S: SchemaStore> SchemaManager<S> {
             captured_at: Utc::now(),
         };
         Some(self.store.put_version(version).await)
+    }
+
+    /// Spawn an async ingest task so the caller's hot path does not
+    /// pay for merge/hash/store work.
+    ///
+    /// Returns immediately after spawning. Use [`wait_idle`] to block
+    /// until every spawned task (including this one) has completed.
+    ///
+    /// The caller provides a sink closure that receives the new
+    /// [`SchemaVersion`] when one is produced (for emitting events).
+    /// The closure runs on the spawned task, not on the caller.
+    pub fn spawn_ingest<F>(
+        self: &Arc<Self>,
+        method: String,
+        request_body: Value,
+        response_body: Value,
+        on_version: F,
+    ) where
+        F: FnOnce(&SchemaVersion) + Send + 'static,
+    {
+        self.pending.begin();
+        let manager = Arc::clone(self);
+        tokio::spawn(async move {
+            let result = manager.ingest(&method, &request_body, &response_body).await;
+            if let Some(version) = result.as_ref() {
+                on_version(version);
+            }
+            manager.pending.end();
+        });
     }
 
     /// Latest stored version for `method`, or `None` if nothing has

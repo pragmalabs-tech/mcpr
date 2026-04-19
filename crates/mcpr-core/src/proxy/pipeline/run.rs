@@ -212,8 +212,11 @@ mod tests {
             "/mcp",
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
         );
-        let _ = run(proxy, method, headers, uri, body).await;
+        let _ = run(proxy.clone(), method, headers, uri, body).await;
 
+        // Schema ingest is fire-and-forget — wait for the spawned task
+        // to emit its SchemaVersionCreated before draining the bus.
+        proxy.schema_manager.wait_idle().await;
         handle.shutdown().await;
 
         let events = sink.snapshot();
@@ -321,8 +324,9 @@ mod tests {
             "/mcp",
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
         );
-        let _ = run(proxy, method, headers, uri, body).await;
+        let _ = run(proxy.clone(), method, headers, uri, body).await;
 
+        proxy.schema_manager.wait_idle().await;
         handle.shutdown().await;
 
         let events = sink.snapshot();

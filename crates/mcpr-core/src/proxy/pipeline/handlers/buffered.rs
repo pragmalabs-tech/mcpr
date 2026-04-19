@@ -82,7 +82,11 @@ pub async fn forward_and_buffer(
 
     let mut mutated = false;
     if let Some(json) = parsed.as_mut() {
-        schema::ingest(state, ctx, json).await;
+        // Schema ingest moved off the hot path: spawn fire-and-forget
+        // so the response can return while merge/hash/store run on
+        // another task. The stale-flag check stays synchronous (atomic
+        // flip — cheaper to do inline than to queue).
+        schema::spawn_ingest(state, ctx, json);
         schema::mark_stale_if_listchanged(state, json);
         timer.mark(Stage::Schema);
 
