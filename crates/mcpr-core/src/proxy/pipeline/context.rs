@@ -62,15 +62,23 @@ pub struct RequestContext {
 pub struct ResponseContext {
     pub status: u16,
     pub headers: HeaderMap,
-    /// Serialized response body — what gets returned to the client. Mutated
-    /// by the rewrite and SSE-wrap middleware.
+    /// Serialized response body — what gets returned to the client. Held
+    /// verbatim from the upstream until `EncodeResponseJson` overwrites it.
+    /// When no middleware mutates `json`, this retains the original bytes
+    /// byte-for-byte (preserving SSE framing, key order, etc.).
     pub body: Vec<u8>,
-    /// True when the upstream sent SSE-wrapped JSON. `SseUnwrapMiddleware` sets it;
-    /// `SseWrapMiddleware` reads it to decide whether to re-wrap.
+    /// True when the upstream sent SSE-wrapped JSON. `DecodeResponseJson`
+    /// sets it; `EncodeResponseJson` reads it to decide whether to re-wrap.
     pub was_sse: bool,
-    /// Parsed JSON view of the body. Populated by `SseUnwrapMiddleware`; mutated by
-    /// later middleware; serialized back into `body` by `SseWrapMiddleware`.
+    /// Parsed JSON view of the body. Populated by `DecodeResponseJson`;
+    /// mutated by later middleware; serialized back into `body` by
+    /// `EncodeResponseJson` only when `json_mutated` is set.
     pub json: Option<Value>,
+    /// Signals that some middleware mutated `json`. Set by any middleware
+    /// that takes `json.as_mut()` or reassigns `json`. `EncodeResponseJson`
+    /// skips re-serialization when false, leaving `body` untouched — the
+    /// byte-pass fast path.
+    pub json_mutated: bool,
     /// JSON-RPC error extracted from `json` (when present).
     pub rpc_error: Option<(i64, String)>,
     pub upstream_us: Option<u64>,
@@ -84,8 +92,19 @@ impl ResponseContext {
             body,
             was_sse: false,
             json: None,
+            json_mutated: false,
             rpc_error: None,
             upstream_us,
         }
+    }
+
+    /// Mutable access to the parsed JSON value, marking it as mutated so
+    /// `EncodeResponseJson` will re-serialize. Prefer this over direct
+    /// `json.as_mut()` — forgetting to set the flag causes silent staleness.
+    pub fn json_mut(&mut self) -> Option<&mut Value> {
+        if self.json.is_some() {
+            self.json_mutated = true;
+        }
+        self.json.as_mut()
     }
 }

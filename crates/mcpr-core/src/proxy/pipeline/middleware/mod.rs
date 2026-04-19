@@ -24,7 +24,7 @@ pub use health::McpHealthMiddleware;
 pub use rewrite_url::UrlRewriteMiddleware;
 pub use schema::{SchemaIngestMiddleware, StaleMarkMiddleware};
 pub use session::{DeleteSessionEndMiddleware, SessionStartMiddleware, SessionTouchMiddleware};
-pub use sse::{SseUnwrapMiddleware, SseWrapMiddleware};
+pub use sse::{DecodeResponseJson, EncodeResponseJson};
 pub use upstream_url_map::UpstreamUrlMapMiddleware;
 pub use widget_overlay::WidgetOverlayMiddleware;
 

@@ -16,9 +16,9 @@ use crate::proxy::sse::split_upstream;
 use crate::proxy::pipeline::context::{RequestContext, ResponseContext};
 use crate::proxy::pipeline::emit::{ResponseSummary, emit_request_event};
 use crate::proxy::pipeline::middleware::{
-    DeleteSessionEndMiddleware, McpHealthMiddleware, RequestMiddleware, ResponseMiddleware,
-    SchemaIngestMiddleware, SessionStartMiddleware, SessionTouchMiddleware, SseUnwrapMiddleware,
-    SseWrapMiddleware, StaleMarkMiddleware, UpstreamUrlMapMiddleware, UrlRewriteMiddleware,
+    DecodeResponseJson, DeleteSessionEndMiddleware, EncodeResponseJson, McpHealthMiddleware,
+    RequestMiddleware, ResponseMiddleware, SchemaIngestMiddleware, SessionStartMiddleware,
+    SessionTouchMiddleware, StaleMarkMiddleware, UpstreamUrlMapMiddleware, UrlRewriteMiddleware,
     WidgetOverlayMiddleware,
 };
 use crate::proxy::pipeline::parser::build_request_context;
@@ -134,7 +134,10 @@ async fn mcp_post(
     );
 
     // ⑤ Response middleware chain — order matters.
-    SseUnwrapMiddleware
+    // `DecodeResponseJson` / `EncodeResponseJson` bracket the chain so
+    // intermediate middlewares can work with a parsed JSON value. Encode
+    // is a no-op unless someone mutated the JSON (byte-pass fast path).
+    DecodeResponseJson
         .on_response(proxy, ctx, &mut resp_ctx)
         .await;
     SchemaIngestMiddleware
@@ -155,7 +158,7 @@ async fn mcp_post(
     SessionStartMiddleware
         .on_response(proxy, ctx, &mut resp_ctx)
         .await;
-    SseWrapMiddleware
+    EncodeResponseJson
         .on_response(proxy, ctx, &mut resp_ctx)
         .await;
 
