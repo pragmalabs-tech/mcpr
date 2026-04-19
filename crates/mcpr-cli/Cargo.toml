@@ -37,6 +37,10 @@ mcpr-tunnel = { workspace = true }
 mcpr-integrations = { workspace = true }
 inquire = "0.7"
 
+# Faster allocator than the system default — noticeably better latency on
+# alloc-heavy paths (per-request HeaderMap, Bytes, JSON buffers).
+mimalloc = { version = "0.1", default-features = false }
+
 # Platform-specific default paths for PID file and daemon log.
 dirs = "6"
 
