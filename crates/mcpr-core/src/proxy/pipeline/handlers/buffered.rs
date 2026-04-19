@@ -91,8 +91,7 @@ pub async fn forward_and_buffer(
         }
         timer.mark(Stage::WidgetOverlay);
 
-        let markers_present =
-            ctx.mcp_method_str.is_some() && rewrite::has_markers(&json_bytes);
+        let markers_present = ctx.mcp_method_str.is_some() && rewrite::has_markers(&json_bytes);
         timer.mark(Stage::MarkerScan);
 
         if markers_present
