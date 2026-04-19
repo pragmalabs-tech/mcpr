@@ -1,21 +1,58 @@
 #!/usr/bin/env bash
-# Runs every scenario back-to-back. ~3-5 minutes on a dev laptop.
+# Runs the full scenario suite — correctness gates first, then perf.
+# Correctness failures are hard errors; perf scenarios continue on
+# non-zero so one noisy run doesn't hide others.
 
-set -euo pipefail
+set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-SCENARIOS=(
-    fixed-overhead
-    realistic-overhead
-    session-churn
-    sse-compat
-    # session-reuse — intentionally disabled until the SSE fix lands.
+CORRECTNESS=(
+    correctness/sse-compat.sh
+    correctness/multi-event-sse.sh
+    correctness/passthrough-binary.sh
 )
 
-for s in "${SCENARIOS[@]}"; do
+# Heavier perf scenarios can be skipped via env for quick iterations.
+PERF=(
+    perf/overhead.sh
+    perf/session-reuse.sh
+    perf/realistic-mix.sh
+)
+[[ "${SKIP_STRESS:-0}" == "0" ]] && PERF+=(perf/stress.sh)
+[[ "${SKIP_LATENCY:-0}" == "0" ]] && PERF+=(perf/realistic-latency.sh)
+
+echo "################################################################"
+echo "# correctness scenarios — hard gate"
+echo "################################################################"
+fail=0
+for s in "${CORRECTNESS[@]}"; do
+    echo
+    echo "### $s"
+    if ! "$SCRIPT_DIR/scenarios/$s"; then
+        echo "!! $s FAILED"
+        fail=1
+    fi
+done
+
+if [[ $fail -ne 0 ]]; then
     echo
     echo "################################################################"
-    echo "# $s"
+    echo "# correctness FAILED — skipping perf scenarios"
     echo "################################################################"
-    "$SCRIPT_DIR/scenarios/${s}.sh" || echo "!! $s exited non-zero"
+    exit 1
+fi
+
+echo
+echo "################################################################"
+echo "# perf scenarios — medians, directional not absolute"
+echo "################################################################"
+for s in "${PERF[@]}"; do
+    echo
+    echo "### $s"
+    "$SCRIPT_DIR/scenarios/$s" || echo "!! $s exited non-zero (continuing)"
 done
+
+echo
+echo "================================================================"
+echo "done. Results under benches/results/ (gitignored)."
+echo "================================================================"

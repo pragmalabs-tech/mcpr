@@ -11,7 +11,7 @@
 # octet-stream) but the refactor will verify this invariant holds.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-. "$SCRIPT_DIR/../lib.sh"
+. "$SCRIPT_DIR/../../lib.sh"
 
 require_tools curl diff cmp
 build_bins --bin stateless-mock

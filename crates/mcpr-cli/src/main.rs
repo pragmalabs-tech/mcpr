@@ -93,7 +93,18 @@ static IS_DRAINING: AtomicBool = AtomicBool::new(false);
 
 pub const DEFAULT_MAX_REQUEST_BODY_SIZE: usize = 5 * 1024 * 1024;
 pub const DEFAULT_MAX_RESPONSE_BODY_SIZE: usize = 10 * 1024 * 1024;
+/// Hard ceiling on in-flight upstream requests (semaphore). Rarely hit
+/// in real workloads; here to prevent runaway resource use if a client
+/// flood outpaces upstream capacity.
 pub const DEFAULT_MAX_CONCURRENT_UPSTREAM: usize = 100;
+/// Idle-connection pool size per upstream host. Sized for the p99 < 1 ms
+/// sweet spot we measured in `benches/scripts/scenarios/perf/stress.sh`:
+/// throughput scales cleanly from 1 → ~30 concurrent with p99 ≤ 1 ms,
+/// saturates around 50; 64 covers the whole comfortable zone with
+/// headroom. Bumping higher buys you a few extra % of ceiling
+/// throughput but costs memory + fds per idle connection with minimal
+/// latency benefit.
+pub const DEFAULT_MAX_IDLE_UPSTREAM_PER_HOST: usize = 64;
 pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 5;
 pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
 
@@ -597,17 +608,23 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     let request_timeout =
         Duration::from_secs(cfg.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS));
 
+    // Upstream connection pool sized to the sweet-spot concurrency
+    // (measured: p99 < 1 ms up through ~30 simultaneous clients, ~50
+    // saturates). 64 covers that comfortably. The separate semaphore
+    // is a safety cap on in-flight requests, not a steady-state
+    // target — most deployments never hit it. See
+    // `DEFAULT_MAX_IDLE_UPSTREAM_PER_HOST` for the rationale.
+    let max_concurrent = cfg
+        .max_concurrent_upstream
+        .unwrap_or(DEFAULT_MAX_CONCURRENT_UPSTREAM);
     let upstream = UpstreamClient {
         http_client: reqwest::Client::builder()
             .connect_timeout(connect_timeout)
             .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(10)
+            .pool_max_idle_per_host(DEFAULT_MAX_IDLE_UPSTREAM_PER_HOST)
             .build()
             .expect("Failed to build HTTP client"),
-        semaphore: Arc::new(tokio::sync::Semaphore::new(
-            cfg.max_concurrent_upstream
-                .unwrap_or(DEFAULT_MAX_CONCURRENT_UPSTREAM),
-        )),
+        semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
         request_timeout,
     };
 
