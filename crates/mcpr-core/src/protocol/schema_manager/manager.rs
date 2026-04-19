@@ -395,6 +395,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ingest__volatile_meta_does_not_create_new_version() {
+        // Regression: dashboards saw 138 versions for a server whose tools
+        // hadn't changed in weeks, because the server regenerated `_meta`
+        // per request. Only the array of items should influence the hash.
+        let m = manager();
+        let req = tools_list_req(None);
+
+        let r1 = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {
+                "tools": [{"name": "a"}],
+                "_meta": {"requestId": "uuid-1"}
+            }
+        });
+        let r2 = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {
+                "tools": [{"name": "a"}],
+                "_meta": {"requestId": "uuid-2"}
+            }
+        });
+
+        let v1 = m.ingest("tools/list", &req, &r1).await.unwrap();
+        assert_eq!(v1.version, 1);
+        assert!(
+            m.ingest("tools/list", &req, &r2).await.is_none(),
+            "different _meta with identical tools must not mint a new version"
+        );
+    }
+
+    #[tokio::test]
     async fn ingest__changed_payload_increments_version() {
         let m = manager();
         let req = tools_list_req(None);

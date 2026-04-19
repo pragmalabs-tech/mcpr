@@ -102,11 +102,15 @@ pub fn merge_pages(method: &str, pages: &[Value]) -> Option<Value> {
     if pages.is_empty() {
         return None;
     }
-    if pages.len() == 1 {
-        return Some(pages[0].clone());
-    }
 
-    let array_key = method_array_key(method)?;
+    // List methods (tools/list, resources/list, …) must extract only the
+    // named array so per-request metadata (`_meta`, server-generated
+    // request ids, etc.) does not leak into the hash and produce
+    // phantom versions. Non-list methods (initialize) retain the raw
+    // page — they have no array to project.
+    let Some(array_key) = method_array_key(method) else {
+        return (pages.len() == 1).then(|| pages[0].clone());
+    };
 
     let mut merged_array: Vec<Value> = Vec::new();
     for page in pages {
@@ -311,6 +315,35 @@ mod tests {
     fn merge_pages__empty() {
         let result = merge_pages("tools/list", &[]);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn merge_pages__single_strips_volatile_metadata() {
+        // Regression: Study Kit upstream returned 38 tools but produced 138
+        // schema versions because the single-page branch kept the whole
+        // raw result, including `_meta` / `serverInfo` fields that the
+        // server regenerates per request.
+        let p1 = json!({
+            "tools": [{"name": "a"}],
+            "_meta": {"requestId": "req-1"},
+            "serverInfo": {"generatedAt": "2026-04-19T00:00:00Z"}
+        });
+        let p2 = json!({
+            "tools": [{"name": "a"}],
+            "_meta": {"requestId": "req-2"},
+            "serverInfo": {"generatedAt": "2026-04-19T00:00:05Z"}
+        });
+        let r1 = merge_pages("tools/list", &[p1]).unwrap();
+        let r2 = merge_pages("tools/list", &[p2]).unwrap();
+        assert_eq!(r1, r2, "per-request metadata must not reach the hash");
+        assert_eq!(r1, json!({"tools": [{"name": "a"}]}));
+    }
+
+    #[test]
+    fn merge_pages__single_missing_array_key_yields_empty_array() {
+        let p1 = json!({"_meta": {"requestId": "x"}});
+        let result = merge_pages("tools/list", &[p1]).unwrap();
+        assert_eq!(result, json!({"tools": []}));
     }
 
     #[test]
