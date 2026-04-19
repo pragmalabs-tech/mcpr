@@ -5,6 +5,7 @@ members = [
     "crates/mcpr-integrations",
     "crates/mcpr-tunnel",
 ]
+exclude = ["benches"]
 resolver = "2"
 
 [workspace.package]

@@ -1,0 +1,37 @@
+[package]
+name = "mcpr-bench"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+description = "Benchmark harness for mcpr — rmcp-based mock upstream + load-test orchestration. Standalone crate, not part of the mcpr workspace."
+
+[[bin]]
+name = "stateful-mock"
+path = "src/bin/mock_upstream.rs"
+
+[[bin]]
+name = "stateless-mock"
+path = "src/bin/stateless_mock.rs"
+
+[[bin]]
+name = "session-bench"
+path = "src/bin/session_bench.rs"
+
+[dependencies]
+rmcp = { version = "1.5", features = [
+    "server",
+    "client",
+    "macros",
+    "transport-streamable-http-server",
+    "transport-streamable-http-client-reqwest",
+] }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time"] }
+tokio-util = "0.7"
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = "1"
+humantime = "2"
