@@ -90,5 +90,52 @@ oha_run() {
         "$url"
 }
 
+# Multi-run oha wrapper. Runs `oha_run` N times, parses each run's
+# p50 / p95 / p99 / rps, prints per-run values plus a median summary.
+# Median is a more honest number than single-run on noisy loopback.
+#
+# Usage:
+#   oha_run_multi <runs> <url> <duration> <connections> <body>
+oha_run_multi() {
+    local runs="$1" url="$2" duration="$3" connections="$4" body="$5"
+    local tmp
+    tmp=$(mktemp)
+    local p50s=() p95s=() p99s=() rpss=()
+
+    for i in $(seq 1 "$runs"); do
+        echo "  -- run $i/$runs --"
+        oha_run "$url" "$duration" "$connections" "$body" | tee "$tmp"
+        local p50 p95 p99 rps
+        p50=$(awk '/^  50\.00% in/ { print $3; exit }' "$tmp")
+        p95=$(awk '/^  95\.00% in/ { print $3; exit }' "$tmp")
+        p99=$(awk '/^  99\.00% in/ { print $3; exit }' "$tmp")
+        rps=$(awk -F'\t' '/^  Requests\/sec:/ { print $2; exit }' "$tmp")
+        p50s+=("$p50")
+        p95s+=("$p95")
+        p99s+=("$p99")
+        rpss+=("$rps")
+        # Brief pause between runs to let TIME_WAIT sockets drain.
+        sleep 1
+    done
+
+    rm -f "$tmp"
+
+    # Print median of each metric. For N runs we pick the middle value
+    # after sort; for even N we take the lower middle.
+    median() {
+        printf '%s\n' "$@" | sort -g | awk -v n="$#" 'NR==int((n+1)/2){print; exit}'
+    }
+    echo
+    echo "============ MEDIAN OF $runs RUNS ============"
+    echo "p50:      $(median "${p50s[@]}")"
+    echo "p95:      $(median "${p95s[@]}")"
+    echo "p99:      $(median "${p99s[@]}")"
+    echo "req/sec:  $(median "${rpss[@]}")"
+    echo "all p50s: ${p50s[*]}"
+    echo "all p95s: ${p95s[*]}"
+    echo "all p99s: ${p99s[*]}"
+    echo "all rpss: ${rpss[*]}"
+}
+
 # Timestamp for result files.
 now() { date +%Y%m%dT%H%M%S; }

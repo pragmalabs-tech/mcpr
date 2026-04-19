@@ -47,6 +47,11 @@ async fn main() {
     let app = Router::new()
         .route("/mcp", post(handle_mcp))
         .route("/healthz", get(|| async { "ok" }))
+        // Returns 256 bytes of non-UTF-8 binary — every byte value 0x00..0xFF.
+        // Used by `scripts/scenarios/passthrough-binary.sh` to verify mcpr
+        // byte-passes non-JSON bodies without mangling them through
+        // `from_utf8_lossy` + `.replace()`.
+        .route("/binary", get(handle_binary))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(args.bind).await.unwrap();
@@ -55,6 +60,16 @@ async fn main() {
         args.bind, args.latency_us
     );
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn handle_binary() -> impl IntoResponse {
+    let body: Vec<u8> = (0u8..=255).collect();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    (StatusCode::OK, headers, body)
 }
 
 async fn handle_mcp(State(state): State<AppState>, Json(req): Json<Value>) -> impl IntoResponse {

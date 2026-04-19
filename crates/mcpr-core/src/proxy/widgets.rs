@@ -111,7 +111,7 @@ pub async fn fetch_widget_html(state: &ProxyState, widget_name: &str) -> Option<
     };
 
     // Make absolute paths point to our tunnel, not the sandbox origin
-    let config = state.rewrite_config.read().await;
+    let config = state.rewrite_config.load();
     let proxy = config.proxy_url.trim_end_matches('/');
     Some(rewrite_html_asset_urls(&html, proxy))
 }

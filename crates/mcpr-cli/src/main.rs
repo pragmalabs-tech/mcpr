@@ -64,15 +64,13 @@ mod state;
 
 // Use mimalloc as the process-wide allocator. Consistently faster than
 // the system default on request paths that allocate per request
-// (HeaderMaps, Bytes, serde_json buffers). Measured ~5-10% p95 improvement
-// on the bench harness.
+// (HeaderMaps, Bytes, serde_json buffers).
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::RwLock;
 
 use mcpr_core::proxy::forwarding::UpstreamClient;
 
@@ -686,7 +684,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
-        rewrite_config: Arc::new(RwLock::new(rewrite_config)),
+        rewrite_config: rewrite_config.into_swap(),
         widget_source,
         sessions: MemorySessionStore::new(),
         schema_manager: Arc::new(SchemaManager::new(

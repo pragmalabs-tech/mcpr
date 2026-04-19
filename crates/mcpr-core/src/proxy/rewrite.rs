@@ -43,8 +43,23 @@ pub struct RewriteConfig {
     pub csp: CspConfig,
 }
 
+impl RewriteConfig {
+    /// Wrap this config in the lock-free `ArcSwap` shape expected by
+    /// [`crate::proxy::ProxyState::rewrite_config`]. Saves every caller
+    /// from importing `arc_swap` directly.
+    pub fn into_swap(self) -> std::sync::Arc<arc_swap::ArcSwap<RewriteConfig>> {
+        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(self))
+    }
+}
+
 /// Rewrite a JSON-RPC response in place for the given method.
-pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) {
+///
+/// Returns `true` iff the body was actually mutated. Callers use this to
+/// decide whether the response needs to be re-serialized — see
+/// `pipeline::handlers::buffered` for the buffered-path dispatcher.
+#[must_use]
+pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) -> bool {
+    let mut mutated = false;
     match method {
         jsonrpc::TOOLS_LIST => {
             if let Some(tools) = body
@@ -55,6 +70,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 for tool in tools {
                     if let Some(meta) = tool.get_mut("meta") {
                         rewrite_widget_meta(meta, None, config);
+                        mutated = true;
                     }
                 }
             }
@@ -62,6 +78,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
         jsonrpc::TOOLS_CALL => {
             if let Some(meta) = body.get_mut("result").and_then(|r| r.get_mut("meta")) {
                 rewrite_widget_meta(meta, None, config);
+                mutated = true;
             }
         }
         jsonrpc::RESOURCES_LIST => {
@@ -77,6 +94,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .map(String::from);
                     if let Some(meta) = resource.get_mut("meta") {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
+                        mutated = true;
                     }
                 }
             }
@@ -96,6 +114,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .map(String::from);
                     if let Some(meta) = template.get_mut("meta") {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
+                        mutated = true;
                     }
                 }
             }
@@ -113,6 +132,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .map(String::from);
                     if let Some(meta) = content.get_mut("meta") {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
+                        mutated = true;
                     }
                 }
             }
@@ -123,7 +143,8 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
     // Safety net: any CSP-shaped domain array elsewhere in the tree still gets
     // the proxy URL. The merge rules above do not run here — this pass only
     // guarantees the proxy URL is present.
-    inject_proxy_into_all_csp(body, config);
+    mutated |= inject_proxy_into_all_csp(body, config);
+    mutated
 }
 
 /// Rewrite a widget metadata object.
@@ -153,7 +174,9 @@ fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &Re
     }
 
     if !is_widget_meta(meta, explicit_uri) {
-        inject_proxy_into_all_csp(meta, config);
+        // Inside rewrite_widget_meta: the caller's match arm has already
+        // flagged mutation, so the return value is uninteresting here.
+        let _ = inject_proxy_into_all_csp(meta, config);
         return;
     }
 
@@ -173,7 +196,8 @@ fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &Re
     write_openai_csp(meta, &connect, &resource, &frame);
     write_spec_csp(meta, &connect, &resource, &frame);
 
-    inject_proxy_into_all_csp(meta, config);
+    // Same reasoning as above — caller already flags mutation.
+    let _ = inject_proxy_into_all_csp(meta, config);
 }
 
 /// Return `true` when the meta object belongs to a widget, either because it
@@ -300,7 +324,12 @@ fn write_spec_csp(meta: &mut Value, connect: &[String], resource: &[String], fra
 /// Recursively ensure the proxy URL is present in every CSP-shaped domain array.
 /// Does not apply the merge rules — that would require URI context the deep scan
 /// does not have. The only guarantee is "proxy URL is reachable from the widget."
-fn inject_proxy_into_all_csp(value: &mut Value, config: &RewriteConfig) {
+/// Walk `value` and insert `config.proxy_url` at the front of every CSP
+/// domain array that doesn't already contain it. Returns `true` iff any
+/// insertion happened — lets callers skip re-serialization on no-op walks.
+#[must_use]
+fn inject_proxy_into_all_csp(value: &mut Value, config: &RewriteConfig) -> bool {
+    let mut mutated = false;
     match value {
         Value::Object(map) => {
             for key in [
@@ -315,20 +344,22 @@ fn inject_proxy_into_all_csp(value: &mut Value, config: &RewriteConfig) {
                     let has_proxy = arr.iter().any(|v| v.as_str() == Some(&config.proxy_url));
                     if !has_proxy {
                         arr.insert(0, Value::String(config.proxy_url.clone()));
+                        mutated = true;
                     }
                 }
             }
             for (_, v) in map.iter_mut() {
-                inject_proxy_into_all_csp(v, config);
+                mutated |= inject_proxy_into_all_csp(v, config);
             }
         }
         Value::Array(arr) => {
             for item in arr {
-                inject_proxy_into_all_csp(item, config);
+                mutated |= inject_proxy_into_all_csp(item, config);
             }
         }
         _ => {}
     }
+    mutated
 }
 
 fn strip_scheme(url: &str) -> String {

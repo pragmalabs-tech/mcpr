@@ -18,6 +18,10 @@ path = "src/bin/stateless_mock.rs"
 name = "session-bench"
 path = "src/bin/session_bench.rs"
 
+[[bin]]
+name = "multi-event-mock"
+path = "src/bin/multi_event_mock.rs"
+
 [dependencies]
 rmcp = { version = "1.5", features = [
     "server",

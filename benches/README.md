@@ -79,27 +79,25 @@ run the installed `mcprd` daemon on a different port or temporarily stop it.
 
 ## Known gaps
 
-- **SSE streaming (GET /mcp) is not benched.** Blocked on the SSE forwarding bug (see below).
 - **Mixed workload (init + steady-state + SSE concurrently) not covered.** Each scenario runs in isolation.
 - **No CPU/RSS counters.** Throughput/latency only; if you need them, wrap the proxy in `/usr/bin/time -v`.
+- **Single-run tail variance is still ±30–50 %** on loopback. `oha_run_multi` in `lib.sh` supports multi-run median reporting; use it for anything claimed as a reference number.
 
-## Known mcpr issues surfaced by this harness
+## Previously-known mcpr issues, now resolved
 
-### SSE framing is not byte-passed on POST /mcp
+All three issues below were surfaced by this harness and fixed in the
+branch-by-shape pipeline refactor (see `docs/proxy/REFACTOR_PLAN.md`).
+Scenarios now PASS:
 
-When the upstream responds with `text/event-stream`, mcpr currently:
-1. Buffers the stream (`transfer-encoding: chunked` → `content-length: N`)
-2. Strips non-`data:` SSE metadata (`id:`, `retry:`, empty prefix lines)
-3. Deserializes and re-serializes the JSON payload (reorders keys)
-4. Rebuilds the response with its own headers (adds CORS)
+- **SSE byte-pass** (`scripts/scenarios/sse-compat.sh`) — mcpr now forwards
+  upstream `text/event-stream` responses unchanged: `transfer-encoding: chunked`
+  preserved, SSE metadata (`id:`, `retry:`, empty `data:` prefix lines) intact,
+  JSON payload byte-for-byte identical.
+- **Multi-event SSE** (`scripts/scenarios/multi-event-sse.sh`) — multi-event
+  responses stream through without the old `extract_json_from_sse` silent-drop.
+- **Binary passthrough** (`scripts/scenarios/passthrough-binary.sh`) —
+  non-JSON responses stream via `Body::from_stream` instead of going through
+  `String::from_utf8_lossy` + `.replace()`.
 
-Real MCP clients (rmcp included) fail to parse the reformatted stream. The
-proxy test-suite misses it because no test drives a streaming upstream
-through mcpr with a spec-compliant client.
-
-**Reproduce:** `scripts/scenarios/sse-compat.sh`
-**Suspect code:** `crates/mcpr-core/src/proxy/pipeline/run.rs:123` (unconditional `read_body_capped`), `crates/mcpr-core/src/proxy/sse.rs:10-14` (lossy `extract_json_from_sse`), `crates/mcpr-core/src/proxy/pipeline/middleware/sse.rs:138` (`serde_json::to_vec` re-serialize).
-**Fix direction:** detect `content-type: text/event-stream` on the upstream response before buffering; return `Body::from_stream(resp.bytes_stream())` and skip the SSE unwrap/wrap middleware chain.
-
-`session-bench` is blocked on this fix — keep the binary in place, enable it
-once SSE forwarding byte-passes correctly.
+`session-bench` now works against the new pipeline — rmcp clients complete
+the initialize handshake through mcpr.
