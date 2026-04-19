@@ -10,7 +10,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-version = "0.4.40"
+version = "0.4.41"
 repository = "https://github.com/cptrodgers/mcpr"
 homepage = "https://mcpr.app"
 description = "MCPR is a reverse proxy for MCP servers — operating at the JSON-RPC layer to route, authenticate, observe, and secure MCP traffic."
@@ -30,6 +30,6 @@ url = "2"
 base64 = "0.22"
 sha2 = "0.10"
 tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-webpki-roots"] }
-mcpr-core = { path = "crates/mcpr-core", version = "0.4.40" }
-mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.40" }
-mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.40" }
+mcpr-core = { path = "crates/mcpr-core", version = "0.4.41" }
+mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.41" }
+mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.41" }
