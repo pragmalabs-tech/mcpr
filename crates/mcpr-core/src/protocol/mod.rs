@@ -190,21 +190,26 @@ pub enum McpMethod {
 }
 
 impl McpMethod {
-    /// `true` for methods whose responses may need body rewriting (CSP
-    /// injection in `meta`, widget overlay substitution in `contents`).
-    /// Callers use this to pick buffer-vs-stream strategy pre-forward.
+    /// `true` for methods whose responses either (a) may need body
+    /// rewriting (CSP injection in `meta`, widget overlay substitution
+    /// in `contents`) or (b) carry schema information we want to
+    /// capture into `SchemaManager`. Callers use this to pick
+    /// buffer-vs-stream strategy pre-forward.
     ///
-    /// Only the five methods that carry `_meta` / widget payloads return
-    /// `true`. Everything else — initialize, ping, notifications, prompts,
-    /// completion, logging — can safely stream.
+    /// Rewrite-capable: tools/list, tools/call, resources/list,
+    /// resources/templates/list, resources/read.
+    /// Schema-capture: prompts/list, initialize — responses are small
+    /// and single-shot, so buffering cost is negligible.
     pub fn needs_response_buffering(&self) -> bool {
         matches!(
             self,
-            McpMethod::ToolsList
+            McpMethod::Initialize
+                | McpMethod::ToolsList
                 | McpMethod::ToolsCall
                 | McpMethod::ResourcesList
                 | McpMethod::ResourcesTemplatesList
                 | McpMethod::ResourcesRead
+                | McpMethod::PromptsList
         )
     }
 }
@@ -866,5 +871,26 @@ mod tests {
     fn extract_error_code__none_for_success() {
         let val = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": []}});
         assert!(extract_error_code(&val).is_none());
+    }
+
+    // ── needs_response_buffering ──
+
+    #[test]
+    fn needs_response_buffering__schema_methods_buffered() {
+        // Every method tracked by `schema::is_schema_method` must also
+        // be buffered, otherwise `spawn_ingest` will never see it.
+        assert!(McpMethod::Initialize.needs_response_buffering());
+        assert!(McpMethod::ToolsList.needs_response_buffering());
+        assert!(McpMethod::ResourcesList.needs_response_buffering());
+        assert!(McpMethod::ResourcesTemplatesList.needs_response_buffering());
+        assert!(McpMethod::PromptsList.needs_response_buffering());
+    }
+
+    #[test]
+    fn needs_response_buffering__non_schema_methods_streamed() {
+        assert!(!McpMethod::Ping.needs_response_buffering());
+        assert!(!McpMethod::PromptsGet.needs_response_buffering());
+        assert!(!McpMethod::CompletionComplete.needs_response_buffering());
+        assert!(!McpMethod::LoggingSetLevel.needs_response_buffering());
     }
 }

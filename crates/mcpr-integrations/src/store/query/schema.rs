@@ -30,6 +30,19 @@ pub struct SchemaRow {
     pub schema_hash: String,
 }
 
+/// A hydration-focused schema row. Adds `proxy` which the general
+/// `SchemaRow` omits (it's not useful for the status-display consumers
+/// that call `schema()`). Used at startup to seed `SchemaManager`.
+#[derive(Debug, Clone)]
+pub struct LatestSchemaRow {
+    pub proxy: String,
+    pub upstream_url: String,
+    pub method: String,
+    pub payload: String,
+    pub captured_at: i64,
+    pub schema_hash: String,
+}
+
 /// A schema change record from `schema_changes`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SchemaChangeRow {
@@ -184,6 +197,44 @@ impl QueryEngine {
             methods_captured: method_names,
             last_captured_at: last_captured,
         })
+    }
+
+    /// Fetch the latest persisted schema row for `(proxy, method)` —
+    /// used at proxy startup to hydrate `SchemaManager` from disk.
+    ///
+    /// Returns `None` when no row matches. `server_schema` is an
+    /// UPSERT-keyed-by-(proxy, upstream_url, method) table, so the
+    /// "latest" is simply the single row per key; we pick by highest
+    /// `captured_at` to be robust against multiple upstream URLs that
+    /// share the same proxy name (unlikely today but possible).
+    pub fn latest_schema_row(
+        &self,
+        proxy: &str,
+        method: &str,
+    ) -> Result<Option<LatestSchemaRow>, rusqlite::Error> {
+        let sql = "
+            SELECT proxy, upstream_url, method, payload, captured_at, schema_hash
+            FROM server_schema
+            WHERE proxy = ?1 AND method = ?2
+            ORDER BY captured_at DESC
+            LIMIT 1
+        ";
+        self.conn()
+            .query_row(sql, params![proxy, method], |row| {
+                Ok(LatestSchemaRow {
+                    proxy: row.get(0)?,
+                    upstream_url: row.get(1)?,
+                    method: row.get(2)?,
+                    payload: row.get(3)?,
+                    captured_at: row.get(4)?,
+                    schema_hash: row.get(5)?,
+                })
+            })
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
     }
 
     /// Cross-reference captured tools/list schema with actual request logs.

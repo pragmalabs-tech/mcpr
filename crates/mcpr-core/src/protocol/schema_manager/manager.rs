@@ -112,6 +112,30 @@ impl<S: SchemaStore> SchemaManager<S> {
         }
     }
 
+    /// Bootstrap in-memory state from a pre-existing `SchemaVersion`
+    /// (typically loaded from an external persistent store at startup).
+    ///
+    /// Seeds `current_hash` + `next_version_number` so subsequent
+    /// `ingest` calls with matching content return `None` (no phantom
+    /// new version) and non-matching content increments from
+    /// `version.version + 1`. Also writes the version into the
+    /// manager's in-process store so `latest` / `list_tools` /
+    /// `get_tool` / etc. see it without needing the first live request.
+    ///
+    /// Idempotent per method: if `current_hash` is already set (either
+    /// from a prior preload or a completed ingest), this is a no-op.
+    pub async fn preload(&self, version: SchemaVersion) {
+        {
+            let mut entry = self.state.entry(version.method.clone()).or_default();
+            if entry.current_hash.is_some() {
+                return;
+            }
+            entry.current_hash = Some(version.content_hash.clone());
+            entry.next_version_number = version.version.saturating_add(1);
+        }
+        self.store.put_version(version).await;
+    }
+
     /// Feed a schema-method response through the manager.
     ///
     /// Returns `Some(version)` when a new `SchemaVersion` was created
@@ -392,6 +416,81 @@ mod tests {
         let resp = tools_list_resp(json!([{"name": "a"}]), None);
         m.ingest("tools/list", &req, &resp).await.unwrap();
         assert!(m.ingest("tools/list", &req, &resp).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn preload__seeds_hash_and_version_counter() {
+        // Simulates startup hydration: we hand the manager a v3 version
+        // that was persisted before a restart. The next ingest with the
+        // same content must not mint v4, and the next ingest with
+        // different content must mint v4 (not v1).
+        let m = manager();
+        let req = tools_list_req(None);
+        let stored = json!({"tools": [{"name": "a"}]});
+        let version = SchemaVersion {
+            id: SchemaVersionId("preload-seed-123".to_string()),
+            upstream_id: "proxy-1".to_string(),
+            method: "tools/list".to_string(),
+            version: 3,
+            payload: Arc::new(stored.clone()),
+            content_hash: hash_payload(&stored),
+            captured_at: Utc::now(),
+        };
+        m.preload(version).await;
+
+        // Same-content ingest: no new version.
+        let same = tools_list_resp(json!([{"name": "a"}]), None);
+        assert!(m.ingest("tools/list", &req, &same).await.is_none());
+
+        // Different content: increments to v4, not v1.
+        let changed = tools_list_resp(json!([{"name": "a"}, {"name": "b"}]), None);
+        let v4 = m.ingest("tools/list", &req, &changed).await.unwrap();
+        assert_eq!(v4.version, 4);
+    }
+
+    #[tokio::test]
+    async fn preload__idempotent_second_call_noop() {
+        let m = manager();
+        let stored = json!({"tools": [{"name": "a"}]});
+        let mk = |v: u32, tag: &str| SchemaVersion {
+            id: SchemaVersionId(format!("id-{tag}")),
+            upstream_id: "proxy-1".to_string(),
+            method: "tools/list".to_string(),
+            version: v,
+            payload: Arc::new(stored.clone()),
+            content_hash: format!("hash-{tag}"),
+            captured_at: Utc::now(),
+        };
+
+        m.preload(mk(3, "first")).await;
+        m.preload(mk(99, "second")).await;
+
+        // Second preload was skipped (state already had a hash), so
+        // the counter is 4, not 100.
+        let req = tools_list_req(None);
+        let changed = tools_list_resp(json!([{"name": "b"}]), None);
+        let v = m.ingest("tools/list", &req, &changed).await.unwrap();
+        assert_eq!(v.version, 4);
+    }
+
+    #[tokio::test]
+    async fn preload__makes_list_tools_visible_without_ingest() {
+        let m = manager();
+        let stored = json!({"tools": [{"name": "a"}, {"name": "b"}]});
+        let version = SchemaVersion {
+            id: SchemaVersionId("preload-list".to_string()),
+            upstream_id: "proxy-1".to_string(),
+            method: "tools/list".to_string(),
+            version: 1,
+            payload: Arc::new(stored.clone()),
+            content_hash: hash_payload(&stored),
+            captured_at: Utc::now(),
+        };
+        m.preload(version).await;
+
+        let tools = m.list_tools().await;
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "a");
     }
 
     #[tokio::test]

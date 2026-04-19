@@ -152,12 +152,14 @@ mod tests {
     }
 
     #[test]
-    fn classify__initialize_streams() {
+    fn classify__initialize_buffers_for_schema_capture() {
+        // Initialize carries serverInfo/capabilities we want to record
+        // in SchemaManager, so it takes the buffered path.
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
         let ctx = mk_ctx(Method::POST, "/mcp", &HeaderMap::new(), body);
         assert_eq!(
             classify_request(&ctx, &HeaderMap::new(), false),
-            RequestKind::McpPostStream(McpMethod::Initialize)
+            RequestKind::McpPostBuffer(McpMethod::Initialize)
         );
     }
 
@@ -174,6 +176,7 @@ mod tests {
     #[test]
     fn classify__all_buffered_methods() {
         for (method_str, expected) in [
+            ("initialize", McpMethod::Initialize),
             ("tools/list", McpMethod::ToolsList),
             ("tools/call", McpMethod::ToolsCall),
             ("resources/list", McpMethod::ResourcesList),
@@ -182,6 +185,7 @@ mod tests {
                 McpMethod::ResourcesTemplatesList,
             ),
             ("resources/read", McpMethod::ResourcesRead),
+            ("prompts/list", McpMethod::PromptsList),
         ] {
             let body =
                 format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method_str}"}}"#).into_bytes();
