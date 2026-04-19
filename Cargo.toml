@@ -5,6 +5,7 @@ members = [
     "crates/mcpr-integrations",
     "crates/mcpr-tunnel",
 ]
+exclude = ["benches"]
 resolver = "2"
 
 [workspace.package]
@@ -33,3 +34,12 @@ tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-webpk
 mcpr-core = { path = "crates/mcpr-core", version = "0.4.41" }
 mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.41" }
 mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.41" }
+
+# Release builds — tuned for runtime perf at the cost of build time.
+# `lto = "thin"` enables cross-crate inlining (5–15% perf on hot paths);
+# `codegen-units = 1` maximizes optimizer visibility; `panic = "abort"`
+# shrinks the binary and lets the compiler skip unwind tables.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"

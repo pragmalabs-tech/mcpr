@@ -34,6 +34,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.92"
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
@@ -86,6 +87,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.92"
 
       - name: Publish crates
         env:
