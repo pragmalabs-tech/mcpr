@@ -346,6 +346,42 @@ mod tests {
         assert_eq!(req.note, "rewritten");
     }
 
+    // ── Test #3b — prompts/list is also ingested (schema-capture gap fix) ──
+
+    #[tokio::test]
+    async fn prompts_list_emits_schema_version_event() {
+        // Regression: `prompts/list` classified as streamed for a long
+        // time, so `spawn_ingest` never saw it. Routing it through the
+        // buffered path is the fix — this test guards against a silent
+        // regression where prompts/list quietly drops off `needs_response_buffering`.
+        let upstream = Router::new().route(
+            "/mcp",
+            post(|| async {
+                axum::Json(json!({
+                    "jsonrpc": "2.0", "id": 1,
+                    "result": {"prompts": [{"name": "summarize"}]}
+                }))
+            }),
+        );
+        let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
+
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (method, headers, uri, body) = post_mcp(
+            "/mcp",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"}),
+        );
+        let _ = run(proxy.clone(), method, headers, uri, body).await;
+
+        proxy.schema_manager.wait_idle().await;
+        handle.shutdown().await;
+
+        let events = sink.snapshot();
+        let schema = only_schema_event(&events);
+        assert_eq!(schema.method, "prompts/list");
+        assert_eq!(schema.version, 1);
+        assert_eq!(schema.payload["prompts"][0]["name"], "summarize");
+    }
+
     // ── Test #4 — 502 when upstream is unreachable ────────────────────────
 
     #[tokio::test]

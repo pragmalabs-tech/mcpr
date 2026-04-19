@@ -1003,6 +1003,50 @@ mod tests {
     }
 
     #[test]
+    fn latest_schema_row__returns_row_for_proxy_method() {
+        let engine = seeded_engine();
+        seed_schema_for_proxy(&engine, "alpha", "http://a:9000");
+
+        let row = engine
+            .latest_schema_row("alpha", "tools/list")
+            .unwrap()
+            .expect("row must exist");
+        assert_eq!(row.proxy, "alpha");
+        assert_eq!(row.upstream_url, "http://a:9000");
+        assert_eq!(row.method, "tools/list");
+        assert_eq!(row.schema_hash, "hash-alpha");
+    }
+
+    #[test]
+    fn latest_schema_row__none_when_missing() {
+        let engine = seeded_engine();
+        assert!(
+            engine
+                .latest_schema_row("nonexistent", "tools/list")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn latest_schema_row__scoped_by_proxy() {
+        let engine = seeded_engine();
+        seed_schema_for_proxy(&engine, "alpha", "http://a:9000");
+        seed_schema_for_proxy(&engine, "beta", "http://b:9000");
+
+        let a = engine
+            .latest_schema_row("alpha", "tools/list")
+            .unwrap()
+            .unwrap();
+        let b = engine
+            .latest_schema_row("beta", "tools/list")
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.schema_hash, "hash-alpha");
+        assert_eq!(b.schema_hash, "hash-beta");
+    }
+
+    #[test]
     fn schema_changes__returns_history() {
         let engine = seeded_engine();
         seed_schema(&engine);

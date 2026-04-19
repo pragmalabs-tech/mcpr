@@ -637,6 +637,10 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     )));
 
     // 2. SQLite sink — local storage for CLI queries.
+    // Keep the db_path around after opening so we can hydrate the
+    // SchemaManager from it below — sinks own the Store, but the
+    // proxy bootstrap also needs read access to warm schema state.
+    let mut sqlite_db_path: Option<std::path::PathBuf> = None;
     if let Some(db_path) = mcpr_integrations::store::path::resolve_db_path(None) {
         match mcpr_integrations::store::Store::open(mcpr_integrations::store::StoreConfig {
             db_path: db_path.clone(),
@@ -649,6 +653,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
                     db_path.display()
                 );
                 event_manager.register(Box::new(mcpr_integrations::SqliteSink::new(store)));
+                sqlite_db_path = Some(db_path);
             }
             Err(e) => {
                 eprintln!(
@@ -714,6 +719,14 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     let app_state = AppState {
         proxy: proxy.clone(),
     };
+
+    // Hydrate SchemaManager from disk so dashboards show the last
+    // captured schema immediately after restart (instead of an empty
+    // server until the first real client call). Passive design: only
+    // reads local SQLite, never probes the upstream.
+    if let Some(ref db_path) = sqlite_db_path {
+        hydrate_schema_manager_from_sqlite(&proxy.schema_manager, &proxy.name, db_path).await;
+    }
 
     // Initial connectivity probe — warn early if the MCP URL seems wrong
     probe_mcp_upstream(&mcp, &upstream.http_client, &proxy_health_ref).await;
@@ -984,6 +997,86 @@ fn validate_mcp_url(url: &str) {
             colored::Colorize::dimmed("hint"),
         );
         std::process::exit(1);
+    }
+}
+
+/// Seed `SchemaManager` from the `server_schema` table so dashboards
+/// reflect the last captured schema immediately after a restart.
+///
+/// Passive: reads local SQLite only, never contacts the upstream. Runs
+/// once at startup, O(5) queries (one per schema method). Any I/O
+/// failure logs a warning and is otherwise swallowed — a missing or
+/// corrupt store should never prevent the proxy from starting.
+async fn hydrate_schema_manager_from_sqlite(
+    manager: &mcpr_core::protocol::schema_manager::SchemaManager<
+        mcpr_core::protocol::schema_manager::MemorySchemaStore,
+    >,
+    proxy_name: &str,
+    db_path: &std::path::Path,
+) {
+    use mcpr_core::protocol::schema_manager::{SchemaVersion, SchemaVersionId};
+    use mcpr_integrations::store::QueryEngine;
+
+    let engine = match QueryEngine::open(db_path) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!(
+                "  {}: schema hydration skipped — query engine open failed: {e}",
+                colored::Colorize::yellow("warn"),
+            );
+            return;
+        }
+    };
+
+    let methods = [
+        "initialize",
+        "tools/list",
+        "resources/list",
+        "resources/templates/list",
+        "prompts/list",
+    ];
+
+    let mut hydrated = 0usize;
+    for method in methods {
+        let row = match engine.latest_schema_row(proxy_name, method) {
+            Ok(Some(r)) => r,
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!(
+                    "  {}: schema hydration query failed for {method}: {e}",
+                    colored::Colorize::yellow("warn"),
+                );
+                continue;
+            }
+        };
+        let Ok(payload): Result<serde_json::Value, _> = serde_json::from_str(&row.payload) else {
+            continue;
+        };
+        let version = SchemaVersion {
+            // The 16-hex id is a deterministic prefix of the full hash,
+            // so it reconstructs correctly on restart.
+            id: SchemaVersionId(row.schema_hash.chars().take(16).collect()),
+            upstream_id: proxy_name.to_string(),
+            method: method.to_string(),
+            // Version numbering is per-process; resetting to 1 at
+            // restart is acceptable because external consumers dedupe
+            // by content_hash, not by version number.
+            version: 1,
+            payload: std::sync::Arc::new(payload),
+            content_hash: row.schema_hash,
+            captured_at: chrono::DateTime::from_timestamp_millis(row.captured_at)
+                .unwrap_or_else(chrono::Utc::now),
+        };
+        manager.preload(version).await;
+        hydrated += 1;
+    }
+
+    if hydrated > 0 {
+        eprintln!(
+            "  {} hydrated {hydrated} schema method(s) from {}",
+            colored::Colorize::dimmed("schema"),
+            db_path.display(),
+        );
     }
 }
 
