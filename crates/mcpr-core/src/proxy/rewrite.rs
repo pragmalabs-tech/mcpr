@@ -68,7 +68,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 .and_then(|t| t.as_array_mut())
             {
                 for tool in tools {
-                    if let Some(meta) = tool.get_mut("meta") {
+                    if let Some(meta) = tool.get_mut("_meta") {
                         rewrite_widget_meta(meta, None, config);
                         mutated = true;
                     }
@@ -76,7 +76,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
             }
         }
         jsonrpc::TOOLS_CALL => {
-            if let Some(meta) = body.get_mut("result").and_then(|r| r.get_mut("meta")) {
+            if let Some(meta) = body.get_mut("result").and_then(|r| r.get_mut("_meta")) {
                 rewrite_widget_meta(meta, None, config);
                 mutated = true;
             }
@@ -92,7 +92,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .get("uri")
                         .and_then(|v| v.as_str())
                         .map(String::from);
-                    if let Some(meta) = resource.get_mut("meta") {
+                    if let Some(meta) = resource.get_mut("_meta") {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
                         mutated = true;
                     }
@@ -112,7 +112,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .get("uriTemplate")
                         .and_then(|v| v.as_str())
                         .map(String::from);
-                    if let Some(meta) = template.get_mut("meta") {
+                    if let Some(meta) = template.get_mut("_meta") {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
                         mutated = true;
                     }
@@ -130,7 +130,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .get("uri")
                         .and_then(|v| v.as_str())
                         .map(String::from);
-                    if let Some(meta) = content.get_mut("meta") {
+                    if let Some(meta) = content.get_mut("_meta") {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
                         mutated = true;
                     }
@@ -166,7 +166,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
 /// overrides apply.
 ///
 /// The rewrite is skipped entirely for meta objects that show no sign of being
-/// a widget — a tool call result's `meta`, for example — so non-widget metas
+/// a widget — a tool call result's `_meta`, for example — so non-widget metas
 /// are not polluted with CSP fields they don't need.
 fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &RewriteConfig) {
     if meta.get("openai/widgetDomain").is_some() {
@@ -436,7 +436,7 @@ mod tests {
                     "uri": "ui://widget/question",
                     "mimeType": "text/html",
                     "text": "<html><body>Hello</body></html>",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetDomain": "localhost:9000",
                         "openai/widgetCSP": {
                             "resource_domains": ["http://localhost:9000"],
@@ -455,10 +455,10 @@ mod tests {
             "<html><body>Hello</body></html>"
         );
         assert_eq!(
-            content["meta"]["openai/widgetDomain"].as_str().unwrap(),
+            content["_meta"]["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
         );
-        let resources = as_strs(&content["meta"]["openai/widgetCSP"]["resource_domains"]);
+        let resources = as_strs(&content["_meta"]["openai/widgetCSP"]["resource_domains"]);
         assert!(resources.contains(&"https://abc.tunnel.example.com"));
         assert!(!resources.iter().any(|d| d.contains("localhost")));
     }
@@ -472,7 +472,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "create_question",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetDomain": "old.domain.com",
                         "openai/widgetCSP": {
                             "resource_domains": ["http://localhost:4444"],
@@ -485,7 +485,7 @@ mod tests {
 
         let _ = rewrite_response("tools/list", &mut body, &config);
 
-        let meta = &body["result"]["tools"][0]["meta"];
+        let meta = &body["result"]["tools"][0]["_meta"];
         assert_eq!(
             meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
@@ -504,7 +504,7 @@ mod tests {
         let mut body = json!({
             "result": {
                 "content": [{"type": "text", "text": "some result"}],
-                "meta": {
+                "_meta": {
                     "openai/widgetDomain": "old.domain.com",
                     "openai/widgetCSP": {
                         "resource_domains": ["http://localhost:4444"]
@@ -516,7 +516,7 @@ mod tests {
         let _ = rewrite_response("tools/call", &mut body, &config);
 
         assert_eq!(
-            body["result"]["meta"]["openai/widgetDomain"]
+            body["result"]["_meta"]["openai/widgetDomain"]
                 .as_str()
                 .unwrap(),
             "abc.tunnel.example.com"
@@ -537,7 +537,7 @@ mod tests {
                 "resources": [{
                     "uri": "ui://widget/question",
                     "name": "Question Widget",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetDomain": "old.domain.com"
                     }
                 }]
@@ -547,7 +547,7 @@ mod tests {
         let _ = rewrite_response("resources/list", &mut body, &config);
 
         assert_eq!(
-            body["result"]["resources"][0]["meta"]["openai/widgetDomain"]
+            body["result"]["resources"][0]["_meta"]["openai/widgetDomain"]
                 .as_str()
                 .unwrap(),
             "abc.tunnel.example.com"
@@ -564,7 +564,7 @@ mod tests {
                 "resourceTemplates": [{
                     "uriTemplate": "file:///{path}",
                     "name": "File Access",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetDomain": "old.domain.com",
                         "openai/widgetCSP": {
                             "resource_domains": ["http://localhost:4444"],
@@ -577,7 +577,7 @@ mod tests {
 
         let _ = rewrite_response("resources/templates/list", &mut body, &config);
 
-        let meta = &body["result"]["resourceTemplates"][0]["meta"];
+        let meta = &body["result"]["resourceTemplates"][0]["_meta"];
         assert_eq!(
             meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
@@ -596,7 +596,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "test",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "resource_domains": [
                                 "http://localhost:4444",
@@ -613,7 +613,7 @@ mod tests {
         let _ = rewrite_response("tools/list", &mut body, &config);
 
         let domains =
-            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
+            as_strs(&body["result"]["tools"][0]["_meta"]["openai/widgetCSP"]["resource_domains"]);
         assert_eq!(
             domains,
             vec!["https://abc.tunnel.example.com", "https://cdn.external.com"]
@@ -634,7 +634,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "test",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "connect_domains": ["http://localhost:9000"]
                         }
@@ -646,7 +646,7 @@ mod tests {
         let _ = rewrite_response("tools/list", &mut body, &config);
 
         let domains =
-            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
+            as_strs(&body["result"]["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]);
         assert!(domains.contains(&"https://extra.example.com"));
         assert!(domains.contains(&"https://abc.tunnel.example.com"));
     }
@@ -660,7 +660,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "test",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "resource_domains": ["https://abc.tunnel.example.com", "https://cdn.example.com"]
                         }
@@ -672,7 +672,7 @@ mod tests {
         let _ = rewrite_response("tools/list", &mut body, &config);
 
         let domains =
-            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
+            as_strs(&body["result"]["tools"][0]["_meta"]["openai/widgetCSP"]["resource_domains"]);
         let count = domains
             .iter()
             .filter(|d| **d == "https://abc.tunnel.example.com")
@@ -689,7 +689,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "test",
-                    "meta": {
+                    "_meta": {
                         "ui": {
                             "csp": {
                                 "connectDomains": ["http://localhost:9000"],
@@ -703,7 +703,7 @@ mod tests {
 
         let _ = rewrite_response("tools/list", &mut body, &config);
 
-        let meta = &body["result"]["tools"][0]["meta"]["ui"]["csp"];
+        let meta = &body["result"]["tools"][0]["_meta"]["ui"]["csp"];
         let connect = as_strs(&meta["connectDomains"]);
         let resource = as_strs(&meta["resourceDomains"]);
         assert!(connect.contains(&"https://abc.tunnel.example.com"));
@@ -745,13 +745,13 @@ mod tests {
         let mut body = json!({
             "result": {
                 "data": "unchanged",
-                "meta": { "openai/widgetDomain": "should-stay.com" }
+                "_meta": { "openai/widgetDomain": "should-stay.com" }
             }
         });
         let _ = rewrite_response("notifications/message", &mut body, &config);
 
         assert_eq!(
-            body["result"]["meta"]["openai/widgetDomain"]
+            body["result"]["_meta"]["openai/widgetDomain"]
                 .as_str()
                 .unwrap(),
             "should-stay.com"
@@ -777,7 +777,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "test",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "resource_domains": ["https://cdn.external.com", "https://api.external.com"],
                             "connect_domains": ["https://api.external.com", "http://localhost:9000"]
@@ -790,7 +790,7 @@ mod tests {
         let _ = rewrite_response("tools/list", &mut body, &config);
 
         let resources =
-            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
+            as_strs(&body["result"]["tools"][0]["_meta"]["openai/widgetCSP"]["resource_domains"]);
         assert_eq!(
             resources,
             vec![
@@ -799,7 +799,7 @@ mod tests {
             ]
         );
         let connect =
-            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
+            as_strs(&body["result"]["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]);
         assert_eq!(
             connect,
             vec![
@@ -827,13 +827,13 @@ mod tests {
                 "resources": [
                     {
                         "uri": "ui://widget/payment-form",
-                        "meta": {
+                        "_meta": {
                             "openai/widgetCSP": { "connect_domains": [] }
                         }
                     },
                     {
                         "uri": "ui://widget/search",
-                        "meta": {
+                        "_meta": {
                             "openai/widgetCSP": { "connect_domains": [] }
                         }
                     }
@@ -843,12 +843,14 @@ mod tests {
 
         let _ = rewrite_response("resources/list", &mut body, &config);
 
-        let payment_connect =
-            as_strs(&body["result"]["resources"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
+        let payment_connect = as_strs(
+            &body["result"]["resources"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
+        );
         assert!(payment_connect.contains(&"https://api.stripe.com"));
 
-        let search_connect =
-            as_strs(&body["result"]["resources"][1]["meta"]["openai/widgetCSP"]["connect_domains"]);
+        let search_connect = as_strs(
+            &body["result"]["resources"][1]["_meta"]["openai/widgetCSP"]["connect_domains"],
+        );
         assert!(!search_connect.contains(&"https://api.stripe.com"));
     }
 
@@ -866,7 +868,7 @@ mod tests {
             "result": {
                 "contents": [{
                     "uri": "ui://widget/payment",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "connect_domains": [
                                 "https://api.external.com",
@@ -881,7 +883,7 @@ mod tests {
         let _ = rewrite_response("resources/read", &mut body, &config);
 
         let connect =
-            as_strs(&body["result"]["contents"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
+            as_strs(&body["result"]["contents"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]);
         assert_eq!(
             connect,
             vec!["https://abc.tunnel.example.com", "https://api.stripe.com"]
@@ -905,7 +907,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "take_payment",
-                    "meta": {
+                    "_meta": {
                         "ui": { "resourceUri": "ui://widget/payment-form" },
                         "openai/widgetCSP": { "connect_domains": [] }
                     }
@@ -916,7 +918,7 @@ mod tests {
         let _ = rewrite_response("tools/list", &mut body, &config);
 
         let connect =
-            as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
+            as_strs(&body["result"]["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]);
         assert!(connect.contains(&"https://api.stripe.com"));
     }
 
@@ -933,7 +935,7 @@ mod tests {
                 "contents": [{
                     "uri": "ui://widget/search",
                     "mimeType": "text/html",
-                    "meta": {
+                    "_meta": {
                         "ui": {
                             "csp": {
                                 "connectDomains": ["https://api.external.com"],
@@ -947,7 +949,7 @@ mod tests {
 
         let _ = rewrite_response("resources/read", &mut body, &config);
 
-        let meta = &body["result"]["contents"][0]["meta"];
+        let meta = &body["result"]["contents"][0]["_meta"];
         let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         let spec_connect = as_strs(&meta["ui"]["csp"]["connectDomains"]);
         assert_eq!(oa_connect, spec_connect);
@@ -965,7 +967,7 @@ mod tests {
                 "contents": [{
                     "uri": "ui://widget/search",
                     "mimeType": "text/html",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "connect_domains": ["https://api.external.com"],
                             "resource_domains": ["https://cdn.external.com"]
@@ -977,7 +979,7 @@ mod tests {
 
         let _ = rewrite_response("resources/read", &mut body, &config);
 
-        let meta = &body["result"]["contents"][0]["meta"];
+        let meta = &body["result"]["contents"][0]["_meta"];
         let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         let spec_connect = as_strs(&meta["ui"]["csp"]["connectDomains"]);
         assert_eq!(oa_connect, spec_connect);
@@ -1000,7 +1002,7 @@ mod tests {
             "result": {
                 "resources": [{
                     "uri": "ui://widget/search",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetDomain": "old.domain.com"
                     }
                 }]
@@ -1009,7 +1011,7 @@ mod tests {
 
         let _ = rewrite_response("resources/list", &mut body, &config);
 
-        let meta = &body["result"]["resources"][0]["meta"];
+        let meta = &body["result"]["resources"][0]["_meta"];
         let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
         assert_eq!(oa, spec);
@@ -1027,7 +1029,7 @@ mod tests {
                 "contents": [{
                     "uri": "ui://widget/search",
                     "mimeType": "text/html",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "connect_domains": ["https://api.only-openai.com"]
                         },
@@ -1043,7 +1045,7 @@ mod tests {
 
         let _ = rewrite_response("resources/read", &mut body, &config);
 
-        let meta = &body["result"]["contents"][0]["meta"];
+        let meta = &body["result"]["contents"][0]["_meta"];
         let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
         assert_eq!(oa, spec);
@@ -1059,13 +1061,13 @@ mod tests {
         let mut body = json!({
             "result": {
                 "content": [{"type": "text", "text": "plain result"}],
-                "meta": { "requestId": "abc-123" }
+                "_meta": { "requestId": "abc-123" }
             }
         });
 
         let _ = rewrite_response("tools/call", &mut body, &config);
 
-        let meta = &body["result"]["meta"];
+        let meta = &body["result"]["_meta"];
         assert!(meta.get("openai/widgetCSP").is_none());
         assert!(meta.get("ui").is_none());
         assert_eq!(meta["requestId"].as_str().unwrap(), "abc-123");
@@ -1088,14 +1090,14 @@ mod tests {
             "result": {
                 "resources": [{
                     "uri": "ui://widget/search",
-                    "meta": { "openai/widgetDomain": "x" }
+                    "_meta": { "openai/widgetDomain": "x" }
                 }]
             }
         });
 
         let _ = rewrite_response("resources/list", &mut body, &config);
 
-        let meta = &body["result"]["resources"][0]["meta"];
+        let meta = &body["result"]["resources"][0]["_meta"];
         for shape in ["openai/widgetCSP"] {
             assert!(meta[shape]["connect_domains"].is_array());
             assert!(meta[shape]["resource_domains"].is_array());
@@ -1117,7 +1119,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "test",
-                    "meta": {
+                    "_meta": {
                         "ui": {
                             "csp": {
                                 "frameDomains": ["https://embed.external.com"]
@@ -1130,7 +1132,7 @@ mod tests {
 
         let _ = rewrite_response("tools/list", &mut body, &config);
 
-        let frames = as_strs(&body["result"]["tools"][0]["meta"]["ui"]["csp"]["frameDomains"]);
+        let frames = as_strs(&body["result"]["tools"][0]["_meta"]["ui"]["csp"]["frameDomains"]);
         assert_eq!(frames, vec!["https://abc.tunnel.example.com"]);
     }
 
@@ -1175,7 +1177,7 @@ mod tests {
                         "name": "search_products",
                         "description": "Search the product catalog",
                         "inputSchema": { "type": "object" },
-                        "meta": {
+                        "_meta": {
                             "openai/widgetDomain": "old.shop.com",
                             "openai/outputTemplate": "ui://widget/search",
                             "openai/widgetCSP": {
@@ -1188,7 +1190,7 @@ mod tests {
                         "name": "take_payment",
                         "description": "Charge a card",
                         "inputSchema": { "type": "object" },
-                        "meta": {
+                        "_meta": {
                             "ui": {
                                 "resourceUri": "ui://widget/payment-form",
                                 "csp": {
@@ -1211,7 +1213,7 @@ mod tests {
         let tools = body["result"]["tools"].as_array().unwrap();
 
         // ── Tool 0: search — upstream declared only OpenAI shape ──────────
-        let search_meta = &tools[0]["meta"];
+        let search_meta = &tools[0]["_meta"];
         assert_eq!(
             search_meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
@@ -1231,7 +1233,7 @@ mod tests {
         assert_eq!(search_oa_frame, vec!["https://abc.tunnel.example.com"]);
 
         // ── Tool 1: payment — upstream declared only spec shape ──────────
-        let payment_meta = &tools[1]["meta"];
+        let payment_meta = &tools[1]["_meta"];
         let payment_oa_connect = as_strs(&payment_meta["openai/widgetCSP"]["connect_domains"]);
         let payment_spec_connect = as_strs(&payment_meta["ui"]["csp"]["connectDomains"]);
         assert_eq!(payment_oa_connect, payment_spec_connect);
@@ -1257,6 +1259,136 @@ mod tests {
         // ── Tool 2: plain tool, no widget metadata ────────────────────────
         // Non-widget metas must not gain synthesized CSP fields.
         let plain = &tools[2];
-        assert!(plain.get("meta").is_none());
+        assert!(plain.get("_meta").is_none());
+    }
+
+    // ── Real MCP wire shape: `_meta` key, not `meta` ──────────────────────
+
+    #[test]
+    fn rewrite_response__tools_call_underscore_meta_is_rewritten() {
+        // Regression: real MCP servers emit `_meta` (with underscore) per spec,
+        // not `meta`. Earlier dispatch arms mistakenly read `meta`, silently
+        // skipping every rewrite in production.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://assets.usestudykit.com".into()],
+            mode: Mode::Replace,
+        };
+        config.csp.resource_domains = DirectivePolicy {
+            domains: vec!["https://assets.usestudykit.com".into()],
+            mode: Mode::Replace,
+        };
+
+        let mut body = json!({
+            "result": {
+                "_meta": {
+                    "openai/outputTemplate": "ui://widget/vocab_review.html",
+                    "openai/widgetDomain": "assets.usestudykit.com/src",
+                    "openai/widgetCSP": {
+                        "connect_domains": [
+                            "http://localhost:9002",
+                            "https://api.dictionaryapi.dev"
+                        ],
+                        "resource_domains": [
+                            "http://localhost:9002",
+                            "https://api.dictionaryapi.dev"
+                        ]
+                    },
+                    "ui": {
+                        "csp": {
+                            "connectDomains": ["https://api.dictionaryapi.dev"],
+                            "resourceDomains": ["https://api.dictionaryapi.dev"]
+                        },
+                        "resourceUri": "ui://widget/vocab_review.html"
+                    }
+                },
+                "content": [{"type": "text", "text": "payload"}],
+                "structuredContent": {"data": {"items": []}}
+            }
+        });
+
+        let _ = rewrite_response("tools/call", &mut body, &config);
+
+        let meta = &body["result"]["_meta"];
+        assert_eq!(
+            meta["openai/widgetDomain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+        let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec_connect = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa_connect, spec_connect);
+        assert_eq!(
+            oa_connect,
+            vec![
+                "https://abc.tunnel.example.com",
+                "https://assets.usestudykit.com"
+            ]
+        );
+        let oa_resource = as_strs(&meta["openai/widgetCSP"]["resource_domains"]);
+        assert_eq!(
+            oa_resource,
+            vec![
+                "https://abc.tunnel.example.com",
+                "https://assets.usestudykit.com"
+            ]
+        );
+        assert_eq!(
+            body["result"]["content"][0]["text"].as_str().unwrap(),
+            "payload"
+        );
+    }
+
+    #[test]
+    fn rewrite_response__resources_read_underscore_meta_is_rewritten() {
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/question",
+                    "mimeType": "text/html",
+                    "text": "<html/>",
+                    "_meta": {
+                        "openai/widgetDomain": "old.domain.com"
+                    }
+                }]
+            }
+        });
+
+        let _ = rewrite_response("resources/read", &mut body, &config);
+
+        assert_eq!(
+            body["result"]["contents"][0]["_meta"]["openai/widgetDomain"]
+                .as_str()
+                .unwrap(),
+            "abc.tunnel.example.com"
+        );
+    }
+
+    #[test]
+    fn rewrite_response__legacy_meta_key_is_ignored() {
+        // Defensive: if an upstream sends the wrong key (`meta` without
+        // underscore), we must not rewrite it — MCP spec uses `_meta` only.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "_meta": {"openai/widgetDomain": "real.domain.com"},
+                "meta":  {"openai/widgetDomain": "should-stay.com"}
+            }
+        });
+
+        let _ = rewrite_response("tools/call", &mut body, &config);
+
+        assert_eq!(
+            body["result"]["_meta"]["openai/widgetDomain"]
+                .as_str()
+                .unwrap(),
+            "abc.tunnel.example.com"
+        );
+        assert_eq!(
+            body["result"]["meta"]["openai/widgetDomain"]
+                .as_str()
+                .unwrap(),
+            "should-stay.com"
+        );
     }
 }
