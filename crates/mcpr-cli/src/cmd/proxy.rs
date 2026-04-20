@@ -61,7 +61,13 @@ pub fn restart(args: ProxyRestartArgs) -> Result<(), String> {
 }
 
 pub fn reload(args: ProxyReloadArgs) -> Result<(), String> {
-    logic::proxy::reload_proxy(&args.name, args.config.as_deref().map(Path::new))?;
+    let config = args.config.as_deref().ok_or_else(|| {
+        format!(
+            "--config is required. Use `mcpr proxy reload {} --config <path>` to apply a new config.",
+            args.name
+        )
+    })?;
+    logic::proxy::reload_proxy(&args.name, Path::new(config))?;
     render::proxy_reloaded(&args.name);
     Ok(())
 }

@@ -120,15 +120,14 @@ mcpr proxy restart --all                                 # restart every proxy
 | `-c, --config PATH` | Refresh the snapshot from this file before respawn |
 | `--all` | Restart every running proxy (incompatible with `--config`) |
 
-#### `mcpr proxy reload <name>`
+#### `mcpr proxy reload <name> -c <path>`
 
-Hot-reload a running proxy's config **without dropping sessions**. Sends SIGHUP to the proxy, which re-reads its snapshot and atomically swaps any live-reloadable settings.
+Hot-reload a running proxy's config **without dropping sessions**. Refreshes the snapshot from `<path>` then sends SIGHUP to the proxy, which atomically swaps live-reloadable settings.
 
-Pass `--config <path>` to refresh the snapshot from a new file before the signal is sent.
+`--config` is **required** — reload always applies a specific file so the source of truth is explicit. To restart instead, see `mcpr proxy restart`.
 
 ```bash
-mcpr proxy reload localhost-9000                         # re-read current snapshot
-mcpr proxy reload localhost-9000 -c mcpr.toml            # snapshot new file, then reload
+mcpr proxy reload localhost-9000 -c mcpr.toml
 ```
 
 Live-reloadable fields: `[csp]` rules, including widget-scoped overrides.
@@ -137,7 +136,7 @@ Everything else (`mcp` upstream, `port`, `widgets`, `tunnel.*`, timeouts, body l
 
 | Flag | Description |
 |------|-------------|
-| `-c, --config PATH` | Refresh the snapshot from this file before sending SIGHUP |
+| `-c, --config PATH` | **Required.** Config file to snapshot and apply |
 
 ### Setup
 

@@ -378,7 +378,7 @@ mcpr proxy restart <name> -c /etc/mcpr.toml
 
 The old proxy is SIGTERMed and respawned with the new config. For foreground deployments, trigger a pod/service restart.
 
-Omitting `-c` on either command uses the last-snapshotted config at `~/.mcpr/proxies/<name>/config.toml`.
+`reload` requires `-c` — it always applies an explicit file. `restart` without `-c` reuses the last-snapshotted config at `~/.mcpr/proxies/<name>/config.toml`.
 
 ---
 

@@ -106,13 +106,13 @@ pub fn restart_all_proxies() -> Result<usize, String> {
     Ok(restarted)
 }
 
-/// Hot-reload a running proxy's config.
+/// Hot-reload a running proxy's config from `config_path`.
 ///
-/// Updates the on-disk snapshot (if `config_path` is provided) then sends
-/// SIGHUP to the proxy process. The proxy itself decides whether the change
-/// is live-applicable — if any field outside the live-reloadable set changed,
+/// Refreshes the on-disk snapshot from the given file, then sends SIGHUP to
+/// the proxy process. The proxy itself decides whether the change is
+/// live-applicable — if any field outside the live-reloadable set changed,
 /// the proxy logs the rejection and keeps running with the old config.
-pub fn reload_proxy(name: &str, config_path: Option<&Path>) -> Result<(), String> {
+pub fn reload_proxy(name: &str, config_path: &Path) -> Result<(), String> {
     let info = match proxy_lock::check_lock(name) {
         proxy_lock::LockStatus::Held(info) => info,
         proxy_lock::LockStatus::Stale(_) | proxy_lock::LockStatus::Free => {
@@ -120,11 +120,9 @@ pub fn reload_proxy(name: &str, config_path: Option<&Path>) -> Result<(), String
         }
     };
 
-    if let Some(path) = config_path {
-        let contents = read_config_file(path)?;
-        proxy_lock::snapshot_config(name, &contents)
-            .map_err(|e| format!("failed to write config snapshot for \"{name}\": {e}"))?;
-    }
+    let contents = read_config_file(config_path)?;
+    proxy_lock::snapshot_config(name, &contents)
+        .map_err(|e| format!("failed to write config snapshot for \"{name}\": {e}"))?;
 
     send_sighup(info.pid)
 }
