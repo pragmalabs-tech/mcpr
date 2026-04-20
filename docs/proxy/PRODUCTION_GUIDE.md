@@ -360,13 +360,25 @@ Without pruning, the store grows indefinitely — at 1000 rps + 500 bytes/event,
 
 ### Config changes
 
-mcpr does not hot-reload config. To apply changes:
+Two paths, depending on whether sessions can tolerate a restart:
+
+**Hot reload** — `[csp]` and widget-scoped CSP overrides only, no session drop:
 
 ```bash
-mcpr proxy restart <name>
+mcpr proxy reload <name> -c /etc/mcpr.toml
 ```
 
-The daemon gracefully stops the old proxy, loads new config, starts the new one. For foreground deployments, trigger a pod/service restart.
+The proxy re-reads the snapshot on SIGHUP and atomically swaps CSP. Changes to any other field (`mcp`, `port`, `widgets`, `tunnel.*`, timeouts, body limits, `[cloud]`, `[runtime]`) are rejected — the proxy logs which field failed the safety check and keeps running on the old config.
+
+**Full restart** — any other config change, drops in-flight sessions:
+
+```bash
+mcpr proxy restart <name> -c /etc/mcpr.toml
+```
+
+The old proxy is SIGTERMed and respawned with the new config. For foreground deployments, trigger a pod/service restart.
+
+Omitting `-c` on either command uses the last-snapshotted config at `~/.mcpr/proxies/<name>/config.toml`.
 
 ---
 

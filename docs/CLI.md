@@ -84,6 +84,61 @@ Start a stopped proxy by name, using its saved config snapshot. Errors if the pr
 mcpr proxy start localhost-9000
 ```
 
+#### `mcpr proxy run`
+
+Launch a proxy in the background from a config file. Snapshots the config to `~/.mcpr/proxies/<name>/config.toml` for later `start` / `restart` / `reload`. Errors if a proxy with the same name is already running — use `restart` to replace it or `reload` to update config without dropping sessions.
+
+```bash
+mcpr proxy run -c mcpr.toml
+```
+
+| Flag | Description |
+|------|-------------|
+| `-c, --config PATH` | Config file (default: `./mcpr.toml`) |
+
+#### `mcpr proxy stop [name]`
+
+Stop a running proxy (SIGTERM, waits up to 10s for drain). Use `--all` to stop every running proxy.
+
+```bash
+mcpr proxy stop localhost-9000
+mcpr proxy stop --all
+```
+
+#### `mcpr proxy restart [name]`
+
+Process-level restart: stop the existing proxy and respawn it. In-flight MCP sessions are **dropped**. Pass `--config <path>` to apply a new config during the restart — the snapshot is refreshed from the given file before respawn. Without `--config`, the existing snapshot is reused.
+
+```bash
+mcpr proxy restart localhost-9000                        # reuse saved snapshot
+mcpr proxy restart localhost-9000 -c mcpr.toml           # apply new config
+mcpr proxy restart --all                                 # restart every proxy
+```
+
+| Flag | Description |
+|------|-------------|
+| `-c, --config PATH` | Refresh the snapshot from this file before respawn |
+| `--all` | Restart every running proxy (incompatible with `--config`) |
+
+#### `mcpr proxy reload <name>`
+
+Hot-reload a running proxy's config **without dropping sessions**. Sends SIGHUP to the proxy, which re-reads its snapshot and atomically swaps any live-reloadable settings.
+
+Pass `--config <path>` to refresh the snapshot from a new file before the signal is sent.
+
+```bash
+mcpr proxy reload localhost-9000                         # re-read current snapshot
+mcpr proxy reload localhost-9000 -c mcpr.toml            # snapshot new file, then reload
+```
+
+Live-reloadable fields: `[csp]` rules, including widget-scoped overrides.
+
+Everything else (`mcp` upstream, `port`, `widgets`, `tunnel.*`, timeouts, body limits, `[cloud]`, `[runtime]`) requires a full `mcpr proxy restart`. If the new config changes any of those, the reload is **rejected** and the proxy keeps running on the old config — the rejection names the field(s) in `mcpr proxy logs <name>`.
+
+| Flag | Description |
+|------|-------------|
+| `-c, --config PATH` | Refresh the snapshot from this file before sending SIGHUP |
+
 ### Setup
 
 #### `mcpr proxy setup`
