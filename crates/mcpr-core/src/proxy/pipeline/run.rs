@@ -186,7 +186,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "search",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "connect_domains": ["http://localhost:9000"],
                             "resource_domains": [],
@@ -221,7 +221,7 @@ mod tests {
         let events = sink.snapshot();
         let schema = only_schema_event(&events);
         let captured: Vec<&str> =
-            schema.payload["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]
+            schema.payload["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]
                 .as_array()
                 .expect("connect_domains array")
                 .iter()
@@ -622,7 +622,7 @@ mod tests {
             "result": {
                 "tools": [{
                     "name": "search",
-                    "meta": {
+                    "_meta": {
                         "openai/widgetCSP": {
                             "connect_domains": ["http://localhost:9000"],
                             "resource_domains": [],
@@ -666,7 +666,7 @@ mod tests {
         let parsed: Value = serde_json::from_str(inner.split('\n').next().unwrap())
             .expect("inner SSE payload parses as JSON");
         let domains: Vec<&str> =
-            parsed["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]
+            parsed["result"]["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]
                 .as_array()
                 .unwrap()
                 .iter()
