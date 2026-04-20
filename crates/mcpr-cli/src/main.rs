@@ -233,7 +233,6 @@ fn main() {
         }
         CliAction::ProxyRun {
             mode: Mode::Gateway(cfg),
-            replace,
             config_content,
             config_path: _,
         } => {
@@ -254,17 +253,19 @@ fn main() {
                         proxy_lock::remove_lock(proxy_name);
                     }
                     proxy_lock::LockStatus::Held(info) => {
-                        if *replace {
-                            eprintln!("Stopping old \"{}\" (pid {})...", proxy_name, info.pid);
-                            proxy_lock::stop_proxy(proxy_name);
-                        } else {
-                            eprintln!(
-                                "error: proxy \"{}\" is already running (pid {}).",
-                                proxy_name, info.pid
-                            );
-                            eprintln!("  Use --replace to stop the old one and start this one.");
-                            std::process::exit(1);
-                        }
+                        eprintln!(
+                            "error: proxy \"{}\" is already running (pid {}).",
+                            proxy_name, info.pid
+                        );
+                        eprintln!(
+                            "  Use `mcpr proxy restart {} --config <path>` to apply new config,",
+                            proxy_name
+                        );
+                        eprintln!(
+                            "  or `mcpr proxy reload {} --config <path>` for a zero-downtime reload.",
+                            proxy_name
+                        );
+                        std::process::exit(1);
                     }
                 }
 
@@ -489,6 +490,11 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
 /// The proxy always writes a lockfile and monitors the daemon's health.
 #[allow(unused_variables)]
 async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_path: String) {
+    // Preserve the resolved startup config for the live-reload handler so
+    // SIGHUP can diff an incoming snapshot against the config actually in
+    // effect. Cloned up-front because the fn body moves fields out of `cfg`.
+    let reload_applied_cfg = Arc::new(tokio::sync::Mutex::new(cfg.clone()));
+
     let proxy_health_ref = proxy_health::new_shared_health();
 
     let mcp = match cfg.mcp {
@@ -808,6 +814,33 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         let _ = shutdown_trigger.send(true);
     });
 
+    // SIGHUP → hot-reload CSP from the on-disk snapshot.
+    //
+    // Only CSP is live-swappable today (via the Arc<ArcSwap<RewriteConfig>>
+    // already wired into every rewrite path). If anything else in the config
+    // differs from the currently-applied snapshot, the reload is rejected and
+    // the proxy keeps running on the old config — the operator gets a clear
+    // log line naming which field needs a full `mcpr proxy restart`.
+    #[cfg(unix)]
+    {
+        let reload_proxy = proxy.clone();
+        let reload_name = proxy_name_for_shutdown.clone();
+        let reload_applied = reload_applied_cfg.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sighup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[mcpr] reload: SIGHUP handler unavailable: {e}");
+                    return;
+                }
+            };
+            while sighup.recv().await.is_some() {
+                handle_reload(&reload_name, &reload_applied, &reload_proxy).await;
+            }
+        });
+    }
+
     // Daemon watchdog: if the daemon dies, shut down this proxy.
     if let Some(dpid) = daemon_pid {
         let watchdog_shutdown = shutdown_tx.clone();
@@ -840,6 +873,49 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     proxy_lock::remove_lock(&proxy_name_for_shutdown);
 
     eprintln!("[mcpr] Shutdown complete.");
+}
+
+/// Apply a SIGHUP-triggered config reload.
+///
+/// Re-parses the on-disk snapshot, rejects the reload when any non-csp field
+/// changed (those need a full restart), and otherwise atomically swaps the
+/// `RewriteConfig` so in-flight requests see the new CSP on their next read.
+async fn handle_reload(
+    proxy_name: &str,
+    applied: &tokio::sync::Mutex<GatewayConfig>,
+    proxy: &Arc<ProxyState>,
+) {
+    let snapshot_path = proxy_lock::config_snapshot_path(proxy_name);
+    let new_cfg = match config::load_gateway_from_path(&snapshot_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[mcpr] reload: rejected — {e}");
+            return;
+        }
+    };
+
+    let mut applied_guard = applied.lock().await;
+    let changed = applied_guard.reload_unsafe_changes(&new_cfg);
+    if !changed.is_empty() {
+        eprintln!(
+            "[mcpr] reload: rejected — fields require restart: {}. Use `mcpr proxy restart {} --config <path>` to apply.",
+            changed.join(", "),
+            proxy_name,
+        );
+        return;
+    }
+
+    let current = proxy.rewrite_config.load();
+    let new_rewrite = RewriteConfig {
+        proxy_url: current.proxy_url.clone(),
+        proxy_domain: current.proxy_domain.clone(),
+        mcp_upstream: current.mcp_upstream.clone(),
+        csp: new_cfg.csp.clone(),
+    };
+    drop(current);
+    proxy.rewrite_config.store(Arc::new(new_rewrite));
+    *applied_guard = new_cfg;
+    eprintln!("[mcpr] reload: applied (csp)");
 }
 
 /// Run the relay server process. Called from `mcpr relay run` / `mcpr relay start`.

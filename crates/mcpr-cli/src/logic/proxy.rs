@@ -1,6 +1,8 @@
-//! Proxy lifecycle logic — start, stop, restart.
+//! Proxy lifecycle logic — start, stop, restart, reload.
 //!
 //! Returns results; does not print.
+
+use std::path::Path;
 
 use crate::proxy_lock;
 
@@ -13,6 +15,11 @@ pub enum StopResult {
 }
 
 /// Start a proxy from its saved config snapshot.
+///
+/// Caller must ensure no proxy with the same name is currently running —
+/// `mcpr proxy run` errors out on conflict. This function is the internal
+/// re-spawn used by `start` and `restart`, both of which stop any existing
+/// proxy before calling here.
 pub fn start_proxy(name: &str) -> Result<(), String> {
     // Verify config snapshot exists before attempting re-launch.
     proxy_lock::read_snapshot(name)
@@ -24,7 +31,7 @@ pub fn start_proxy(name: &str) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find mcpr binary: {e}"))?;
 
     let status = std::process::Command::new(exe)
-        .args(["proxy", "run", "--config", &config_path, "--replace"])
+        .args(["proxy", "run", "--config", &config_path])
         .status()
         .map_err(|e| format!("failed to spawn proxy \"{name}\": {e}"))?;
 
@@ -61,9 +68,25 @@ pub fn stop_all_proxies() -> Vec<String> {
     proxy_lock::stop_all_proxies()
 }
 
-/// Restart a single proxy from its saved config snapshot.
-pub fn restart_proxy(name: &str) -> Result<(), String> {
+/// Restart a single proxy. Process kill + respawn.
+///
+/// If `config_path` is provided, the snapshot is refreshed from it before the
+/// respawn; otherwise the existing snapshot is reused.
+pub fn restart_proxy(name: &str, config_path: Option<&Path>) -> Result<(), String> {
+    // Validate and read the new config before touching the running process —
+    // a bad path should not leave the proxy down.
+    let new_snapshot = match config_path {
+        Some(path) => Some(read_config_file(path)?),
+        None => None,
+    };
+
     proxy_lock::stop_proxy(name);
+
+    if let Some(contents) = new_snapshot {
+        proxy_lock::snapshot_config(name, &contents)
+            .map_err(|e| format!("failed to write config snapshot for \"{name}\": {e}"))?;
+    }
+
     start_proxy(name)
 }
 
@@ -74,13 +97,51 @@ pub fn restart_all_proxies() -> Result<usize, String> {
     for (name, status) in &proxies {
         match status {
             proxy_lock::LockStatus::Held(_) | proxy_lock::LockStatus::Stale(_) => {
-                restart_proxy(name)?;
+                restart_proxy(name, None)?;
                 restarted += 1;
             }
             proxy_lock::LockStatus::Free => {}
         }
     }
     Ok(restarted)
+}
+
+/// Hot-reload a running proxy's config from `config_path`.
+///
+/// Refreshes the on-disk snapshot from the given file, then sends SIGHUP to
+/// the proxy process. The proxy itself decides whether the change is
+/// live-applicable — if any field outside the live-reloadable set changed,
+/// the proxy logs the rejection and keeps running with the old config.
+pub fn reload_proxy(name: &str, config_path: &Path) -> Result<(), String> {
+    let info = match proxy_lock::check_lock(name) {
+        proxy_lock::LockStatus::Held(info) => info,
+        proxy_lock::LockStatus::Stale(_) | proxy_lock::LockStatus::Free => {
+            return Err(format!("proxy \"{name}\" is not running"));
+        }
+    };
+
+    let contents = read_config_file(config_path)?;
+    proxy_lock::snapshot_config(name, &contents)
+        .map_err(|e| format!("failed to write config snapshot for \"{name}\": {e}"))?;
+
+    send_sighup(info.pid)
+}
+
+fn read_config_file(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("failed to read {}: {e}", path.display()))
+}
+
+#[cfg(unix)]
+fn send_sighup(pid: u32) -> Result<(), String> {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), Signal::SIGHUP)
+        .map_err(|e| format!("failed to send SIGHUP to pid {pid}: {e}"))
+}
+
+#[cfg(not(unix))]
+fn send_sighup(_pid: u32) -> Result<(), String> {
+    Err("reload is not supported on this platform".to_string())
 }
 
 /// List all proxies and their status.

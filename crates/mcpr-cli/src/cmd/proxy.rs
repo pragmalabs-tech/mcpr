@@ -1,5 +1,7 @@
 //! Proxy lifecycle commands — thin wrappers: logic → render.
 
+use std::path::Path;
+
 use crate::config::*;
 use crate::logic;
 use crate::render;
@@ -39,6 +41,9 @@ pub fn stop(args: ProxyStopArgs) -> Result<(), String> {
 
 pub fn restart(args: ProxyRestartArgs) -> Result<(), String> {
     if args.all {
+        if args.config.is_some() {
+            return Err("--config cannot be combined with --all".to_string());
+        }
         let count = logic::proxy::restart_all_proxies()?;
         if count == 0 {
             render::no_proxies_to_restart();
@@ -50,8 +55,20 @@ pub fn restart(args: ProxyRestartArgs) -> Result<(), String> {
         .name
         .ok_or_else(|| "proxy name required. Use --all to restart all proxies.".to_string())?;
 
-    logic::proxy::restart_proxy(&name)?;
+    logic::proxy::restart_proxy(&name, args.config.as_deref().map(Path::new))?;
     render::proxy_restarted(&name);
+    Ok(())
+}
+
+pub fn reload(args: ProxyReloadArgs) -> Result<(), String> {
+    let config = args.config.as_deref().ok_or_else(|| {
+        format!(
+            "--config is required. Use `mcpr proxy reload {} --config <path>` to apply a new config.",
+            args.name
+        )
+    })?;
+    logic::proxy::reload_proxy(&args.name, Path::new(config))?;
+    render::proxy_reloaded(&args.name);
     Ok(())
 }
 

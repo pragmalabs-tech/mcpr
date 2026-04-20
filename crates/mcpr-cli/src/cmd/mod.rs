@@ -19,6 +19,7 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         }
         ProxyCommand::Stop(args) => proxy::stop(args),
         ProxyCommand::Restart(args) => proxy::restart(args),
+        ProxyCommand::Reload(args) => proxy::reload(args),
         ProxyCommand::Start(args) => proxy::start(args),
         ProxyCommand::List(args) => proxy::list(args),
 
