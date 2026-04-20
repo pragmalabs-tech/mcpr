@@ -6,18 +6,13 @@
 
 **A proxy for MCP Apps/Servers.** mcpr parses JSON-RPC messages to route, serve widgets, observe, authenticate, and secure MCP traffic. Written in Rust and built for minimal overhead — [under 1ms p99](benches/reports/v0.4.42-post-refactor.md).
 
-Most MCP proxies sit on the client side, aggregating multiple servers for a single client. mcpr sits on the server side — in front of your MCP app — handling JSON-RPC routing, widget serving, CSP configuration, OAuth 2.1, and per-tool/per-resource observability. Your application code stays focused on business logic while mcpr absorbs the policy differences between AI clients (ChatGPT, Claude, Copilot, etc.).
-
-Status: Under active development — already running in front of my own MCP App (usestudykit.com)
-
 ![mcpr TUI dashboard showing information](docs/assets/mcpr-demo.gif)
 
-### Why use mcpr
+### Why I build mcpr
 
-- **Tool-level performance is invisible from app logs.** mcpr records every MCP call with latency, status, and payload size, then surfaces slow calls and per-tool error rates — no app-side instrumentation.
-- **CSP rules differ per AI client.** ChatGPT reads `openai/widgetCSP`, Claude reads `ui.csp`, and each interprets domains differently. mcpr rewrites CSP per client so your app emits one format.
-- **Session flow is hidden inside your handlers.** mcpr ties each call to its session, AI client, and tool-call sequence, so you can see how clients actually use your MCP.
-- **Testing against real AI clients is painful.** mcpr ships tunnel/relay to expose a local MCP app to ChatGPT or Claude, plus MCPR Studio to exercise tool calls and auth flows before release.
+Most MCP proxies sit on the client side, aggregating multiple servers for a single client. mcpr sits on the server side — in front of your MCP app — handling JSON-RPC routing, widget serving, CSP configuration, OAuth 2.1, and per-tool/per-resource observability. Your application code stays focused on business logic while mcpr absorbs the policy differences between AI clients (ChatGPT, Claude, Copilot, etc.).
+
+Status: Under active development — already running in front of my own MCP App (https://mcp.usestudykit.com/mcp)
 
 ### Highlight Features
 
