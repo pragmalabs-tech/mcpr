@@ -249,6 +249,13 @@ pub fn proxy_restarted(name: &str) {
     eprintln!("Restarted proxy \"{}\".", name);
 }
 
+pub fn proxy_reloaded(name: &str) {
+    eprintln!(
+        "Reload signal sent to proxy \"{}\". Check `mcpr proxy logs {}` for outcome.",
+        name, name
+    );
+}
+
 pub fn proxy_stopping(name: &str, pid: u32) {
     eprintln!("Stopping proxy \"{}\" (pid {})...", name, pid);
 }

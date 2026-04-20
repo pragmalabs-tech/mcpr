@@ -39,7 +39,6 @@ pub enum CliAction {
     /// Run a proxy as a background process (fork before tokio).
     ProxyRun {
         mode: Mode,
-        replace: bool,
         /// Raw TOML content for config snapshot.
         config_content: String,
         /// Absolute path to the original config file.
@@ -138,8 +137,10 @@ pub enum ProxyCommand {
     Run(ProxyRunArgs),
     /// Stop a running proxy (or all proxies with --all)
     Stop(ProxyStopArgs),
-    /// Restart a running proxy from its saved config (or all with --all)
+    /// Restart a running proxy — process kill + respawn (optionally with new config)
     Restart(ProxyRestartArgs),
+    /// Hot-reload a running proxy's config without dropping sessions
+    Reload(ProxyReloadArgs),
     /// Start a stopped proxy by name (from its saved config snapshot)
     Start(ProxyStartArgs),
     /// List all known proxies and their status
@@ -174,10 +175,6 @@ pub struct ProxyRunArgs {
     /// Config file path (default: mcpr.toml)
     #[arg(long, short)]
     pub config: Option<String>,
-
-    /// Replace existing proxy with the same name
-    #[arg(long)]
-    pub replace: bool,
 }
 
 /// Arguments for `mcpr proxy stop [name]`.
@@ -200,6 +197,23 @@ pub struct ProxyRestartArgs {
     /// Restart all running proxies
     #[arg(long)]
     pub all: bool,
+
+    /// Config file path — when provided, the snapshot is refreshed
+    /// from this file before the proxy is respawned
+    #[arg(long, short)]
+    pub config: Option<String>,
+}
+
+/// Arguments for `mcpr proxy reload <name>`.
+#[derive(Parser, Clone)]
+pub struct ProxyReloadArgs {
+    /// Proxy name to reload
+    pub name: String,
+
+    /// Config file path — when provided, the snapshot is refreshed
+    /// from this file before the SIGHUP is sent
+    #[arg(long, short)]
+    pub config: Option<String>,
 }
 
 /// Arguments for `mcpr proxy start <name>`.
@@ -496,6 +510,7 @@ pub struct ValidateArgs {
 }
 
 /// Runtime options extracted from CLI args (used by main.rs).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub drain_timeout: u64,
     pub log_format: LogFormat,
@@ -770,6 +785,7 @@ impl FileConfig {
 // ── Gateway config ──────────────────────────────────────────────────────
 
 /// Resolved configuration for gateway (proxy) mode.
+#[derive(Clone)]
 pub struct GatewayConfig {
     pub name: String,
     pub mcp: Option<String>,
@@ -806,6 +822,69 @@ impl GatewayConfig {
         let token =
             tunnel_token.expect("tunnel token must be set before calling resolve_tunnel_identity");
         (token, tunnel_subdomain)
+    }
+
+    /// Names of non-csp fields that differ between `self` and `other`.
+    /// Used by the SIGHUP reload path to reject changes that require a full restart.
+    /// `csp` is intentionally omitted — it is the only field a live reload may swap.
+    /// `name` is omitted too: a proxy's identity is fixed at boot.
+    pub fn reload_unsafe_changes(&self, other: &GatewayConfig) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        if self.mcp != other.mcp {
+            changed.push("mcp");
+        }
+        if self.widgets != other.widgets {
+            changed.push("widgets");
+        }
+        if self.port != other.port {
+            changed.push("port");
+        }
+        if self.relay_url != other.relay_url {
+            changed.push("relay_url");
+        }
+        if self.tunnel_token != other.tunnel_token {
+            changed.push("tunnel.token");
+        }
+        if self.tunnel_subdomain != other.tunnel_subdomain {
+            changed.push("tunnel.subdomain");
+        }
+        if self.tunnel != other.tunnel {
+            changed.push("tunnel.enabled");
+        }
+        if self.max_request_body_size != other.max_request_body_size {
+            changed.push("max_request_body_size");
+        }
+        if self.max_response_body_size != other.max_response_body_size {
+            changed.push("max_response_body_size");
+        }
+        if self.max_concurrent_upstream != other.max_concurrent_upstream {
+            changed.push("max_concurrent_upstream");
+        }
+        if self.connect_timeout != other.connect_timeout {
+            changed.push("connect_timeout");
+        }
+        if self.request_timeout != other.request_timeout {
+            changed.push("request_timeout");
+        }
+        if self.cloud_token != other.cloud_token {
+            changed.push("cloud.token");
+        }
+        if self.cloud_server != other.cloud_server {
+            changed.push("cloud.server");
+        }
+        if self.cloud_endpoint != other.cloud_endpoint {
+            changed.push("cloud.endpoint");
+        }
+        if self.cloud_batch_size != other.cloud_batch_size {
+            changed.push("cloud.batch_size");
+        }
+        if self.cloud_flush_interval_ms != other.cloud_flush_interval_ms {
+            changed.push("cloud.flush_interval_ms");
+        }
+        if self.runtime != other.runtime {
+            changed.push("runtime");
+        }
+        changed
     }
 }
 
@@ -856,7 +935,6 @@ pub fn load() -> CliAction {
 
             CliAction::ProxyRun {
                 mode,
-                replace: run_args.replace,
                 config_content,
                 config_path: config_path_str,
             }
@@ -1125,6 +1203,35 @@ fn resolve_proxy_name(
         .collect()
 }
 
+/// Parse a config file into a `GatewayConfig` without terminating the process
+/// on error. Used by the live-reload path, which must keep the proxy running
+/// when the new config is malformed.
+pub fn load_gateway_from_path(path: &std::path::Path) -> Result<GatewayConfig, String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let file: FileConfig = toml::from_str(&contents)
+        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+    if file.is_relay() {
+        return Err("cannot reload a gateway proxy with a relay config".to_string());
+    }
+    let runtime = RuntimeOptions {
+        drain_timeout: file.drain_timeout.unwrap_or(30),
+        log_format: file
+            .log_format
+            .as_deref()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(LogFormat::Json),
+        admin_bind: file
+            .admin_bind
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1:9901".to_string()),
+    };
+    match load_gateway(file, Some(path.to_path_buf()), runtime) {
+        Mode::Gateway(cfg) => Ok(*cfg),
+        Mode::Relay(_) => Err("expected gateway config, got relay".to_string()),
+    }
+}
+
 fn load_gateway(
     file: FileConfig,
     config_path: Option<std::path::PathBuf>,
@@ -1167,6 +1274,113 @@ fn load_gateway(
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+
+    // ── reload_unsafe_changes ───────────────────────────────────
+
+    fn gateway_config() -> GatewayConfig {
+        GatewayConfig {
+            name: "test".into(),
+            mcp: Some("http://localhost:9000".into()),
+            widgets: None,
+            port: Some(3000),
+            csp: mcpr_core::proxy::csp::CspConfig::default(),
+            relay_url: Some("https://tunnel.mcpr.app".into()),
+            tunnel_token: None,
+            tunnel_subdomain: None,
+            tunnel: false,
+            max_request_body_size: None,
+            max_response_body_size: None,
+            max_concurrent_upstream: None,
+            connect_timeout: None,
+            request_timeout: None,
+            cloud_token: None,
+            cloud_server: None,
+            cloud_endpoint: None,
+            cloud_batch_size: None,
+            cloud_flush_interval_ms: None,
+            runtime: RuntimeOptions {
+                drain_timeout: 30,
+                log_format: LogFormat::Json,
+                admin_bind: "127.0.0.1:9901".into(),
+            },
+        }
+    }
+
+    #[test]
+    fn reload_unsafe_changes__identical_is_empty() {
+        let a = gateway_config();
+        let b = gateway_config();
+        assert!(a.reload_unsafe_changes(&b).is_empty());
+    }
+
+    #[test]
+    fn reload_unsafe_changes__csp_difference_is_safe() {
+        let a = gateway_config();
+        let mut b = gateway_config();
+        b.csp.widgets.push(mcpr_core::proxy::csp::WidgetScoped {
+            match_pattern: "ui://widget/test".into(),
+            ..Default::default()
+        });
+        assert!(a.reload_unsafe_changes(&b).is_empty());
+    }
+
+    #[test]
+    fn reload_unsafe_changes__name_difference_is_safe() {
+        let a = gateway_config();
+        let mut b = gateway_config();
+        b.name = "renamed".into();
+        assert!(a.reload_unsafe_changes(&b).is_empty());
+    }
+
+    #[test]
+    fn reload_unsafe_changes__mcp_flagged() {
+        let a = gateway_config();
+        let mut b = gateway_config();
+        b.mcp = Some("http://localhost:9999".into());
+        assert_eq!(a.reload_unsafe_changes(&b), vec!["mcp"]);
+    }
+
+    #[test]
+    fn reload_unsafe_changes__port_flagged() {
+        let a = gateway_config();
+        let mut b = gateway_config();
+        b.port = Some(4000);
+        assert_eq!(a.reload_unsafe_changes(&b), vec!["port"]);
+    }
+
+    #[test]
+    fn reload_unsafe_changes__tunnel_fields_flagged() {
+        let a = gateway_config();
+        let mut b = gateway_config();
+        b.tunnel = true;
+        b.tunnel_token = Some("t".into());
+        b.tunnel_subdomain = Some("s".into());
+        assert_eq!(
+            a.reload_unsafe_changes(&b),
+            vec!["tunnel.token", "tunnel.subdomain", "tunnel.enabled"]
+        );
+    }
+
+    #[test]
+    fn reload_unsafe_changes__runtime_flagged() {
+        let a = gateway_config();
+        let mut b = gateway_config();
+        b.runtime.drain_timeout = 60;
+        assert_eq!(a.reload_unsafe_changes(&b), vec!["runtime"]);
+    }
+
+    #[test]
+    fn reload_unsafe_changes__multiple_fields_listed() {
+        let a = gateway_config();
+        let mut b = gateway_config();
+        b.mcp = Some("http://other:9000".into());
+        b.port = Some(4000);
+        b.widgets = Some("https://widgets.example.com".into());
+        let changed = a.reload_unsafe_changes(&b);
+        assert!(changed.contains(&"mcp"));
+        assert!(changed.contains(&"port"));
+        assert!(changed.contains(&"widgets"));
+    }
 
     #[test]
     fn resolve_tunnel_identity__subdomain_and_token_independent() {
