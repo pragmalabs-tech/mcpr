@@ -4,28 +4,30 @@
 [![codecov](https://codecov.io/gh/cptrodgers/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/cptrodgers/mcpr)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**A proxy for MCP Apps/Server.** Works like nginx or Kong, but at the MCP protocol level — it parses JSON-RPC messages to route, widget, observe, authenticate, and secure MCP traffic. Written in Rust, with under 0.3ms overhead.
+**A proxy for MCP Apps/Servers.** mcpr parses JSON-RPC messages to route, serve widgets, observe, authenticate, and secure MCP traffic. Written in Rust and built for minimal overhead — [under 1ms p99](benches/reports/v0.4.42-post-refactor.md).
 
-Most current MCP proxies focus on the client side, consuming multiple MCP servers from the client's perspective. So, mcpr wants to focus on the server side, at the MCP app/server, supporting routing of JSON-RPC requests together with widget serving, easy CSP configuration, OAuth 2.1 integration, and observing tools and resources performance, not just at the HTTP request level. This way, application code (MCP apps) can focus on the business logic instead of a bunch of messy things needed to deal with AI clients.
+Most MCP proxies sit on the client side, aggregating multiple servers for a single client. mcpr sits on the server side — in front of your MCP app — handling JSON-RPC routing, widget serving, CSP configuration, OAuth 2.1, and per-tool/per-resource observability. Your application code stays focused on business logic while mcpr absorbs the policy differences between AI clients (ChatGPT, Claude, Copilot, etc.).
 
-It also comes from my personal experience while developing usestudykit.com (a study MCP app), so please give me more feedback on the project.
+Status: Under active development — already running in front of my own MCP App (usestudykit.com)
 
-![mcpr TUI dashboard showing information](docs/mcpr-demo.gif)
+![mcpr TUI dashboard showing information](docs/assets/mcpr-demo.gif)
+
+### Why use mcpr
+
+- **Tool-level performance is invisible from app logs.** mcpr records every MCP call with latency, status, and payload size, then surfaces slow calls and per-tool error rates — no app-side instrumentation.
+- **CSP rules differ per AI client.** ChatGPT reads `openai/widgetCSP`, Claude reads `ui.csp`, and each interprets domains differently. mcpr rewrites CSP per client so your app emits one format.
+- **Session flow is hidden inside your handlers.** mcpr ties each call to its session, AI client, and tool-call sequence, so you can see how clients actually use your MCP.
+- **Testing against real AI clients is painful.** mcpr ships tunnel/relay to expose a local MCP app to ChatGPT or Claude, plus MCPR Studio to exercise tool calls and auth flows before release.
+
+### Highlight Features
+
+- **Routing** — forwards `tools/call` and `resources/*` traffic with minimal overhead ([under 1ms p99](benches/reports/v0.4.42-post-refactor.md)), plus CSP rewriting that stays compatible across AI clients (ChatGPT, Claude, etc.).
+- **Observability** — per-method stats: tool calls, prompt usage, slow calls, error rates. [Dashboard demo](docs/assets/cloud-dashboard.png) · [proxy demo](docs/assets/proxy-status.png)
+- **Sessions capture** — see how each AI client and user interacts with your MCP: client info, call flow, and the full sequence of tool calls within every session.
+- **Schema capture** — records the MCP schema as it flows through, tracks changes over time, and flags tools that are registered but never called.
+- **Authentication** *(coming soon)* — OAuth 2.1 integration with common providers, plus support for bring-your-own auth that meets the 2.1 spec. Open an issue if your provider isn't covered.
 
 ### Quickstart
-
-```
-AI Client (ChatGPT, Claude, Microsoft Copilot, ...) 
-        │
-        ▼
-  Reserve Proxy (Nginx, Caddy, HaProxy, Kong, ...)
-        │
-        ▼
-      mcpr       ← routes, widgets, observes, authenticates, secures
-        │
-        ▼
-  Your MCP Apps/Server
-```
 
 Write a config:
 
@@ -42,18 +44,7 @@ curl -fsSL https://mcpr.app/install.sh | sh
 mcpr proxy run
 ```
 
-**Run By Docker** (recommended for servers/production):
-
-```bash
-docker run -d --name mcpr \
-  -v "$(pwd)/mcpr.toml:/etc/mcpr/mcpr.toml:ro" \
-  -v mcpr-state:/var/lib/mcpr \
-  -p 3000:3000 \
-  ghcr.io/cptrodgers/mcpr:latest
-```
-
-See [docs/DOCKER.md](docs/DOCKER.md) for volumes, health probes, and compose/Kubernetes examples.
-
+Docker support is in beta — see [docs/DOCKER.md](docs/DOCKER.md) for volumes, health probes, and compose/Kubernetes examples. Feedback welcome.
 
 ---
 
@@ -66,26 +57,31 @@ mcp = "http://localhost:9000"
 widgets = "http://localhost:4444" # Optional for MCP server (no Apps)
 ```
 
-| Category | Methods |
-|----------|---------|
-| **Lifecycle** | `initialize`, `notifications/initialized`, `ping` |
-| **Tools** | `tools/list`, `tools/call`, `notifications/tools/list_changed` |
-| **Resources** | `resources/list`, `resources/read`, `resources/subscribe`, `resources/unsubscribe` |
-| **Prompts** | `prompts/list`, `prompts/get` |
-| **Utility** | `logging/setLevel`, `completion/complete`, `notifications/cancelled`, `notifications/progress` |
-
-Unrecognized methods pass through unchanged.
-
 ### Widget CSP
 
 MCP Apps (ChatGPT Apps, Claude connectors) render widgets in sandboxed iframes with CSP rules. ChatGPT reads `openai/widgetCSP`, Claude reads `ui.csp`. Each platform interprets domain lists differently.
 
-mcpr rewrites CSP domain arrays in `tools/list`, `resources/list`, and `resources/read` JSON-RPC responses. It replaces localhost URLs with the proxy's public domain, adds configured extra domains, and adapts the CSP format to match the connecting platform.
+mcpr rewrites CSP domain arrays in `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, and `resources/read` responses. It replaces localhost URLs with the proxy's public domain, merges configured domains, and emits the CSP shape each client expects.
+
+CSP has three independent directives — `connectDomains` (fetch / WebSocket), `resourceDomains` (scripts, styles, images), and `frameDomains` (iframes) — each with its own `mode` (`extend` or `replace`). Widget entries layer glob-matched overrides on top of the global policy.
 
 ```toml
-[csp]
-mode = "extend"                         # "extend" (default) or "override"
-domains = ["api.stripe.com", "cdn.example.com"]
+[csp.connectDomains]
+domains = ["api.example.com"]
+mode    = "extend"
+
+[csp.resourceDomains]
+domains = ["cdn.example.com"]
+mode    = "extend"
+
+[csp.frameDomains]
+domains = []
+mode    = "replace"
+
+[[csp.widget]]
+match              = "ui://widget/payment*"
+connectDomains     = ["api.stripe.com"]
+connectDomainsMode = "extend"
 ```
 
 ---
@@ -189,21 +185,11 @@ mcpr will provide request validation, per-tool ACLs, and IP whitelisting at the 
 
 ---
 
-## Configuration (`mcpr.toml`)
+## Reference
 
-`mcpr.toml` declares proxy behavior — upstream MCP URL, port, tunnel, CSP, cloud sync, logging, and resource limits. See [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) for the full reference.
-
-```toml
-# Minimal
-mcp = "http://localhost:9000"
-port = 3000
-```
-
----
-
-## CLI
-
-The CLI manages the daemon, proxies, and relay, and queries the local SQLite store. See [docs/CLI.md](docs/CLI.md) for the full command reference.
+- Configuration — [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) (upstream URL, port, tunnel, CSP, cloud sync, logging, limits)
+- CLI — [docs/CLI.md](docs/CLI.md) (daemon, proxies, relay, and SQLite queries)
+- Docker — [docs/DOCKER.md](docs/DOCKER.md) (volumes, health probes, compose/Kubernetes)
 
 ---
 
@@ -211,9 +197,8 @@ The CLI manages the daemon, proxies, and relay, and queries the local SQLite sto
 
 **Routing & Network**
 - [x] JSON-RPC routing 
-- [x] Widget CSP rewriting (at widget resource level)
+- [x] Content Security Policy (CSP) rewriting
 - [ ] Widgets mode (Server endpoint, statics)
-- [ ] Multi-server routing (one mcpr schema/url, merge many MCP backends)
 
 **Observability**
 - [x] MCP request logs, session tracking, AI client tracking

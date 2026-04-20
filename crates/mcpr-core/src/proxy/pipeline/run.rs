@@ -66,7 +66,6 @@ mod tests {
 
     use axum::{Router, routing::post};
     use serde_json::{Value, json};
-    use tokio::sync::RwLock;
 
     use super::*;
     use crate::event::{EventBusHandle, EventManager, EventSink, ProxyEvent};

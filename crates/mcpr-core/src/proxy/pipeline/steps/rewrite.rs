@@ -53,6 +53,7 @@ pub fn rewrite_in_place(config: &ArcSwap<RewriteConfig>, method: &str, parsed: &
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
     use super::*;
 

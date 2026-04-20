@@ -417,7 +417,7 @@ mod tests {
             .unwrap()
             .to_string();
 
-        rewrite_response("resources/read", &mut body, &config);
+        let _ = rewrite_response("resources/read", &mut body, &config);
 
         assert_eq!(
             body["result"]["contents"][0]["text"].as_str().unwrap(),
@@ -447,7 +447,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/read", &mut body, &config);
+        let _ = rewrite_response("resources/read", &mut body, &config);
 
         let content = &body["result"]["contents"][0];
         assert_eq!(
@@ -483,7 +483,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let meta = &body["result"]["tools"][0]["meta"];
         assert_eq!(
@@ -513,7 +513,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/call", &mut body, &config);
+        let _ = rewrite_response("tools/call", &mut body, &config);
 
         assert_eq!(
             body["result"]["meta"]["openai/widgetDomain"]
@@ -544,7 +544,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/list", &mut body, &config);
+        let _ = rewrite_response("resources/list", &mut body, &config);
 
         assert_eq!(
             body["result"]["resources"][0]["meta"]["openai/widgetDomain"]
@@ -575,7 +575,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/templates/list", &mut body, &config);
+        let _ = rewrite_response("resources/templates/list", &mut body, &config);
 
         let meta = &body["result"]["resourceTemplates"][0]["meta"];
         assert_eq!(
@@ -610,7 +610,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let domains =
             as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
@@ -643,7 +643,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let domains =
             as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
@@ -669,7 +669,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let domains =
             as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
@@ -701,7 +701,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let meta = &body["result"]["tools"][0]["meta"]["ui"]["csp"];
         let connect = as_strs(&meta["connectDomains"]);
@@ -731,7 +731,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/call", &mut body, &config);
+        let _ = rewrite_response("tools/call", &mut body, &config);
 
         let domains = as_strs(&body["result"]["content"][0]["deeply"]["nested"]["connect_domains"]);
         assert!(domains.contains(&"https://abc.tunnel.example.com"));
@@ -748,7 +748,7 @@ mod tests {
                 "meta": { "openai/widgetDomain": "should-stay.com" }
             }
         });
-        rewrite_response("notifications/message", &mut body, &config);
+        let _ = rewrite_response("notifications/message", &mut body, &config);
 
         assert_eq!(
             body["result"]["meta"]["openai/widgetDomain"]
@@ -787,7 +787,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let resources =
             as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["resource_domains"]);
@@ -841,7 +841,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/list", &mut body, &config);
+        let _ = rewrite_response("resources/list", &mut body, &config);
 
         let payment_connect =
             as_strs(&body["result"]["resources"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
@@ -878,7 +878,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/read", &mut body, &config);
+        let _ = rewrite_response("resources/read", &mut body, &config);
 
         let connect =
             as_strs(&body["result"]["contents"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
@@ -913,7 +913,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let connect =
             as_strs(&body["result"]["tools"][0]["meta"]["openai/widgetCSP"]["connect_domains"]);
@@ -945,7 +945,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/read", &mut body, &config);
+        let _ = rewrite_response("resources/read", &mut body, &config);
 
         let meta = &body["result"]["contents"][0]["meta"];
         let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
@@ -975,7 +975,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/read", &mut body, &config);
+        let _ = rewrite_response("resources/read", &mut body, &config);
 
         let meta = &body["result"]["contents"][0]["meta"];
         let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
@@ -1007,7 +1007,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/list", &mut body, &config);
+        let _ = rewrite_response("resources/list", &mut body, &config);
 
         let meta = &body["result"]["resources"][0]["meta"];
         let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
@@ -1041,7 +1041,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/read", &mut body, &config);
+        let _ = rewrite_response("resources/read", &mut body, &config);
 
         let meta = &body["result"]["contents"][0]["meta"];
         let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
@@ -1063,7 +1063,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/call", &mut body, &config);
+        let _ = rewrite_response("tools/call", &mut body, &config);
 
         let meta = &body["result"]["meta"];
         assert!(meta.get("openai/widgetCSP").is_none());
@@ -1093,7 +1093,7 @@ mod tests {
             }
         });
 
-        rewrite_response("resources/list", &mut body, &config);
+        let _ = rewrite_response("resources/list", &mut body, &config);
 
         let meta = &body["result"]["resources"][0]["meta"];
         for shape in ["openai/widgetCSP"] {
@@ -1128,7 +1128,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let frames = as_strs(&body["result"]["tools"][0]["meta"]["ui"]["csp"]["frameDomains"]);
         assert_eq!(frames, vec!["https://abc.tunnel.example.com"]);
@@ -1206,7 +1206,7 @@ mod tests {
             }
         });
 
-        rewrite_response("tools/list", &mut body, &config);
+        let _ = rewrite_response("tools/list", &mut body, &config);
 
         let tools = body["result"]["tools"].as_array().unwrap();
 
