@@ -35,7 +35,7 @@ mcpr-core = { workspace = true }
 
 mcpr-tunnel = { workspace = true }
 mcpr-integrations = { workspace = true }
-inquire = "0.7"
+inquire = "0.9"
 
 # Faster allocator than the system default — noticeably better latency on
 # alloc-heavy paths (per-request HeaderMap, Bytes, JSON buffers).
