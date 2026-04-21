@@ -173,7 +173,7 @@ Pin to `X.Y.Z` in production. `latest` is for evaluation.
 
 ## Gotchas
 
-- **`mcpr proxy run` uses `--config`, not a positional argument.** Both inside and outside the container, the form is `mcpr --config /path/mcpr.toml proxy run`. The entrypoint handles this when auto-launching; manual invocations must match.
+- **`mcpr proxy run` takes the config file as a positional argument.** Both inside and outside the container, the form is `mcpr proxy run /path/mcpr.toml`. Omit the path to default to `mcpr.toml` in the working directory.
 - **The default `admin_bind` is `127.0.0.1:9901`.** The built-in `HEALTHCHECK` works (it runs inside the container), but external probes need `admin_bind = "0.0.0.0:9901"`.
 - **State lives at `/var/lib/mcpr/.mcpr/`, not `/var/lib/mcpr/`.** The `.mcpr` subdirectory is appended by mcpr. The volume mount point is the parent, not the state directory itself.
 - **No `procps` in the image.** `docker exec ... ps` fails. Use `mcpr status` and `mcpr proxy list` for process information.

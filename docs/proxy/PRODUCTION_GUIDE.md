@@ -253,7 +253,7 @@ Run `mcpr proxy status --json` periodically and alert on:
 For detailed per-stage timing investigation (**off by default** — zero cost when disabled, ~1 % overhead when enabled):
 
 ```bash
-MCPR_STAGE_TIMING=1 mcpr proxy run -c /etc/mcpr.toml
+MCPR_STAGE_TIMING=1 mcpr proxy run /etc/mcpr.toml
 # Then analyze:
 tail -f ~/.mcpr/proxies/<name>/proxy.log | jq -c 'select(.stage_timings)'
 ```
@@ -282,7 +282,7 @@ mcpr ships as a single binary. Two supported runtime shapes:
 
 ```bash
 mcpr start                    # starts the daemon (mcprd)
-mcpr proxy run -c /etc/mcpr.toml
+mcpr proxy run /etc/mcpr.toml
 mcpr status                   # check daemon + proxies
 ```
 
@@ -291,7 +291,7 @@ The daemon supervises proxy processes, writes PID files under `~/.mcpr/`, and mo
 **2. Foreground (container orchestration, systemd)**
 
 ```bash
-mcpr proxy run -c /etc/mcpr.toml --foreground
+mcpr proxy run /etc/mcpr.toml --foreground
 ```
 
 No daemon. Good for Docker, Kubernetes, systemd — where the orchestrator handles supervision.
@@ -306,7 +306,7 @@ After=network.target
 [Service]
 Type=simple
 User=mcpr
-ExecStart=/usr/local/bin/mcpr proxy run -c /etc/mcpr.toml --foreground
+ExecStart=/usr/local/bin/mcpr proxy run /etc/mcpr.toml --foreground
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536

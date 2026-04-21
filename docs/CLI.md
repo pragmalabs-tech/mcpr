@@ -89,12 +89,12 @@ mcpr proxy start localhost-9000
 Launch a proxy in the background from a config file. Snapshots the config to `~/.mcpr/proxies/<name>/config.toml` for later `start` / `restart` / `reload`. Errors if a proxy with the same name is already running — use `restart` to replace it or `reload` to update config without dropping sessions.
 
 ```bash
-mcpr proxy run -c mcpr.toml
+mcpr proxy run mcpr.toml
 ```
 
-| Flag | Description |
-|------|-------------|
-| `-c, --config PATH` | Config file (default: `./mcpr.toml`) |
+| Argument | Description |
+|----------|-------------|
+| `[CONFIG]` | Config file path (default: `./mcpr.toml`) |
 
 #### `mcpr proxy stop [name]`
 
@@ -188,7 +188,7 @@ Relay config does not need `mode = "relay"` when using `mcpr relay` commands.
 
 ### Query & Observe
 
-All `mcpr proxy` commands read the local SQLite store directly — they work even when the daemon isn't running. Use `--proxy <name>` to scope to a specific proxy, or omit it to show data across all proxies.
+All `mcpr proxy` commands read the local SQLite store directly — they work even when the daemon isn't running. Pass the proxy name as a positional argument to scope to a specific proxy, or omit it to show data across all proxies.
 
 #### `mcpr proxy logs [name]`
 
@@ -350,7 +350,6 @@ Show the captured MCP server schema — tools, resources, prompts, and server ca
 ```bash
 mcpr proxy schema                        # all proxies, current snapshot
 mcpr proxy schema my-api                 # filter to one proxy by name
-mcpr proxy schema --proxy my-api         # same, flag form
 mcpr proxy schema my-api --changes       # change history for one proxy
 mcpr proxy schema --unused               # tools listed but never called
 mcpr proxy schema --unused --since 30d   # usage window (default: 7d)
@@ -405,7 +404,6 @@ TOOL USAGE — localhost-9000 — last 7d   2/5 unused
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--proxy NAME` | — | Filter to one proxy. Same as the positional `name` argument. |
 | `--changes` | false | Show change history instead of current schema |
 | `--unused` | false | Show tool usage — listed vs actually called |
 | `--since DURATION` | 7d | Usage lookback window (with `--unused`) |

@@ -48,7 +48,7 @@ start_proxy() {
     # Clear any leftover proxy with the same name, then start fresh.
     "$MCPR" proxy stop "$PROXY_NAME" >/dev/null 2>&1 || true
     echo "==> starting mcpr proxy '$PROXY_NAME' on :$PROXY_PORT  (binary: $MCPR)"
-    "$MCPR" proxy run -c "$BENCH_DIR/configs/bench.toml" >/dev/null
+    "$MCPR" proxy run "$BENCH_DIR/configs/bench.toml" >/dev/null
     wait_proxy
 }
 
