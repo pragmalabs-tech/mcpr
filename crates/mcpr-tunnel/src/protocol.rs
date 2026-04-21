@@ -1,6 +1,30 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// RFC 7230 hop-by-hop headers plus `content-length`.
+///
+/// These must not be forwarded across a proxy: they describe the
+/// connection between the current pair of peers, not the end-to-end
+/// message. Forwarding `transfer-encoding` or a stale `content-length`
+/// through the tunnel confuses hyper's body framing on the other side
+/// and causes the TCP connection to be dropped before the response is
+/// serialized — which surfaces to the client as a 502 with
+/// "upstream prematurely closed connection".
+pub fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "connection"
+            | "content-length"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct TunnelRequest {
     pub id: String,
@@ -41,4 +65,60 @@ pub struct SubdomainOffer {
 #[derive(Serialize, Deserialize)]
 pub struct SubdomainPick {
     pub subdomain: String,
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_hop_by_hop__flags_all_rfc7230_headers() {
+        for h in [
+            "connection",
+            "keep-alive",
+            "proxy-authenticate",
+            "proxy-authorization",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            assert!(is_hop_by_hop(h), "{h} should be hop-by-hop");
+        }
+    }
+
+    #[test]
+    fn is_hop_by_hop__flags_content_length() {
+        assert!(is_hop_by_hop("content-length"));
+    }
+
+    #[test]
+    fn is_hop_by_hop__is_case_insensitive() {
+        assert!(is_hop_by_hop("Transfer-Encoding"));
+        assert!(is_hop_by_hop("TRANSFER-ENCODING"));
+        assert!(is_hop_by_hop("Content-Length"));
+    }
+
+    #[test]
+    fn is_hop_by_hop__allows_end_to_end_headers() {
+        for h in [
+            "content-type",
+            "content-encoding",
+            "cache-control",
+            "mcp-session-id",
+            "authorization",
+            "host",
+            "accept",
+            "user-agent",
+            "set-cookie",
+        ] {
+            assert!(!is_hop_by_hop(h), "{h} should NOT be hop-by-hop");
+        }
+    }
+
+    #[test]
+    fn is_hop_by_hop__rejects_empty() {
+        assert!(!is_hop_by_hop(""));
+    }
 }

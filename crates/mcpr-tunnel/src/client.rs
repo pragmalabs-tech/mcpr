@@ -7,6 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 
 use crate::protocol::{
     RegisterAck, RegisterRequest, SubdomainOffer, SubdomainPick, TunnelRequest, TunnelResponse,
+    is_hop_by_hop,
 };
 
 /// Callback for tunnel status changes.
@@ -177,7 +178,11 @@ async fn forward_to_local(
 
     for (k, v) in &req.headers {
         // Skip host header — we're forwarding to localhost
-        if k.to_lowercase() == "host" {
+        if k.eq_ignore_ascii_case("host") {
+            continue;
+        }
+        // Skip hop-by-hop — reqwest will set its own framing
+        if is_hop_by_hop(k) {
             continue;
         }
         builder = builder.header(k.as_str(), v.as_str());
@@ -194,6 +199,9 @@ async fn forward_to_local(
             let status = resp.status().as_u16();
             let mut headers = HashMap::new();
             for (k, v) in resp.headers() {
+                if is_hop_by_hop(k.as_str()) {
+                    continue;
+                }
                 if let Ok(val) = v.to_str() {
                     headers.insert(k.to_string(), val.to_string());
                 }

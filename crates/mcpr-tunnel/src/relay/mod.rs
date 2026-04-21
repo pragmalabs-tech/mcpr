@@ -20,6 +20,7 @@ use tokio::sync::{RwLock, oneshot};
 
 use crate::protocol::{
     RegisterAck, RegisterRequest, SubdomainOffer, SubdomainPick, TunnelRequest, TunnelResponse,
+    is_hop_by_hop,
 };
 use auth::{AuthError, AuthProviderConfig, subdomain_matches, verify_token};
 use config::RelayConfig;
@@ -432,6 +433,9 @@ async fn handle_tunnel_request(
     let req_id = uuid::Uuid::new_v4().to_string();
     let mut req_headers = HashMap::new();
     for (key, val) in headers.iter() {
+        if is_hop_by_hop(key.as_str()) {
+            continue;
+        }
         if let Ok(v) = val.to_str() {
             req_headers.insert(key.to_string(), v.to_string());
         }
@@ -511,6 +515,14 @@ async fn handle_tunnel_request(
             let mut builder = Response::builder().status(status_code);
 
             for (k, v) in &resp.headers {
+                // Drop hop-by-hop — axum/hyper sets its own framing from the
+                // reconstructed body below. Leaving `transfer-encoding` or a
+                // stale `content-length` on the response confuses hyper and
+                // causes it to abort serialization, closing the TCP
+                // connection before any bytes reach the client.
+                if is_hop_by_hop(k) {
+                    continue;
+                }
                 if let (Ok(name), Ok(val)) = (
                     HeaderName::from_bytes(k.as_bytes()),
                     HeaderValue::from_str(v),
