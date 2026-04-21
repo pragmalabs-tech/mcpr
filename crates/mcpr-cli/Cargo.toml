@@ -19,7 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tower-http = { version = "0.6", features = ["cors"] }
 colored = "3"
-tabled = "0.17"
+tabled = "0.20"
 chrono = { workspace = true }
 tokio-tungstenite = { workspace = true }
 sha2 = { workspace = true }
