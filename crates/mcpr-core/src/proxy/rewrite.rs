@@ -92,7 +92,14 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .get("uri")
                         .and_then(|v| v.as_str())
                         .map(String::from);
-                    if let Some(meta) = resource.get_mut("_meta") {
+                    // A URI alone is enough to treat this as a widget resource
+                    // per the MCP Apps spec, so synthesize `_meta` when the
+                    // upstream omits it — otherwise declared CSP silently
+                    // wouldn't apply to under-declaring servers.
+                    let has_existing_meta = resource.get("_meta").is_some();
+                    if (uri.is_some() || has_existing_meta)
+                        && let Some(meta) = ensure_meta(resource)
+                    {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
                         mutated = true;
                     }
@@ -112,7 +119,10 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .get("uriTemplate")
                         .and_then(|v| v.as_str())
                         .map(String::from);
-                    if let Some(meta) = template.get_mut("_meta") {
+                    let has_existing_meta = template.get("_meta").is_some();
+                    if (uri.is_some() || has_existing_meta)
+                        && let Some(meta) = ensure_meta(template)
+                    {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
                         mutated = true;
                     }
@@ -130,7 +140,10 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                         .get("uri")
                         .and_then(|v| v.as_str())
                         .map(String::from);
-                    if let Some(meta) = content.get_mut("_meta") {
+                    let has_existing_meta = content.get("_meta").is_some();
+                    if (uri.is_some() || has_existing_meta)
+                        && let Some(meta) = ensure_meta(content)
+                    {
                         rewrite_widget_meta(meta, uri.as_deref(), config);
                         mutated = true;
                     }
@@ -369,6 +382,17 @@ fn strip_scheme(url: &str) -> String {
         .next()
         .unwrap_or("")
         .to_string()
+}
+
+/// Get `container._meta`, inserting an empty object if absent. `None` only when
+/// the container isn't a JSON object — MCP resource/content entries always are,
+/// so callers can treat `None` as a malformed upstream and skip.
+fn ensure_meta(container: &mut Value) -> Option<&mut Value> {
+    let obj = container.as_object_mut()?;
+    Some(
+        obj.entry("_meta".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new())),
+    )
 }
 
 #[cfg(test)]
@@ -1390,5 +1414,173 @@ mod tests {
                 .unwrap(),
             "should-stay.com"
         );
+    }
+
+    // ── _meta synthesis when upstream under-declares ──────────────────────
+
+    #[test]
+    fn rewrite_response__resources_list_synthesizes_meta_when_upstream_omits() {
+        // Widget resources with no `_meta` at all must still receive the
+        // declared CSP — under-declaring servers are common in practice.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.declared.com".into()],
+            mode: Mode::Replace,
+        };
+        config.csp.resource_domains = DirectivePolicy {
+            domains: vec!["https://cdn.declared.com".into()],
+            mode: Mode::Extend,
+        };
+
+        let mut body = json!({
+            "result": {
+                "resources": [{
+                    "uri": "ui://widget/search",
+                    "name": "Search Widget"
+                }]
+            }
+        });
+
+        let mutated = rewrite_response("resources/list", &mut body, &config);
+        assert!(mutated);
+
+        let meta = &body["result"]["resources"][0]["_meta"];
+        let oa_connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec_connect = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa_connect, spec_connect);
+        assert_eq!(
+            oa_connect,
+            vec!["https://abc.tunnel.example.com", "https://api.declared.com"]
+        );
+        let oa_resource = as_strs(&meta["openai/widgetCSP"]["resource_domains"]);
+        assert!(oa_resource.contains(&"https://abc.tunnel.example.com"));
+        assert!(oa_resource.contains(&"https://cdn.declared.com"));
+    }
+
+    #[test]
+    fn rewrite_response__resources_read_synthesizes_meta_when_upstream_omits() {
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.declared.com".into()],
+            mode: Mode::Replace,
+        };
+
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/question",
+                    "mimeType": "text/html",
+                    "text": "<html><body>Hello</body></html>"
+                }]
+            }
+        });
+
+        let mutated = rewrite_response("resources/read", &mut body, &config);
+        assert!(mutated);
+
+        assert_eq!(
+            body["result"]["contents"][0]["text"].as_str().unwrap(),
+            "<html><body>Hello</body></html>"
+        );
+        let meta = &body["result"]["contents"][0]["_meta"];
+        let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
+        assert_eq!(oa, spec);
+        assert_eq!(
+            oa,
+            vec!["https://abc.tunnel.example.com", "https://api.declared.com"]
+        );
+    }
+
+    #[test]
+    fn rewrite_response__resources_list_injects_into_empty_meta() {
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.declared.com".into()],
+            mode: Mode::Extend,
+        };
+
+        let mut body = json!({
+            "result": {
+                "resources": [{
+                    "uri": "ui://widget/search",
+                    "_meta": {}
+                }]
+            }
+        });
+
+        let _ = rewrite_response("resources/list", &mut body, &config);
+
+        let meta = &body["result"]["resources"][0]["_meta"];
+        let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
+        assert!(oa.contains(&"https://api.declared.com"));
+        assert!(oa.contains(&"https://abc.tunnel.example.com"));
+    }
+
+    #[test]
+    fn rewrite_response__resources_templates_list_synthesizes_meta() {
+        let mut config = rewrite_config();
+        config.csp.resource_domains = DirectivePolicy {
+            domains: vec!["https://cdn.declared.com".into()],
+            mode: Mode::Extend,
+        };
+
+        let mut body = json!({
+            "result": {
+                "resourceTemplates": [{
+                    "uriTemplate": "ui://widget/{name}.html",
+                    "name": "Widget Template"
+                }]
+            }
+        });
+
+        let _ = rewrite_response("resources/templates/list", &mut body, &config);
+
+        let meta = &body["result"]["resourceTemplates"][0]["_meta"];
+        let oa = as_strs(&meta["openai/widgetCSP"]["resource_domains"]);
+        assert!(oa.contains(&"https://cdn.declared.com"));
+        assert!(oa.contains(&"https://abc.tunnel.example.com"));
+    }
+
+    #[test]
+    fn rewrite_response__tools_call_no_meta_is_not_synthesized() {
+        // Spec-aligned asymmetry: tools/call without widget indicators must
+        // NOT grow synthesized CSP fields — CSP belongs on widget resources.
+        let mut config = rewrite_config();
+        config.csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.declared.com".into()],
+            mode: Mode::Replace,
+        };
+
+        let mut body = json!({
+            "result": {
+                "content": [{"type": "text", "text": "London 14C"}],
+                "structuredContent": {"city": "London", "temp": 14}
+            }
+        });
+
+        let _ = rewrite_response("tools/call", &mut body, &config);
+
+        assert!(body["result"].get("_meta").is_none());
+        assert_eq!(
+            body["result"]["content"][0]["text"].as_str().unwrap(),
+            "London 14C"
+        );
+    }
+
+    #[test]
+    fn rewrite_response__resources_list_skips_when_no_uri_and_no_meta() {
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "resources": [{
+                    "name": "malformed"
+                }]
+            }
+        });
+
+        let _ = rewrite_response("resources/list", &mut body, &config);
+
+        assert!(body["result"]["resources"][0].get("_meta").is_none());
     }
 }
