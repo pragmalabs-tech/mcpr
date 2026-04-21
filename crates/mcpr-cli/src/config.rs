@@ -173,7 +173,6 @@ pub enum ProxyCommand {
 #[derive(Parser, Clone)]
 pub struct ProxyRunArgs {
     /// Config file path (default: mcpr.toml)
-    #[arg(long, short)]
     pub config: Option<String>,
 }
 
@@ -204,16 +203,16 @@ pub struct ProxyRestartArgs {
     pub config: Option<String>,
 }
 
-/// Arguments for `mcpr proxy reload <name>`.
+/// Arguments for `mcpr proxy reload <name> --config <path>`.
 #[derive(Parser, Clone)]
 pub struct ProxyReloadArgs {
     /// Proxy name to reload
     pub name: String,
 
-    /// Config file path — when provided, the snapshot is refreshed
-    /// from this file before the SIGHUP is sent
-    #[arg(long, short)]
-    pub config: Option<String>,
+    /// Config file path — the snapshot is refreshed from this file
+    /// before the SIGHUP is sent
+    #[arg(long, short, required = true)]
+    pub config: String,
 }
 
 /// Arguments for `mcpr proxy start <name>`.
@@ -235,8 +234,7 @@ pub struct ProxyListArgs {
 #[derive(Parser, Clone)]
 pub struct ProxyLogsArgs {
     /// Filter to a specific proxy name (omit to show all proxies)
-    #[arg(long)]
-    pub proxy: Option<String>,
+    pub name: Option<String>,
 
     /// Number of recent rows to show
     #[arg(long, default_value = "50")]
@@ -280,8 +278,7 @@ pub struct ProxyLogsArgs {
 #[derive(Parser, Clone)]
 pub struct ProxySlowArgs {
     /// Filter to a specific proxy name (omit to show all proxies)
-    #[arg(long)]
-    pub proxy: Option<String>,
+    pub name: Option<String>,
 
     /// Minimum latency to include (e.g., 200us, 500ms, 1s). Default: 500ms
     #[arg(long, default_value = "500ms")]
@@ -312,8 +309,7 @@ pub struct ProxySlowArgs {
 #[derive(Parser, Clone)]
 pub struct ProxySessionsArgs {
     /// Filter to a specific proxy name (omit to show all proxies)
-    #[arg(long)]
-    pub proxy: Option<String>,
+    pub name: Option<String>,
 
     /// Only show active sessions (seen in last 5 minutes)
     #[arg(long)]
@@ -340,8 +336,7 @@ pub struct ProxySessionsArgs {
 #[derive(Parser, Clone)]
 pub struct ProxyClientsArgs {
     /// Filter to a specific proxy name (omit to show all proxies)
-    #[arg(long)]
-    pub proxy: Option<String>,
+    pub name: Option<String>,
 
     /// Lookback window (default longer: clients change slowly)
     #[arg(long, default_value = "7d")]
@@ -356,8 +351,7 @@ pub struct ProxyClientsArgs {
 #[derive(Parser, Clone)]
 pub struct ProxyStatusArgs {
     /// Filter to a specific proxy name (omit to show all proxies)
-    #[arg(long)]
-    pub proxy: Option<String>,
+    pub name: Option<String>,
 
     /// Lookback window for activity summary (e.g., 1h, 24h)
     #[arg(long, default_value = "1h")]
@@ -382,14 +376,8 @@ pub struct ProxySessionArgs {
 /// Arguments for `mcpr proxy schema [name]`.
 #[derive(Parser, Clone)]
 pub struct ProxySchemaArgs {
-    /// Filter to a specific proxy name (omit to show all proxies).
-    /// Takes precedence over `--proxy` if both are given.
+    /// Filter to a specific proxy name (omit to show all proxies)
     pub name: Option<String>,
-
-    /// Alias for the positional `name` argument, for consistency with
-    /// `mcpr proxy logs`.
-    #[arg(long)]
-    pub proxy: Option<String>,
 
     /// Filter to a specific MCP method (e.g., tools/list, initialize)
     #[arg(long)]

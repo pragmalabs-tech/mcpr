@@ -13,7 +13,7 @@
 //! ## Enabling
 //!
 //! ```text
-//! MCPR_STAGE_TIMING=1 mcpr proxy run -c ./mcpr.toml
+//! MCPR_STAGE_TIMING=1 mcpr proxy run ./mcpr.toml
 //! # or
 //! MCPR_STAGE_TIMING=true mcpr proxy run ...
 //! ```

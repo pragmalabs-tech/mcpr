@@ -254,7 +254,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
 
     // ── Done ───────────────────────────────────────────────────────────
     println!("\n  {}", "Run your proxy:".bold());
-    println!("    mcpr start && mcpr proxy run -c {config_path}");
+    println!("    mcpr start && mcpr proxy run {config_path}");
 
     if let Some(ep) = &endpoint {
         println!(

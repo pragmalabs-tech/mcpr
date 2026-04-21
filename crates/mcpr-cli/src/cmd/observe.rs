@@ -16,7 +16,7 @@ use crate::render::{self, OutputMode};
 
 pub fn logs(args: ProxyLogsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = args.proxy.clone();
+    let name = args.name.clone();
     let mode = OutputMode::from(args.json);
 
     // When --session is set and --since is not, show all time.
@@ -66,7 +66,7 @@ pub fn logs(args: ProxyLogsArgs) -> Result<(), String> {
 
 pub fn slow(args: ProxySlowArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = args.proxy.clone();
+    let name = args.name.clone();
     let mode = OutputMode::from(args.json);
     let since_ts = parse_since(&args.since)?;
     let threshold_us = parse_threshold_us(&args.threshold)?;
@@ -115,7 +115,7 @@ pub fn slow(args: ProxySlowArgs) -> Result<(), String> {
 
 pub fn sessions(args: ProxySessionsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = args.proxy.clone();
+    let name = args.name.clone();
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
@@ -134,7 +134,7 @@ pub fn sessions(args: ProxySessionsArgs) -> Result<(), String> {
 
 pub fn clients(args: ProxyClientsArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    let name = args.proxy.clone();
+    let name = args.name.clone();
     let since_ts = parse_since(&args.since)?;
 
     let rows = engine
@@ -163,7 +163,7 @@ pub fn status(args: ProxyStatusArgs) -> Result<(), String> {
     }
 
     let (engine, _) = open_query_engine()?;
-    let name = args.proxy.clone();
+    let name = args.name.clone();
     let since_ts = parse_since(&args.since)?;
 
     let stats_result = engine
@@ -208,10 +208,7 @@ pub fn session(args: ProxySessionArgs) -> Result<(), String> {
 
 pub fn schema(args: ProxySchemaArgs) -> Result<(), String> {
     let (engine, _) = open_query_engine()?;
-    // Positional `name` takes precedence over the `--proxy` flag so both
-    // `mcpr proxy schema my-proxy` and `mcpr proxy schema --proxy my-proxy`
-    // work.
-    let name = args.name.clone().or_else(|| args.proxy.clone());
+    let name = args.name.clone();
     let mode = OutputMode::from(args.json);
 
     if args.unused {
