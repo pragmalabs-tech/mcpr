@@ -30,7 +30,10 @@
 //! 3. For each widget entry whose `match` glob matches the resource URI, in
 //!    config order, either extend (append) or replace (overwrite) the working
 //!    list with the widget's domains for this directive.
-//! 4. Prepend the proxy URL and dedupe.
+//! 4. For `connect` and `resource`, prepend the proxy URL and dedupe. `frame`
+//!    does not receive the proxy URL — widgets don't iframe the proxy back into
+//!    themselves, and prepending it would make every widget look like an
+//!    iframe-embedder to hosts that flag that shape for extra review.
 //!
 //! Replace semantics are scoped: a global replace only ignores upstream; a
 //! widget replace wipes everything accumulated above it.
@@ -189,7 +192,10 @@ impl CspConfig {
 /// - `resource_uri` selects which `[[csp.widget]]` overrides apply.
 /// - `upstream_host` is the bare host (no scheme) used to strip upstream
 ///   self-references that would leak localhost into the proxied CSP.
-/// - `proxy_url` is always prepended so hosts let the widget reach the proxy.
+/// - `proxy_url` is prepended for `connect` and `resource` so widgets can
+///   reach the proxy for API calls and asset loads. It is NOT prepended for
+///   `frame` — widgets don't iframe the proxy back into themselves, and
+///   including it there makes every widget look like an iframe-embedder.
 pub fn effective_domains(
     cfg: &CspConfig,
     directive: Directive,
@@ -237,9 +243,14 @@ pub fn effective_domains(
         }
     }
 
-    // 4. Prepend proxy URL so the widget can always reach the proxy itself,
-    //    then dedupe while preserving first-seen order.
-    let mut out = vec![proxy_url.to_string()];
+    // 4. Prepend the proxy URL for directives that need to reach the proxy
+    //    itself (API calls, asset loads). Frame is intentionally skipped —
+    //    see module docs. Dedupe preserving first-seen order.
+    let mut out = if directive == Directive::Frame {
+        Vec::new()
+    } else {
+        vec![proxy_url.to_string()]
+    };
     for d in base {
         push_unique(&mut out, &d);
     }
@@ -435,6 +446,68 @@ mod tests {
         );
 
         assert_eq!(out, domains(&["https://proxy.example.com"]));
+    }
+
+    // ── effective_domains: frame does not get the proxy URL ───────────────
+
+    #[test]
+    fn effective__frame_directive_default_is_empty_not_proxy() {
+        // Frame defaults to strict replace with empty domains. Unlike connect
+        // and resource, we must NOT prepend the proxy URL — widgets don't
+        // iframe the proxy back into themselves, and including it flags the
+        // widget as an iframe-embedder to hosts like ChatGPT.
+        let cfg = CspConfig::default();
+        let out = effective_domains(
+            &cfg,
+            Directive::Frame,
+            None,
+            &domains(&["https://embed.external.com"]),
+            "upstream.internal",
+            "https://proxy.example.com",
+        );
+
+        assert!(out.is_empty(), "expected empty, got {out:?}");
+    }
+
+    #[test]
+    fn effective__frame_directive_with_declared_domains_omits_proxy() {
+        // When the operator declares frame domains, they pass through verbatim
+        // — still no proxy URL prefix.
+        let cfg = CspConfig {
+            frame_domains: policy(&["https://embed.partner.com"], Mode::Extend),
+            ..CspConfig::default()
+        };
+        let out = effective_domains(
+            &cfg,
+            Directive::Frame,
+            None,
+            &[],
+            "upstream.internal",
+            "https://proxy.example.com",
+        );
+
+        assert_eq!(out, domains(&["https://embed.partner.com"]));
+    }
+
+    #[test]
+    fn effective__connect_and_resource_still_get_proxy_prepend() {
+        // Regression guard: the frame-skip must not affect connect/resource.
+        let cfg = CspConfig::default();
+        for directive in [Directive::Connect, Directive::Resource] {
+            let out = effective_domains(
+                &cfg,
+                directive,
+                None,
+                &[],
+                "upstream.internal",
+                "https://proxy.example.com",
+            );
+            assert_eq!(
+                out,
+                domains(&["https://proxy.example.com"]),
+                "directive {directive:?}"
+            );
+        }
     }
 
     // ── effective_domains: widget extend ───────────────────────────────────

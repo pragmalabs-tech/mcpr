@@ -71,9 +71,11 @@ For each directive, per response:
 2. Strip localhost and the upstream MCP host.
 3. Append the global directive's declared domains.
 4. For each matching `[[csp.widget]]` entry in config order, extend or replace per the widget's directive mode.
-5. Prepend the proxy URL and deduplicate.
+5. For `connect` and `resource`, prepend the proxy URL. Deduplicate.
 
 Replace semantics are scoped: a global replace only ignores upstream; a widget replace wipes everything accumulated before it.
+
+The proxy URL is deliberately **not** prepended to `frame`. Widgets don't iframe the proxy back into themselves, so including it there is dead weight — and it makes every mcpr-proxied widget look like an iframe-embedder to hosts like ChatGPT, which flag that shape for additional security review.
 
 ## What the proxy emits
 
@@ -100,7 +102,7 @@ The merged domain list lands in both shapes on every widget meta:
 
 Hosts ignore keys they do not understand, so emitting both is safe everywhere.
 
-The proxy URL always appears first so widgets can reach the proxy.
+The proxy URL appears first in `connect_domains` / `connectDomains` and `resource_domains` / `resourceDomains` so widgets can call back to the proxy and load their assets from it. `frame_domains` / `frameDomains` contains only what the operator (and upstream, when not in replace mode) declared.
 
 Non-widget meta (for example, a `tools/call` result with no widget indicators) is left untouched.
 

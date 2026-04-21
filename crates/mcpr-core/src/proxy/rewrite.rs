@@ -334,7 +334,10 @@ fn write_spec_csp(meta: &mut Value, connect: &[String], resource: &[String], fra
     );
 }
 
-/// Recursively ensure the proxy URL is present in every CSP-shaped domain array.
+/// Recursively ensure the proxy URL is present in every CSP-shaped domain array
+/// that needs to reach the proxy (connect, resource). Frame arrays are skipped —
+/// see `csp::effective_domains`.
+///
 /// Does not apply the merge rules — that would require URI context the deep scan
 /// does not have. The only guarantee is "proxy URL is reachable from the widget."
 /// Walk `value` and insert `config.proxy_url` at the front of every CSP
@@ -348,10 +351,8 @@ fn inject_proxy_into_all_csp(value: &mut Value, config: &RewriteConfig) -> bool 
             for key in [
                 "connect_domains",
                 "resource_domains",
-                "frame_domains",
                 "connectDomains",
                 "resourceDomains",
-                "frameDomains",
             ] {
                 if let Some(arr) = map.get_mut(key).and_then(|v| v.as_array_mut()) {
                     let has_proxy = arr.iter().any(|v| v.as_str() == Some(&config.proxy_url));
@@ -761,6 +762,37 @@ mod tests {
         assert!(domains.contains(&"https://abc.tunnel.example.com"));
     }
 
+    #[test]
+    fn rewrite_response__deep_csp_injection_skips_frame_arrays() {
+        // Regression guard for the frame-domains fix: the safety-net deep scan
+        // must not prepend the proxy URL to frame arrays, or every mcpr-proxied
+        // widget would look like an iframe-embedder to ChatGPT and trigger
+        // extra security review.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "content": [{
+                    "type": "text",
+                    "text": "result",
+                    "deeply": {
+                        "nested": {
+                            "frame_domains": ["https://embed.partner.com"],
+                            "frameDomains": ["https://embed.partner.com"]
+                        }
+                    }
+                }]
+            }
+        });
+
+        let _ = rewrite_response("tools/call", &mut body, &config);
+
+        let nested = &body["result"]["content"][0]["deeply"]["nested"];
+        let snake = as_strs(&nested["frame_domains"]);
+        let camel = as_strs(&nested["frameDomains"]);
+        assert_eq!(snake, vec!["https://embed.partner.com"]);
+        assert_eq!(camel, vec!["https://embed.partner.com"]);
+    }
+
     // ── Unknown methods: only deep scan runs ───────────────────────────────
 
     #[test]
@@ -1137,7 +1169,9 @@ mod tests {
     #[test]
     fn rewrite_response__frame_domains_default_replace_drops_upstream() {
         // Default config treats frameDomains as replace, so upstream values are
-        // dropped even in the absence of any declared frame domains.
+        // dropped. Unlike connect/resource, the proxy URL is NOT prepended to
+        // frame — the widget doesn't iframe the proxy back into itself, and
+        // prepending it flags the widget as an iframe-embedder to hosts.
         let config = rewrite_config();
         let mut body = json!({
             "result": {
@@ -1157,7 +1191,10 @@ mod tests {
         let _ = rewrite_response("tools/list", &mut body, &config);
 
         let frames = as_strs(&body["result"]["tools"][0]["_meta"]["ui"]["csp"]["frameDomains"]);
-        assert_eq!(frames, vec!["https://abc.tunnel.example.com"]);
+        assert!(
+            frames.is_empty(),
+            "frame_domains should be empty, got {frames:?}"
+        );
     }
 
     // ── End-to-end scenario ────────────────────────────────────────────────
@@ -1252,9 +1289,10 @@ mod tests {
         );
         // The payment widget override must NOT apply to the search tool.
         assert!(!search_oa_connect.contains(&"https://api.stripe.com"));
-        // Frame directive defaults strict — empty apart from the proxy URL.
+        // Frame directive defaults strict AND the proxy URL is not prepended
+        // — so with no declared frame domains the array is fully empty.
         let search_oa_frame = as_strs(&search_meta["openai/widgetCSP"]["frame_domains"]);
-        assert_eq!(search_oa_frame, vec!["https://abc.tunnel.example.com"]);
+        assert!(search_oa_frame.is_empty());
 
         // ── Tool 1: payment — upstream declared only spec shape ──────────
         let payment_meta = &tools[1]["_meta"];
