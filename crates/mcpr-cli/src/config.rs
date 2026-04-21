@@ -78,7 +78,7 @@ pub use mcpr_integrations::sinks::LogFormat;
 #[command(
     name = "mcpr",
     version,
-    about = "Open-source proxy for MCP Apps — fixes CSP, handles auth, observes every tool call."
+    about = "A proxy for MCP Apps/Servers — routes JSON-RPC, serves widgets, observes traffic, authenticates, and secures MCP."
 )]
 struct Cli {
     #[command(subcommand)]
