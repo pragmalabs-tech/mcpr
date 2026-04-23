@@ -1,30 +1,29 @@
+<div align="center">
+
+<img src="docs/assets/logo.png" alt="mcpr logo" width="120" />
+
 # mcpr
 
 [![CI](https://github.com/cptrodgers/mcpr/actions/workflows/check.yml/badge.svg)](https://github.com/cptrodgers/mcpr/actions/workflows/check.yml)
 [![codecov](https://codecov.io/gh/cptrodgers/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/cptrodgers/mcpr)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**A proxy for MCP Apps/Servers.** mcpr parses JSON-RPC messages to route, serve widgets, observe, authenticate, and secure MCP traffic. Written in Rust and built for minimal overhead — [under 1ms p99](benches/reports/v0.4.42-post-refactor.md).
+**Observability-first proxy for MCP servers.** Per-tool metrics, session capture, and schema tracking in a single Rust binary — with [~1ms p99](benches/reports/v0.4.42-post-refactor.md) overhead. Sits in front of your MCP app and records every JSON-RPC call to a local SQLite store.
 
-![mcpr TUI dashboard showing information](docs/assets/mcpr-demo.gif)
+<img src="docs/assets/mcpr-demo.gif" alt="mcpr proxy status showing per-tool metrics" />
 
-### Why I build mcpr
+</div>
 
-Most MCP proxies sit on the client side, aggregating multiple servers for a single client. mcpr sits on the server side — in front of your MCP app — handling JSON-RPC routing, widget serving, CSP configuration, OAuth 2.1, and per-tool/per-resource observability. Your application code stays focused on business logic while mcpr absorbs the policy differences between AI clients (ChatGPT, Claude, Copilot, etc.).
+## Quickstart
 
-Status: Under active development — already running in front of my own MCP App (https://mcp.usestudykit.com/mcp)
+Install and run:
 
-### Highlight Features
+```bash
+curl -fsSL https://mcpr.app/install.sh | sh
+mcpr proxy run
+```
 
-- **Routing** — forwards `tools/call` and `resources/*` traffic with minimal overhead ([under 1ms p99](benches/reports/v0.4.42-post-refactor.md)), plus CSP rewriting that stays compatible across AI clients (ChatGPT, Claude, etc.).
-- **Observability** — per-method stats: tool calls, prompt usage, slow calls, error rates. [Dashboard demo](docs/assets/cloud-dashboard.png) · [proxy demo](docs/assets/proxy-status.png)
-- **Sessions capture** — see how each AI client and user interacts with your MCP: client info, call flow, and the full sequence of tool calls within every session.
-- **Schema capture** — records the MCP schema as it flows through, tracks changes over time, and flags tools that are registered but never called.
-- **Authentication** *(coming soon)* — OAuth 2.1 integration with common providers, plus support for bring-your-own auth that meets the 2.1 spec. Open an issue if your provider isn't covered.
-
-### Quickstart
-
-Write a config:
+Minimal config:
 
 ```toml
 # mcpr.toml
@@ -32,58 +31,25 @@ mcp = "http://localhost:9000"
 port = 3000
 ```
 
-**Run by mcpr** (recommended for local development):
-
-```bash
-curl -fsSL https://mcpr.app/install.sh | sh
-mcpr proxy run
-```
-
-Docker support is in beta — see [docs/DOCKER.md](docs/DOCKER.md) for volumes, health probes, and compose/Kubernetes examples. Feedback welcome.
+Docker is in beta — see [docs/DOCKER.md](docs/DOCKER.md) for volumes, health probes, and compose/Kubernetes examples.
 
 ---
 
-## Route
+## What mcpr does
 
-mcpr inspects each JSON-RPC body to classify the MCP method. Requests route to the MCP backend. Non-JSON-RPC requests (HTML, JS, CSS, images) route to the widget server if configured.
+mcpr sits in front of your MCP app and does three things, in order of how much work each one saves you:
 
-```toml
-mcp = "http://localhost:9000"
-widgets = "http://localhost:4444" # Optional for MCP server (no Apps)
-```
+1. **Observe** — records every `tools/call`, `resources/*`, and `prompts/*` request to a local SQLite store. Per-tool p50/p95/max latency, error rates, session traces, client breakdowns, and schema diffs over time. No instrumentation in your app.
+2. **Route** — one upstream per proxy today. JSON-RPC classification, widget and static routing for MCP Apps, and CSP rewriting that emits the shape each AI client (ChatGPT, Claude, Copilot) expects.
+3. **Authenticate** *(in progress)* — OAuth 2.1 and API key handling at the proxy layer. Your app receives a verified `x-user-id` header instead of implementing auth flows itself.
 
-### Widget CSP
-
-MCP Apps (ChatGPT Apps, Claude connectors) render widgets in sandboxed iframes with CSP rules. ChatGPT reads `openai/widgetCSP`, Claude reads `ui.csp`. Each platform interprets domain lists differently.
-
-mcpr rewrites CSP domain arrays in `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, and `resources/read` responses. It replaces localhost URLs with the proxy's public domain, merges configured domains, and emits the CSP shape each client expects.
-
-CSP has three independent directives — `connectDomains` (fetch / WebSocket), `resourceDomains` (scripts, styles, images), and `frameDomains` (iframes) — each with its own `mode` (`extend` or `replace`). Widget entries layer glob-matched overrides on top of the global policy.
-
-```toml
-[csp.connectDomains]
-domains = ["api.example.com"]
-mode    = "extend"
-
-[csp.resourceDomains]
-domains = ["cdn.example.com"]
-mode    = "extend"
-
-[csp.frameDomains]
-domains = []
-mode    = "replace"
-
-[[csp.widget]]
-match              = "ui://widget/payment*"
-connectDomains     = ["api.stripe.com"]
-connectDomainsMode = "extend"
-```
+Running in front of [mcp.usestudykit.com/mcp](https://mcp.usestudykit.com/mcp) today.
 
 ---
 
 ## Observe
 
-mcpr records every MCP request to a local SQLite database — tool name, latency, status, error code, request/response size, session ID. All `mcpr proxy` commands read from this store and work whether or not the daemon is running.
+mcpr writes every request to a local SQLite database — tool name, latency, status, error code, request/response size, session ID. All `mcpr proxy` commands read from this store and work whether or not the daemon is running.
 
 ### Per-tool metrics
 
@@ -164,19 +130,67 @@ $ mcpr proxy clients
 
 ---
 
-## Authenticate
+## Route
 
-*Coming soon.*
+Each proxy instance fronts one upstream MCP app. mcpr classifies requests by JSON-RPC shape: MCP methods go to the backend; non-JSON-RPC requests (HTML, JS, CSS, images) go to the widget server if configured.
 
-mcpr will handle MCP OAuth 2.1 and API key auth at the proxy layer. The MCP Apps (server) receives a verified `x-user-id` header instead of implementing its own auth flow.
+```toml
+mcp = "http://localhost:9000"
+widgets = "http://localhost:4444" # Optional — MCP Apps only
+```
+
+Multi-upstream routing from a single port is not supported yet. Run one `mcpr proxy` per upstream.
+
+### Widget CSP
+
+MCP Apps (ChatGPT Apps, Claude connectors) render widgets in sandboxed iframes with CSP rules. ChatGPT reads `openai/widgetCSP`, Claude reads `ui.csp`. Each platform interprets domain lists differently.
+
+mcpr rewrites CSP domain arrays in `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, and `resources/read` responses. It replaces localhost URLs with the proxy's public domain, merges configured domains, and emits the shape each client expects.
+
+CSP has three independent directives — `connectDomains` (fetch / WebSocket), `resourceDomains` (scripts, styles, images), and `frameDomains` (iframes) — each with its own `mode` (`extend` or `replace`). Widget entries layer glob-matched overrides on top of the global policy.
+
+```toml
+[csp.connectDomains]
+domains = ["api.example.com"]
+mode    = "extend"
+
+[csp.resourceDomains]
+domains = ["cdn.example.com"]
+mode    = "extend"
+
+[csp.frameDomains]
+domains = []
+mode    = "replace"
+
+[[csp.widget]]
+match              = "ui://widget/payment*"
+connectDomains     = ["api.stripe.com"]
+connectDomainsMode = "extend"
+```
 
 ---
 
-## Secure
+## Authenticate
 
-*Coming soon.*
+*In progress.* mcpr will handle MCP OAuth 2.1 and API key auth at the proxy layer, so your MCP app receives a verified `x-user-id` header instead of implementing auth flows itself. Planned config:
 
-mcpr will provide request validation, per-tool ACLs, and IP whitelisting at the proxy layer.
+```toml
+[auth]
+mode = "oauth2.1"           # or "api_key"
+provider = "google"         # google, github, bring-your-own
+```
+
+Track progress in the [Auth roadmap](#roadmap) below. Open an issue if your provider isn't covered.
+
+---
+
+## mcpr cloud (optional hosted dashboard)
+
+Self-hosting the CLI is enough for local development and single-machine deployments. For teams, [cloud.mcpr.app](https://cloud.mcpr.app) is a managed dashboard that ingests events from your mcpr proxies and renders them as a web UI — analytics, log search, schema views, slow-call drill-downs, per-client breakdowns.
+
+Data flows one way: proxy → cloud, pushed via a project token from `mcpr proxy setup`. Your local SQLite remains the source of truth.
+
+![mcpr cloud dashboard](docs/assets/cloud-dashboard.png)
 
 ---
 
@@ -190,22 +204,23 @@ mcpr will provide request validation, per-tool ACLs, and IP whitelisting at the 
 
 ## Roadmap
 
-**Routing & Network**
-- [x] JSON-RPC routing 
-- [x] Content Security Policy (CSP) rewriting
-- [ ] Widgets mode (Server endpoint, statics)
-
 **Observability**
-- [x] MCP request logs, session tracking, AI client tracking
-- [x] MCP schema capture with change tracking
-- [x] Per-tool metrics (calls, error%, p50, p95, max, request size, response size)
-- [x] Cloud dashboard sync ([mcpr.app](https://cloud.mcpr.app))
+- [x] Per-tool metrics (calls, error%, p50, p95, max, request/response size)
+- [x] Request logs, session tracking, AI client tracking
+- [x] Schema capture with change tracking
+- [x] Cloud dashboard sync ([cloud.mcpr.app](https://cloud.mcpr.app))
+
+**Routing & Network**
+- [x] JSON-RPC routing (single upstream per proxy)
+- [x] CSP rewriting
+- [x] Widget / static asset serving
+- [ ] Multi-upstream routing from one port
 
 **Auth**
-- [ ] OAuth 2.1 for Auth Provider
-- [ ] OAuth 2.1 for legacy auth (non oauth standard)
-- [ ] Token API auth
-- [ ] Multiple Auth Mode for one server
+- [ ] OAuth 2.1 for standard providers
+- [ ] OAuth 2.1 for legacy (non-standard) auth
+- [ ] API token auth
+- [ ] Multiple auth modes per server
 
 **Security**
 - [ ] Per-tool access control
@@ -215,7 +230,7 @@ mcpr will provide request validation, per-tool ACLs, and IP whitelisting at the 
 **Tunnel/Relay**
 - [x] Built-in tunnel client and self-hosted relay server
 - [x] Standalone `mcpr relay` CLI with daemon lifecycle
-- [x] Daemon mode, graceful shutdown
+- [x] Graceful shutdown
 
 ## License
 
