@@ -17,7 +17,6 @@ use crate::proxy::pipeline::handlers;
 use crate::proxy::pipeline::parser::build_request_context;
 use crate::proxy::pipeline::route::{RequestKind, classify_request};
 use crate::proxy::proxy_state::ProxyState;
-use crate::proxy::widgets::{list_widgets, serve_widget_asset, serve_widget_html};
 
 /// Run the full proxy pipeline on one HTTP request.
 pub async fn run(
@@ -29,7 +28,6 @@ pub async fn run(
 ) -> Response {
     let start = Instant::now();
     let path = uri.path();
-    let has_widgets = proxy.widget_source.is_some();
 
     // ① Parse
     let mut ctx = build_request_context(method.clone(), path, &headers, &body, start);
@@ -41,10 +39,7 @@ pub async fn run(
     }
 
     // ③ Classify + dispatch. Each variant has one concrete handler.
-    match classify_request(&ctx, &headers, has_widgets) {
-        RequestKind::WidgetHtml(name) => serve_widget_html(&proxy, &name).await,
-        RequestKind::WidgetList => list_widgets(&proxy).await,
-        RequestKind::WidgetAsset => serve_widget_asset(&proxy, path).await,
+    match classify_request(&ctx, &headers) {
         RequestKind::McpSseStream => handlers::sse::stream_sse(&proxy, &mut ctx, &headers).await,
         RequestKind::McpPostStream(m) => {
             handlers::streamed::forward_and_stream(&proxy, &mut ctx, &m, &headers, &body).await
@@ -72,7 +67,7 @@ mod tests {
     use crate::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
     use crate::protocol::session::MemorySessionStore;
     use crate::proxy::forwarding::UpstreamClient;
-    use crate::proxy::{CspConfig, RewriteConfig, WidgetSource, new_shared_health};
+    use crate::proxy::{CspConfig, RewriteConfig, new_shared_health};
 
     // ── Capturing sink ────────────────────────────────────────────────────
 
@@ -110,10 +105,7 @@ mod tests {
     /// captures every emitted event. Returns the bus handle so the test can
     /// call `handle.shutdown().await` before asserting — shutdown drains the
     /// event channel, guaranteeing all `emit()` calls have been observed.
-    fn build_test_proxy(
-        mcp_upstream: &str,
-        widget_source: Option<WidgetSource>,
-    ) -> (Arc<ProxyState>, CapturingSink, EventBusHandle) {
+    fn build_test_proxy(mcp_upstream: &str) -> (Arc<ProxyState>, CapturingSink, EventBusHandle) {
         let sink = CapturingSink::default();
         let mut mgr = EventManager::new();
         mgr.register(Box::new(sink.clone()));
@@ -138,7 +130,6 @@ mod tests {
                 csp: CspConfig::default(),
             }
             .into_swap(),
-            widget_source,
             sessions: MemorySessionStore::new(),
             schema_manager: Arc::new(SchemaManager::new("test", MemorySchemaStore::new())),
             health: new_shared_health(),
@@ -206,7 +197,7 @@ mod tests {
         );
         let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
 
-        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url);
         let (method, headers, uri, body) = post_mcp(
             "/mcp",
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
@@ -257,7 +248,7 @@ mod tests {
         );
         let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
 
-        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url);
         let (method, headers, uri, body) = post_mcp(
             "/mcp",
             json!({
@@ -318,7 +309,7 @@ mod tests {
         );
         let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
 
-        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url);
         let (method, headers, uri, body) = post_mcp(
             "/mcp",
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
@@ -364,7 +355,7 @@ mod tests {
         );
         let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
 
-        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url);
         let (method, headers, uri, body) = post_mcp(
             "/mcp",
             json!({"jsonrpc": "2.0", "id": 1, "method": "prompts/list"}),
@@ -389,7 +380,7 @@ mod tests {
         // connect error fast.
         let upstream_url = "http://127.0.0.1:1/mcp";
 
-        let (proxy, sink, handle) = build_test_proxy(upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(upstream_url);
         let (method, headers, uri, body) = post_mcp(
             "/mcp",
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
@@ -422,7 +413,7 @@ mod tests {
         );
         let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
 
-        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url);
         let uri: Uri = "http://proxy.test/mcp".parse().unwrap();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -474,7 +465,7 @@ mod tests {
                 .unwrap()
         });
 
-        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url);
         // Passthrough uses ctx.mcp_upstream as the forwarding base; set a
         // matching rewrite_config.mcp_upstream so UpstreamUrlMapMw knows the
         // base to substitute.
@@ -528,7 +519,7 @@ mod tests {
         let upstream = Router::new().route("/mcp", delete(|| async { "" }));
         let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
 
-        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url);
         proxy.sessions.create("sess-xyz").await;
         assert!(proxy.sessions.get("sess-xyz").await.is_some());
 
@@ -554,19 +545,14 @@ mod tests {
         assert_eq!(end.session_id, "sess-xyz");
     }
 
-    // ── Test #8 — WidgetOverlay substitutes local HTML ────────────────────
+    // ── Test #8 — resources/read forwards upstream text verbatim ──────────
+    //
+    // Replaces the previous widget-overlay test. Confirms the proxy no
+    // longer swaps upstream text for local HTML when a `ui://widget/*`
+    // resource is read — the overlay code path is gone.
 
     #[tokio::test]
-    async fn resources_read_overlays_widget_html_from_static_source() {
-        let tmp = tempfile::tempdir().unwrap();
-        let widget_dir = tmp.path().join("src/question");
-        std::fs::create_dir_all(&widget_dir).unwrap();
-        std::fs::write(
-            widget_dir.join("index.html"),
-            "<html><body>LOCAL WIDGET</body></html>",
-        )
-        .unwrap();
-
+    async fn resources_read_forwards_upstream_text_unchanged() {
         let upstream = Router::new().route(
             "/mcp",
             post(|| async {
@@ -584,10 +570,7 @@ mod tests {
         );
         let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
 
-        let widget_source = Some(WidgetSource::Static(
-            tmp.path().to_string_lossy().to_string(),
-        ));
-        let (proxy, _sink, handle) = build_test_proxy(&upstream_url, widget_source);
+        let (proxy, _sink, handle) = build_test_proxy(&upstream_url);
         let (method, headers, uri, body) = post_mcp(
             "/mcp",
             json!({
@@ -604,12 +587,73 @@ mod tests {
             .unwrap();
         let body_str = std::str::from_utf8(&body).unwrap();
         assert!(
-            body_str.contains("LOCAL WIDGET"),
-            "response should carry local widget HTML: {body_str}"
+            body_str.contains("UPSTREAM PLACEHOLDER"),
+            "upstream text must reach the client unchanged: {body_str}"
+        );
+    }
+
+    // ── Test #8b — CSP rewrite still applies after widget removal ─────────
+    //
+    // Regression guard for Phase 1: deleting the widget-serving path must
+    // not affect CSP rewriting of upstream MCP responses. tools/list with
+    // an `openai/widgetCSP.connect_domains = ["http://localhost:9000"]`
+    // upstream response should still be rewritten so the proxy URL
+    // appears and localhost is stripped.
+
+    #[tokio::test]
+    async fn tools_list_csp_rewrite_survives_widget_removal() {
+        let upstream_body = json!({
+            "jsonrpc": "2.0", "id": 1,
+            "result": {
+                "tools": [{
+                    "name": "search",
+                    "_meta": {
+                        "openai/widgetCSP": {
+                            "connect_domains": ["http://localhost:9000"],
+                            "resource_domains": [],
+                            "frame_domains": []
+                        }
+                    }
+                }]
+            }
+        });
+        let body_for_route = upstream_body.clone();
+        let upstream = Router::new().route(
+            "/mcp",
+            post(move || {
+                let b = body_for_route.clone();
+                async move { axum::Json(b) }
+            }),
+        );
+        let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
+
+        let (proxy, _sink, handle) = build_test_proxy(&upstream_url);
+        let (method, headers, uri, body) = post_mcp(
+            "/mcp",
+            json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+        );
+        let resp = run(proxy, method, headers, uri, body).await;
+
+        handle.shutdown().await;
+
+        let body = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&body).expect("response parses as JSON");
+        let domains: Vec<&str> =
+            parsed["result"]["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]
+                .as_array()
+                .expect("connect_domains array")
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect();
+        assert!(
+            domains.contains(&"https://proxy.test"),
+            "proxy URL must be injected into rewritten CSP: {domains:?}"
         );
         assert!(
-            !body_str.contains("UPSTREAM PLACEHOLDER"),
-            "upstream text should be overwritten: {body_str}"
+            !domains.iter().any(|d| d.contains("localhost")),
+            "localhost must be stripped from rewritten CSP: {domains:?}"
         );
     }
 
@@ -645,7 +689,7 @@ mod tests {
         );
         let upstream_url = format!("{}/mcp", spawn_upstream(upstream).await);
 
-        let (proxy, sink, handle) = build_test_proxy(&upstream_url, None);
+        let (proxy, sink, handle) = build_test_proxy(&upstream_url);
         let (method, headers, uri, body) = post_mcp(
             "/mcp",
             json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),

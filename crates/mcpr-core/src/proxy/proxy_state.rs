@@ -14,7 +14,6 @@ use crate::protocol::session::MemorySessionStore;
 use super::RewriteConfig;
 use super::forwarding::UpstreamClient;
 use super::health::SharedProxyHealth;
-use super::widgets::WidgetSource;
 
 /// Everything one running proxy needs to serve a request end-to-end.
 pub struct ProxyState {
@@ -31,7 +30,6 @@ pub struct ProxyState {
     /// Lock-free: readers call `.load()` (sync, ~5 ns); a writer
     /// wanting to swap config does `.store(Arc::new(new))`.
     pub rewrite_config: Arc<ArcSwap<RewriteConfig>>,
-    pub widget_source: Option<WidgetSource>,
 
     // ── runtime tracking ──
     pub sessions: MemorySessionStore,

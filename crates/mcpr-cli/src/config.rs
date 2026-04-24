@@ -78,7 +78,7 @@ pub use mcpr_integrations::sinks::LogFormat;
 #[command(
     name = "mcpr",
     version,
-    about = "A proxy for MCP Apps/Servers — routes JSON-RPC, serves widgets, observes traffic, authenticates, and secures MCP."
+    about = "A proxy for MCP Apps/Servers — routes JSON-RPC, observes traffic, authenticates, and secures MCP."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -695,7 +695,6 @@ struct FileConfig {
 
     // -- Gateway --
     mcp: Option<String>,
-    widgets: Option<String>,
     csp: FileCspConfig,
 
     // -- Relay --
@@ -788,7 +787,6 @@ impl FileConfig {
 pub struct GatewayConfig {
     pub name: String,
     pub mcp: Option<String>,
-    pub widgets: Option<String>,
     pub port: Option<u16>,
     /// Resolved CSP config, ready to hand to `RewriteConfig`.
     pub csp: CspConfig,
@@ -831,9 +829,6 @@ impl GatewayConfig {
         let mut changed = Vec::new();
         if self.mcp != other.mcp {
             changed.push("mcp");
-        }
-        if self.widgets != other.widgets {
-            changed.push("widgets");
         }
         if self.port != other.port {
             changed.push("port");
@@ -1242,7 +1237,6 @@ fn load_gateway(
     Mode::Gateway(Box::new(GatewayConfig {
         name,
         mcp: file.mcp,
-        widgets: file.widgets,
         port: file.port,
         csp,
         relay_url: Some(
@@ -1280,7 +1274,6 @@ mod tests {
         GatewayConfig {
             name: "test".into(),
             mcp: Some("http://localhost:9000".into()),
-            widgets: None,
             port: Some(3000),
             csp: mcpr_core::proxy::csp::CspConfig::default(),
             relay_url: Some("https://tunnel.mcpr.app".into()),
@@ -1374,11 +1367,9 @@ mod tests {
         let mut b = gateway_config();
         b.mcp = Some("http://other:9000".into());
         b.port = Some(4000);
-        b.widgets = Some("https://widgets.example.com".into());
         let changed = a.reload_unsafe_changes(&b);
         assert!(changed.contains(&"mcp"));
         assert!(changed.contains(&"port"));
-        assert!(changed.contains(&"widgets"));
     }
 
     #[test]

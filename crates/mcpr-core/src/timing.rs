@@ -67,8 +67,6 @@ pub enum Stage {
     JsonParse,
     /// `SchemaManager::ingest` + stale-flag check.
     Schema,
-    /// Widget overlay substitution (`resources/read` with `ui://widget/*`).
-    WidgetOverlay,
     /// Marker scan (`rewrite::has_markers`).
     MarkerScan,
     /// Structured CSP rewrite (`rewrite::rewrite_in_place`).
@@ -132,7 +130,6 @@ impl StageTimer {
             Stage::SseUnwrap => timings.sse_unwrap_us = Some(us),
             Stage::JsonParse => timings.json_parse_us = Some(us),
             Stage::Schema => timings.schema_us = Some(us),
-            Stage::WidgetOverlay => timings.widget_overlay_us = Some(us),
             Stage::MarkerScan => timings.marker_scan_us = Some(us),
             Stage::Rewrite => timings.rewrite_us = Some(us),
             Stage::Reserialize => timings.reserialize_us = Some(us),

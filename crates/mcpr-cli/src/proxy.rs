@@ -65,7 +65,6 @@ mod tests {
                 csp: mcpr_core::proxy::CspConfig::default(),
             }
             .into_swap(),
-            widget_source: None,
             sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
             schema_manager: Arc::new(mcpr_core::protocol::schema_manager::SchemaManager::new(
                 "test",

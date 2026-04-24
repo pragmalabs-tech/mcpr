@@ -39,8 +39,8 @@
 //!     +-- setup.rs      #   Interactive setup wizard (mcpr proxy setup)
 //! ```
 //!
-//! The proxy engine (pipeline, middleware, `ProxyState`, widgets,
-//! forwarding, rewrite, SSE, health) lives in `mcpr_core::proxy`. This
+//! The proxy engine (pipeline, middleware, `ProxyState`, forwarding,
+//! rewrite, SSE, health) lives in `mcpr_core::proxy`. This
 //! binary assembles a `ProxyState` at boot, wires it into axum, and
 //! delegates every request to `pipeline::run`.
 //!
@@ -83,7 +83,6 @@ use mcpr_core::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
 use mcpr_core::protocol::session::MemorySessionStore;
 use mcpr_core::proxy::ProxyState;
 use mcpr_core::proxy::RewriteConfig;
-use mcpr_core::proxy::WidgetSource;
 use mcpr_core::proxy::health::{self as proxy_health, SharedProxyHealth};
 use proxy::proxy_routes;
 use state::AppState;
@@ -514,14 +513,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     let proxy_name = cfg.name.clone();
     let proxy_name_for_shutdown = proxy_name.clone();
 
-    let widget_source = cfg.widgets.as_ref().map(|w| {
-        if w.starts_with("http://") || w.starts_with("https://") {
-            WidgetSource::Proxy(w.clone())
-        } else {
-            WidgetSource::Static(w.clone())
-        }
-    });
-
     // Bind listener — in tunnel mode with no explicit port, use port 0 (OS picks random).
     // In proxy-only mode (no tunnel), default to 3000 if not specified.
     // Default port: 3000 for proxy-only mode, 0 (OS picks) for tunnel mode.
@@ -739,7 +730,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
         rewrite_config: rewrite_config.into_swap(),
-        widget_source,
         sessions: MemorySessionStore::new(),
         schema_manager: Arc::new(SchemaManager::new(
             proxy_name.clone(),
@@ -772,7 +762,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         actual_port,
         &public_url,
         &mcp,
-        cfg.widgets.as_deref(),
         cfg.cloud_server.as_deref(),
     );
 
@@ -810,7 +799,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         });
     }
 
-    // Spawn health check task: periodically probe MCP + widgets status
+    // Spawn health check task: periodically probe MCP upstream status
     tokio::spawn(async move {
         health_check_loop(health_proxy).await;
     });
@@ -1344,7 +1333,7 @@ async fn check_mcp_endpoint(
     (proxy_health::ConnectionStatus::Connected, None)
 }
 
-/// Periodically check MCP upstream and widget source connectivity.
+/// Periodically check MCP upstream connectivity.
 async fn health_check_loop(proxy: Arc<ProxyState>) {
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -1355,28 +1344,10 @@ async fn health_check_loop(proxy: Arc<ProxyState>) {
         // Check MCP upstream with protocol-level validation
         let (mcp_status, mcp_warning) = check_mcp_endpoint(&proxy.mcp_upstream, &http).await;
 
-        // Discover widgets (reuses shared logic from widgets.rs)
-        let names = mcpr_core::proxy::widgets::discover_widget_names(&proxy).await;
-        let widgets_status = if proxy.widget_source.is_none() {
-            proxy_health::ConnectionStatus::Unknown
-        } else if names.is_empty() {
-            proxy_health::ConnectionStatus::Disconnected
-        } else {
-            proxy_health::ConnectionStatus::Connected
-        };
-        let widget_count = if names.is_empty() {
-            None
-        } else {
-            Some(names.len())
-        };
-
         {
             let mut h = proxy_health::lock_health(&proxy.health);
             h.mcp_status = mcp_status;
             h.mcp_warning = mcp_warning;
-            h.widgets_status = widgets_status;
-            h.widget_count = widget_count;
-            h.widget_names = names;
         }
 
         // Emit heartbeat event via the event bus.
@@ -1390,7 +1361,6 @@ async fn health_check_loop(proxy: Arc<ProxyState>) {
                         proxy: proxy.name.clone(),
                         mcp_status: h.mcp_status.label().to_string(),
                         tunnel_status: h.tunnel_status.label().to_string(),
-                        widgets_status: h.widgets_status.label().to_string(),
                         uptime_secs: h.started_at.elapsed().as_secs(),
                         request_count: h.request_count,
                     },

@@ -40,7 +40,7 @@ Docker is in beta — see [docs/DOCKER.md](docs/DOCKER.md) for volumes, health p
 mcpr sits in front of your MCP app and does three things, in order of how much work each one saves you:
 
 1. **Observe** — records every `tools/call`, `resources/*`, and `prompts/*` request to a local SQLite store. Per-tool p50/p95/max latency, error rates, session traces, client breakdowns, and schema diffs over time. No instrumentation in your app.
-2. **Route** — one upstream per proxy today. JSON-RPC classification, widget and static routing for MCP Apps, and CSP rewriting that emits the shape each AI client (ChatGPT, Claude, Copilot) expects.
+2. **Route** — one upstream per proxy today. JSON-RPC classification, and CSP rewriting that emits the shape each AI client (ChatGPT, Claude, Copilot) expects.
 3. **Authenticate** *(in progress)* — OAuth 2.1 and API key handling at the proxy layer. Your app receives a verified `x-user-id` header instead of implementing auth flows itself.
 
 Running in front of [mcp.usestudykit.com/mcp](https://mcp.usestudykit.com/mcp) today.
@@ -132,11 +132,10 @@ $ mcpr proxy clients
 
 ## Route
 
-Each proxy instance fronts one upstream MCP app. mcpr classifies requests by JSON-RPC shape: MCP methods go to the backend; non-JSON-RPC requests (HTML, JS, CSS, images) go to the widget server if configured.
+Each proxy instance fronts one upstream MCP app. mcpr classifies requests by JSON-RPC shape: MCP methods go to the backend; anything else is forwarded upstream as-is.
 
 ```toml
 mcp = "http://localhost:9000"
-widgets = "http://localhost:4444" # Optional — MCP Apps only
 ```
 
 Multi-upstream routing from a single port is not supported yet. Run one `mcpr proxy` per upstream.
@@ -213,7 +212,6 @@ Data flows one way: proxy → cloud, pushed via a project token from `mcpr proxy
 **Routing & Network**
 - [x] JSON-RPC routing (single upstream per proxy)
 - [x] CSP rewriting
-- [x] Widget / static asset serving
 - [ ] Multi-upstream routing from one port
 
 **Auth**
