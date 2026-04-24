@@ -159,6 +159,12 @@ pub struct CspConfig {
     pub resource_domains: DirectivePolicy,
     pub frame_domains: DirectivePolicy,
     pub widgets: Vec<WidgetScoped>,
+    /// Bare public host (no scheme) declared by the operator — feeds
+    /// `openai/widgetDomain` and the proxy-URL injection into widget CSP.
+    /// When `None`, the runtime falls back to the tunnel URL, and when no
+    /// public origin is available at all (local-only dev) the injection
+    /// is suppressed rather than polluting widget config with `localhost`.
+    pub public_widget_domain: Option<String>,
 }
 
 impl Default for CspConfig {
@@ -171,8 +177,18 @@ impl Default for CspConfig {
             resource_domains: DirectivePolicy::default(),
             frame_domains: DirectivePolicy::strict(),
             widgets: Vec::new(),
+            public_widget_domain: None,
         }
     }
+}
+
+/// True when `url` is a non-empty origin worth injecting into widget CSP.
+///
+/// Local addresses (`localhost`, `127.0.0.1`) and empty strings are treated
+/// as "no public origin" — widgets submitted to ChatGPT or Claude can't reach
+/// them, and leaving localhost in the emitted CSP just ships garbage.
+pub(crate) fn is_public_proxy_origin(url: &str) -> bool {
+    !url.is_empty() && !url.contains("localhost") && !url.contains("127.0.0.1")
 }
 
 impl CspConfig {
@@ -245,8 +261,11 @@ pub fn effective_domains(
 
     // 4. Prepend the proxy URL for directives that need to reach the proxy
     //    itself (API calls, asset loads). Frame is intentionally skipped —
-    //    see module docs. Dedupe preserving first-seen order.
-    let mut out = if directive == Directive::Frame {
+    //    see module docs. The prepend is also suppressed when `proxy_url`
+    //    is empty or loopback: widgets shipped to ChatGPT/Claude can't reach
+    //    a local dev address, so leaving it in the CSP just pollutes the
+    //    submitted template. Dedupe preserving first-seen order.
+    let mut out = if directive == Directive::Frame || !is_public_proxy_origin(proxy_url) {
         Vec::new()
     } else {
         vec![proxy_url.to_string()]
@@ -853,5 +872,65 @@ mod tests {
     fn mode__display() {
         assert_eq!(Mode::Extend.to_string(), "extend");
         assert_eq!(Mode::Replace.to_string(), "replace");
+    }
+
+    // ── is_public_proxy_origin ─────────────────────────────────────────────
+
+    #[test]
+    fn public_origin__accepts_https_host() {
+        assert!(is_public_proxy_origin("https://widgets.example.com"));
+    }
+
+    #[test]
+    fn public_origin__rejects_empty() {
+        assert!(!is_public_proxy_origin(""));
+    }
+
+    #[test]
+    fn public_origin__rejects_localhost() {
+        assert!(!is_public_proxy_origin("http://localhost:9002"));
+    }
+
+    #[test]
+    fn public_origin__rejects_loopback_ip() {
+        assert!(!is_public_proxy_origin("http://127.0.0.1:9002"));
+    }
+
+    // ── effective_domains: localhost suppression ───────────────────────────
+
+    #[test]
+    fn effective__skips_prepend_when_proxy_is_localhost() {
+        // Local-only dev: we declared resource domains but no public origin
+        // is available. The emitted list must NOT contain the loopback URL —
+        // a submitted template should never ship `localhost` in its CSP.
+        let cfg = CspConfig {
+            resource_domains: DirectivePolicy {
+                domains: domains(&["https://cdn.example.com"]),
+                mode: Mode::Extend,
+            },
+            ..CspConfig::default()
+        };
+        let out = effective_domains(
+            &cfg,
+            Directive::Resource,
+            None,
+            &[],
+            "",
+            "http://localhost:9002",
+        );
+        assert_eq!(out, domains(&["https://cdn.example.com"]));
+    }
+
+    #[test]
+    fn effective__skips_prepend_when_proxy_url_empty() {
+        let cfg = CspConfig {
+            connect_domains: DirectivePolicy {
+                domains: domains(&["https://api.example.com"]),
+                mode: Mode::Extend,
+            },
+            ..CspConfig::default()
+        };
+        let out = effective_domains(&cfg, Directive::Connect, None, &[], "", "");
+        assert_eq!(out, domains(&["https://api.example.com"]));
     }
 }

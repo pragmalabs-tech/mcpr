@@ -25,7 +25,7 @@
 
 use serde_json::Value;
 
-use super::csp::{CspConfig, Directive, effective_domains};
+use super::csp::{CspConfig, Directive, effective_domains, is_public_proxy_origin};
 use crate::protocol as jsonrpc;
 
 /// Runtime configuration for response rewriting.
@@ -182,7 +182,11 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
 /// a widget — a tool call result's `_meta`, for example — so non-widget metas
 /// are not polluted with CSP fields they don't need.
 fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &RewriteConfig) {
-    if meta.get("openai/widgetDomain").is_some() {
+    // Only overwrite when we actually have a public domain to write. If
+    // `proxy_domain` is empty (local-only dev with no `publicWidgetDomain`
+    // set), leave the upstream value alone rather than clobbering it with ""
+    // — and never synthesize the key when the upstream didn't declare it.
+    if !config.proxy_domain.is_empty() && meta.get("openai/widgetDomain").is_some() {
         meta["openai/widgetDomain"] = Value::String(config.proxy_domain.clone());
     }
 
@@ -345,6 +349,13 @@ fn write_spec_csp(meta: &mut Value, connect: &[String], resource: &[String], fra
 /// insertion happened — lets callers skip re-serialization on no-op walks.
 #[must_use]
 fn inject_proxy_into_all_csp(value: &mut Value, config: &RewriteConfig) -> bool {
+    // Skip entirely when there is no public origin worth injecting. A
+    // localhost proxy URL in a submitted widget's CSP is useless to the
+    // host (ChatGPT/Claude can't reach it) and just clutters the emitted
+    // config — better to leave the arrays alone.
+    if !is_public_proxy_origin(&config.proxy_url) {
+        return false;
+    }
     let mut mutated = false;
     match value {
         Value::Object(map) => {
@@ -1620,5 +1631,102 @@ mod tests {
         let _ = rewrite_response("resources/list", &mut body, &config);
 
         assert!(body["result"]["resources"][0].get("_meta").is_none());
+    }
+
+    // ── local-only mode: no public origin, don't pollute widget CSP ────────
+
+    fn local_only_config() -> RewriteConfig {
+        // Mirrors what main.rs builds when tunnel is off and
+        // `csp.publicWidgetDomain` is unset: proxy_url stays as the local
+        // bind address for internal wiring, proxy_domain is empty to flag
+        // "no public origin".
+        RewriteConfig {
+            proxy_url: "http://localhost:9002".into(),
+            proxy_domain: String::new(),
+            mcp_upstream: "http://localhost:9000".into(),
+            csp: CspConfig::default(),
+        }
+    }
+
+    #[test]
+    fn rewrite_response__local_only_leaves_widget_domain_untouched() {
+        let config = local_only_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/card",
+                    "_meta": {
+                        "openai/widgetDomain": "dev.example.com"
+                    }
+                }]
+            }
+        });
+
+        let _ = rewrite_response("resources/read", &mut body, &config);
+
+        assert_eq!(
+            body["result"]["contents"][0]["_meta"]["openai/widgetDomain"]
+                .as_str()
+                .unwrap(),
+            "dev.example.com",
+        );
+    }
+
+    #[test]
+    fn rewrite_response__local_only_skips_csp_injection() {
+        let config = local_only_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/card",
+                    "_meta": {
+                        "openai/widgetCSP": {
+                            "connect_domains": ["https://api.example.com"],
+                            "resource_domains": ["https://cdn.example.com"],
+                            "frame_domains": []
+                        }
+                    }
+                }]
+            }
+        });
+
+        let _ = rewrite_response("resources/read", &mut body, &config);
+
+        let csp = &body["result"]["contents"][0]["_meta"]["openai/widgetCSP"];
+        assert_eq!(
+            as_strs(&csp["connect_domains"]),
+            vec!["https://api.example.com"],
+            "localhost proxy_url must not be injected",
+        );
+        assert_eq!(
+            as_strs(&csp["resource_domains"]),
+            vec!["https://cdn.example.com"],
+        );
+    }
+
+    #[test]
+    fn rewrite_response__public_domain_is_injected() {
+        // Sanity: with a public proxy origin, injection still happens.
+        let config = rewrite_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/card",
+                    "_meta": {
+                        "openai/widgetCSP": {
+                            "connect_domains": ["https://api.example.com"],
+                            "resource_domains": [],
+                            "frame_domains": []
+                        }
+                    }
+                }]
+            }
+        });
+
+        let _ = rewrite_response("resources/read", &mut body, &config);
+
+        let connect =
+            as_strs(&body["result"]["contents"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]);
+        assert!(connect.contains(&"https://abc.tunnel.example.com"));
     }
 }

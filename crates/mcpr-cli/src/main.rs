@@ -596,14 +596,40 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         }
     };
 
-    let proxy_domain = public_url
-        .trim_start_matches("https://")
-        .trim_start_matches("http://")
-        .trim_end_matches('/')
-        .to_string();
+    // Resolve the public origin used for widget CSP injection and for the
+    // `openai/widgetDomain` rewrite. Precedence:
+    //   1. `csp.publicWidgetDomain` in mcpr.toml (operator-declared)
+    //   2. tunnel URL (when a tunnel is active)
+    //   3. nothing — local-only dev. `proxy_url` stays as `http://localhost:*`
+    //      for internal wiring, but downstream gates on `is_public_proxy_origin`
+    //      suppress widget injection so `localhost` never leaks into a
+    //      submitted template.
+    let (proxy_url_for_rewrite, proxy_domain) = match cfg.csp.public_widget_domain.as_deref() {
+        Some(domain) => {
+            let bare = domain
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_end_matches('/')
+                .to_string();
+            (format!("https://{bare}"), bare)
+        }
+        None => {
+            let bare = public_url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .trim_end_matches('/')
+                .to_string();
+            let domain = if bare.contains("localhost") || bare.contains("127.0.0.1") {
+                String::new()
+            } else {
+                bare
+            };
+            (public_url.clone(), domain)
+        }
+    };
 
     let rewrite_config = RewriteConfig {
-        proxy_url: public_url.clone(),
+        proxy_url: proxy_url_for_rewrite,
         proxy_domain,
         mcp_upstream: mcp.clone(),
         csp: cfg.csp.clone(),
