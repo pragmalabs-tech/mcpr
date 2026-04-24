@@ -92,17 +92,9 @@ impl<R: Router, T: Transport> Pipeline<R, T> {
 #[allow(non_snake_case)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
 
-    use axum::http::{HeaderMap, Method, StatusCode};
+    use axum::http::{HeaderMap, StatusCode};
     use serde_json::json;
-
-    use crate::event::EventManager;
-    use crate::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
-    use crate::protocol::session::MemorySessionStore;
-    use crate::proxy::ProxyState;
-    use crate::proxy::forwarding::UpstreamClient;
-    use crate::proxy::{CspConfig, RewriteConfig, new_shared_health};
 
     use super::*;
     use crate::proxy::pipeline::envelope::JsonRpcEnvelope;
@@ -110,9 +102,9 @@ mod tests {
         ClientKind, ClientMethod, McpMessage, MessageKind, ToolsMethod,
     };
     use crate::proxy::pipeline::middleware::{Flow, RequestMiddleware, ResponseMiddleware};
+    use crate::proxy::pipeline::middlewares::test_support::{test_context, test_proxy_state};
     use crate::proxy::pipeline::values::{
-        BufferPolicy, Context, Envelope, Intake, McpRequest, McpTransport, Request, Response,
-        Route, Working,
+        BufferPolicy, Envelope, McpRequest, McpTransport, Request, Response, Route,
     };
 
     // ── Fakes ────────────────────────────────────────────────
@@ -197,48 +189,6 @@ mod tests {
     }
 
     // ── Harness ─────────────────────────────────────────────
-
-    fn test_proxy_state() -> Arc<ProxyState> {
-        let handle = EventManager::new().start();
-        Arc::new(ProxyState {
-            name: "driver-test".into(),
-            mcp_upstream: "http://upstream.test".into(),
-            upstream: UpstreamClient {
-                http_client: reqwest::Client::builder()
-                    .connect_timeout(Duration::from_secs(1))
-                    .build()
-                    .unwrap(),
-                semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
-                request_timeout: Duration::from_secs(1),
-            },
-            max_request_body: 1 << 20,
-            max_response_body: 1 << 20,
-            rewrite_config: RewriteConfig {
-                proxy_url: "https://proxy.test".into(),
-                proxy_domain: "proxy.test".into(),
-                mcp_upstream: "http://upstream.test".into(),
-                csp: CspConfig::default(),
-            }
-            .into_swap(),
-            sessions: MemorySessionStore::new(),
-            schema_manager: Arc::new(SchemaManager::new("driver-test", MemorySchemaStore::new())),
-            health: new_shared_health(),
-            event_bus: handle.bus.clone(),
-        })
-    }
-
-    fn test_context(proxy: Arc<ProxyState>) -> Context {
-        Context {
-            intake: Intake {
-                start: Instant::now(),
-                proxy,
-                http_method: Method::POST,
-                path: "/mcp".into(),
-                request_size: 0,
-            },
-            working: Working::default(),
-        }
-    }
 
     fn stub_mcp_request() -> Request {
         let env =
