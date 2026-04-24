@@ -23,6 +23,26 @@ domains = ["cdn.example.com"]
 
 Defaults: `mode = "extend"` for connect and resource, `mode = "replace"` for frame. Frames fail closed.
 
+## Public widget domain
+
+`csp.publicWidgetDomain` is the bare host (no scheme) this proxy is served from publicly. It feeds two things:
+
+1. **`_meta.openai/widgetDomain`** — ChatGPT requires a unique origin per app for submission; `publicWidgetDomain` becomes this value on every widget meta that declared the field upstream.
+2. **The proxy-URL injected into `connect` and `resource` CSP arrays** — widgets need a reachable origin to call back to the proxy for JSON-RPC and asset loads.
+
+```toml
+[csp]
+publicWidgetDomain = "widgets.example.com"
+```
+
+Resolution order:
+
+1. `csp.publicWidgetDomain` if set.
+2. Else the tunnel URL (when `[tunnel].enabled = true`).
+3. Else — local-only dev — **no public origin is available**, so the proxy *skips* the CSP injection and leaves any upstream `openai/widgetDomain` untouched. `localhost` is never written into widget CSP or the `widgetDomain` field; shipping it to ChatGPT would be invalid, and cluttering the local output with it helps no one.
+
+Claude and VS Code don't currently read a `widgetDomain` equivalent — the field is emitted in the OpenAI shape only. The resolution rule is host-agnostic so future spec adoption doesn't require a config rename.
+
 ## Directives
 
 Three independent directive arrays, each a sub-table:
@@ -71,7 +91,7 @@ For each directive, per response:
 2. Strip localhost and the upstream MCP host.
 3. Append the global directive's declared domains.
 4. For each matching `[[csp.widget]]` entry in config order, extend or replace per the widget's directive mode.
-5. For `connect` and `resource`, prepend the proxy URL. Deduplicate.
+5. For `connect` and `resource`, prepend the proxy URL if a public origin is available (see [Public widget domain](#public-widget-domain)). A loopback URL is never prepended. Deduplicate.
 
 Replace semantics are scoped: a global replace only ignores upstream; a widget replace wipes everything accumulated before it.
 
@@ -145,6 +165,7 @@ Loads into `connectDomains` and `resourceDomains` with the given mode. `mode = "
 
 | Field | Type | Default | Description |
 |---|---|---|---|
+| `csp.publicWidgetDomain` | `string` | — | Bare public host (no scheme). Feeds `openai/widgetDomain` and CSP injection. Falls back to tunnel URL when unset; suppresses injection in local-only mode. |
 | `[csp.connectDomains].domains` | `string[]` | `[]` | Domains allowed for `connect-src` |
 | `[csp.connectDomains].mode` | `"extend" \| "replace"` | `"extend"` | Merge mode with upstream |
 | `[csp.resourceDomains].domains` | `string[]` | `[]` | Domains allowed for scripts, styles, images, fonts, media |

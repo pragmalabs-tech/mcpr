@@ -549,6 +549,13 @@ struct FileCspConfig {
     #[serde(rename = "frameDomains")]
     frame_domains: Option<FileDirectivePolicy>,
 
+    /// Bare public host (no scheme) for this proxy. When set, feeds
+    /// `openai/widgetDomain` and the proxy-URL injection; when unset, the
+    /// runtime falls back to the tunnel URL or suppresses injection in
+    /// local-only mode rather than leaking `localhost` into widget config.
+    #[serde(rename = "publicWidgetDomain")]
+    public_widget_domain: Option<String>,
+
     #[serde(rename = "widget")]
     widgets: Vec<WidgetScoped>,
 }
@@ -627,6 +634,10 @@ impl FileCspConfig {
             resource_domains: resource,
             frame_domains: frame,
             widgets: self.widgets,
+            public_widget_domain: self
+                .public_widget_domain
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         }
     }
 }
@@ -1592,6 +1603,32 @@ mod tests {
         assert!(cfg.resource_domains.domains.is_empty());
         assert_eq!(cfg.frame_domains.mode, CspMode::Replace);
         assert!(cfg.widgets.is_empty());
+        assert!(cfg.public_widget_domain.is_none());
+    }
+
+    #[test]
+    fn csp_config__public_widget_domain_parses() {
+        let toml_str = r#"
+            [csp]
+            publicWidgetDomain = "widgets.example.com"
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.csp.into_runtime();
+        assert_eq!(
+            cfg.public_widget_domain.as_deref(),
+            Some("widgets.example.com")
+        );
+    }
+
+    #[test]
+    fn csp_config__public_widget_domain_whitespace_is_trimmed_and_empty_ignored() {
+        let toml_str = r#"
+            [csp]
+            publicWidgetDomain = "   "
+        "#;
+        let file: FileConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.csp.into_runtime();
+        assert!(cfg.public_widget_domain.is_none());
     }
 
     #[test]
