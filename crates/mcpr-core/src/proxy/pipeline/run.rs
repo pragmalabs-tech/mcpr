@@ -105,9 +105,7 @@ mod tests {
     /// captures every emitted event. Returns the bus handle so the test can
     /// call `handle.shutdown().await` before asserting — shutdown drains the
     /// event channel, guaranteeing all `emit()` calls have been observed.
-    fn build_test_proxy(
-        mcp_upstream: &str,
-    ) -> (Arc<ProxyState>, CapturingSink, EventBusHandle) {
+    fn build_test_proxy(mcp_upstream: &str) -> (Arc<ProxyState>, CapturingSink, EventBusHandle) {
         let sink = CapturingSink::default();
         let mut mgr = EventManager::new();
         mgr.register(Box::new(sink.clone()));

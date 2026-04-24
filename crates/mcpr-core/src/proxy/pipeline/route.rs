@@ -159,10 +159,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
         let ctx = mk_ctx(Method::GET, "/mcp", &headers, b"");
-        assert_eq!(
-            classify_request(&ctx, &headers),
-            RequestKind::McpSseStream
-        );
+        assert_eq!(classify_request(&ctx, &headers), RequestKind::McpSseStream);
     }
 
     #[test]
@@ -170,10 +167,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "text/html".parse().unwrap());
         let ctx = mk_ctx(Method::GET, "/mcp", &headers, b"");
-        assert_eq!(
-            classify_request(&ctx, &headers),
-            RequestKind::Passthrough
-        );
+        assert_eq!(classify_request(&ctx, &headers), RequestKind::Passthrough);
     }
 
     // ── Widget paths now passthrough (regression guards for Phase 1) ──
