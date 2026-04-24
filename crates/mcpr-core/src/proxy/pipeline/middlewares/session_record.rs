@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 
 use crate::event::{ProxyEvent, SessionStartEvent};
+use crate::protocol::mcp::{ClientMethod, LifecycleMethod};
 use crate::protocol::session::{SessionState, SessionStore};
-use crate::proxy::pipeline::message::{ClientMethod, LifecycleMethod};
 use crate::proxy::pipeline::middleware::ResponseMiddleware;
 use crate::proxy::pipeline::values::{Context, Response};
 

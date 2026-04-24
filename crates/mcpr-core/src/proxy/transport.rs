@@ -13,13 +13,12 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 use super::ProxyState;
 use super::forwarding::{forward_request, read_body_capped};
 use super::pipeline::driver::Transport;
-use super::pipeline::envelope::JsonRpcEnvelope;
-use super::pipeline::message::{McpMessage, MessageKind, classify_server};
-use super::pipeline::middlewares::shared;
 use super::pipeline::values::{
     BufferPolicy, Context, Envelope, McpRequest, RawRequest, Request, Response, Route,
 };
 use super::sse::{extract_json_from_sse, split_upstream};
+use crate::protocol::jsonrpc::JsonRpcEnvelope;
+use crate::protocol::mcp::{McpMessage, MessageKind, classify_server};
 
 pub struct ProxyTransport;
 
@@ -59,7 +58,7 @@ async fn dispatch_mcp_post(
     upstream: String,
     buffer_policy: BufferPolicy,
 ) -> Response {
-    let body_bytes = Bytes::from(shared::serialize_envelope(&mcp.envelope));
+    let body_bytes = Bytes::from(mcp.envelope.to_bytes());
     let is_streaming = matches!(buffer_policy, BufferPolicy::Streamed);
     let resp = match forward_request(
         &state.upstream,
@@ -232,7 +231,7 @@ mod tests {
     use serde_json::Value;
     use tokio::net::TcpListener;
 
-    use crate::proxy::pipeline::message::{ClientMethod, ServerKind, ToolsMethod};
+    use crate::protocol::mcp::{ClientMethod, ServerKind, ToolsMethod};
     use crate::proxy::pipeline::middlewares::test_support::{
         test_context, test_proxy_state_upstream,
     };
@@ -254,7 +253,7 @@ mod tests {
         McpRequest {
             transport: McpTransport::StreamableHttpPost,
             envelope,
-            kind: crate::proxy::pipeline::message::ClientKind::Request(ClientMethod::parse(method)),
+            kind: crate::protocol::mcp::ClientKind::Request(ClientMethod::parse(method)),
             headers,
             session_hint: None,
         }
@@ -455,8 +454,8 @@ mod tests {
         let req = McpRequest {
             transport: McpTransport::SseLegacyGet,
             envelope: JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"ping"}"#).unwrap(),
-            kind: crate::proxy::pipeline::message::ClientKind::Notification(
-                crate::proxy::pipeline::message::ClientNotifMethod::Unknown("ping".into()),
+            kind: crate::protocol::mcp::ClientKind::Notification(
+                crate::protocol::mcp::ClientNotifMethod::Unknown("ping".into()),
             ),
             headers: HeaderMap::new(),
             session_hint: None,

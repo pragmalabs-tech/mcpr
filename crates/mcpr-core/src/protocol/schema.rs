@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
-use super::McpMethod;
+use super::mcp::{ClientMethod, LifecycleMethod, PromptsMethod, ResourcesMethod, ToolsMethod};
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -54,14 +54,14 @@ pub struct SchemaDiff {
 
 /// Check if an MCP method is a schema discovery method whose response
 /// should be captured.
-pub fn is_schema_method(method: &McpMethod) -> bool {
+pub fn is_schema_method(method: &ClientMethod) -> bool {
     matches!(
         method,
-        McpMethod::Initialize
-            | McpMethod::ToolsList
-            | McpMethod::ResourcesList
-            | McpMethod::ResourcesTemplatesList
-            | McpMethod::PromptsList
+        ClientMethod::Lifecycle(LifecycleMethod::Initialize)
+            | ClientMethod::Tools(ToolsMethod::List)
+            | ClientMethod::Resources(ResourcesMethod::List)
+            | ClientMethod::Resources(ResourcesMethod::TemplatesList)
+            | ClientMethod::Prompts(PromptsMethod::List)
     )
 }
 
@@ -236,21 +236,34 @@ mod tests {
 
     #[test]
     fn is_schema_method__matches_discovery() {
-        assert!(is_schema_method(&McpMethod::Initialize));
-        assert!(is_schema_method(&McpMethod::ToolsList));
-        assert!(is_schema_method(&McpMethod::ResourcesList));
-        assert!(is_schema_method(&McpMethod::ResourcesTemplatesList));
-        assert!(is_schema_method(&McpMethod::PromptsList));
+        assert!(is_schema_method(&ClientMethod::Lifecycle(
+            LifecycleMethod::Initialize
+        )));
+        assert!(is_schema_method(&ClientMethod::Tools(ToolsMethod::List)));
+        assert!(is_schema_method(&ClientMethod::Resources(
+            ResourcesMethod::List
+        )));
+        assert!(is_schema_method(&ClientMethod::Resources(
+            ResourcesMethod::TemplatesList
+        )));
+        assert!(is_schema_method(&ClientMethod::Prompts(
+            PromptsMethod::List
+        )));
     }
 
     #[test]
     fn is_schema_method__rejects_non_discovery() {
-        assert!(!is_schema_method(&McpMethod::ToolsCall));
-        assert!(!is_schema_method(&McpMethod::ResourcesRead));
-        assert!(!is_schema_method(&McpMethod::PromptsGet));
-        assert!(!is_schema_method(&McpMethod::Ping));
-        assert!(!is_schema_method(&McpMethod::Initialized));
-        assert!(!is_schema_method(&McpMethod::NotificationsToolsListChanged));
+        assert!(!is_schema_method(&ClientMethod::Tools(ToolsMethod::Call)));
+        assert!(!is_schema_method(&ClientMethod::Resources(
+            ResourcesMethod::Read
+        )));
+        assert!(!is_schema_method(&ClientMethod::Prompts(
+            PromptsMethod::Get
+        )));
+        assert!(!is_schema_method(&ClientMethod::Ping));
+        // Notifications have a separate enum; is_schema_method only
+        // accepts ClientMethod (request-side), so they can't even be
+        // constructed here. That's the type-level guarantee.
     }
 
     // ── detect_page_status ───────────────────────────────────────────

@@ -8,7 +8,7 @@
 //! Every method enum has an `Unknown(String)` tail variant so non-spec
 //! methods forward unchanged instead of failing classification.
 
-use super::envelope::JsonRpcEnvelope;
+use super::jsonrpc::JsonRpcEnvelope;
 
 /// Shallow envelope paired with its classification. Used inside
 /// `McpRequest` (client direction) and `Response::McpBuffered` (server
@@ -168,6 +168,32 @@ impl ClientMethod {
             "tasks/cancel" => Self::Tasks(TasksMethod::Cancel),
             other => Self::Unknown(other.to_owned()),
         }
+    }
+
+    /// Inverse of [`ClientMethod::parse`]. Returns `None` for
+    /// `Self::Unknown(_)` — unknown methods don't have a canonical
+    /// spec string.
+    pub fn as_str(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Ping => "ping",
+            Self::Lifecycle(LifecycleMethod::Initialize) => "initialize",
+            Self::Tools(ToolsMethod::List) => "tools/list",
+            Self::Tools(ToolsMethod::Call) => "tools/call",
+            Self::Resources(ResourcesMethod::List) => "resources/list",
+            Self::Resources(ResourcesMethod::TemplatesList) => "resources/templates/list",
+            Self::Resources(ResourcesMethod::Read) => "resources/read",
+            Self::Resources(ResourcesMethod::Subscribe) => "resources/subscribe",
+            Self::Resources(ResourcesMethod::Unsubscribe) => "resources/unsubscribe",
+            Self::Prompts(PromptsMethod::List) => "prompts/list",
+            Self::Prompts(PromptsMethod::Get) => "prompts/get",
+            Self::Completion(CompletionMethod::Complete) => "completion/complete",
+            Self::Logging(LoggingMethod::SetLevel) => "logging/setLevel",
+            Self::Tasks(TasksMethod::List) => "tasks/list",
+            Self::Tasks(TasksMethod::Get) => "tasks/get",
+            Self::Tasks(TasksMethod::Result) => "tasks/result",
+            Self::Tasks(TasksMethod::Cancel) => "tasks/cancel",
+            Self::Unknown(_) => return None,
+        })
     }
 }
 

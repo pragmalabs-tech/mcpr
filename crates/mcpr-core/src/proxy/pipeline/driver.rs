@@ -97,10 +97,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::proxy::pipeline::envelope::JsonRpcEnvelope;
-    use crate::proxy::pipeline::message::{
-        ClientKind, ClientMethod, McpMessage, MessageKind, ToolsMethod,
-    };
+    use crate::protocol::jsonrpc::JsonRpcEnvelope;
+    use crate::protocol::mcp::{ClientKind, ClientMethod, McpMessage, MessageKind, ToolsMethod};
     use crate::proxy::pipeline::middleware::{Flow, RequestMiddleware, ResponseMiddleware};
     use crate::proxy::pipeline::middlewares::test_support::{test_context, test_proxy_state};
     use crate::proxy::pipeline::values::{
@@ -207,7 +205,7 @@ mod tests {
             JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#).unwrap();
         let message = McpMessage {
             envelope: env,
-            kind: MessageKind::Server(crate::proxy::pipeline::message::ServerKind::Result),
+            kind: MessageKind::Server(crate::protocol::mcp::ServerKind::Result),
         };
         Response::McpBuffered {
             envelope: Envelope::Json,
@@ -459,9 +457,7 @@ mod tests {
                             br#"{"jsonrpc":"2.0","id":42,"result":{"tools":[]}}"#,
                         )
                         .unwrap(),
-                        kind: MessageKind::Server(
-                            crate::proxy::pipeline::message::ServerKind::Result,
-                        ),
+                        kind: MessageKind::Server(crate::protocol::mcp::ServerKind::Result),
                     },
                     status: StatusCode::OK,
                     headers: HeaderMap::new(),

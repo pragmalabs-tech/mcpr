@@ -1,15 +1,15 @@
 //! Pure `(Request, Config) -> Route` mapping. No I/O.
 //!
-//! Owns the `BufferPolicy` table that today lives on
-//! `McpMethod::needs_response_buffering`. The table moves here so
-//! buffering is a routing decision, not an intrinsic method property.
+//! Owns the `BufferPolicy` table — buffering is a routing decision,
+//! not an intrinsic method property, so it lives here rather than on
+//! the method enum.
 
 use super::pipeline::driver::Router;
-use super::pipeline::message::{
-    ClientKind, ClientMethod, LifecycleMethod, PromptsMethod, ResourcesMethod, ToolsMethod,
-};
 use super::pipeline::stubs::UrlMap;
 use super::pipeline::values::{BufferPolicy, Context, McpTransport, Request, Route};
+use crate::protocol::mcp::{
+    ClientKind, ClientMethod, LifecycleMethod, PromptsMethod, ResourcesMethod, ToolsMethod,
+};
 
 pub struct ProxyRouter;
 
@@ -68,7 +68,7 @@ mod tests {
     use axum::http::{HeaderMap, Method};
     use serde_json::Value;
 
-    use crate::proxy::pipeline::message::{CompletionMethod, LoggingMethod, TasksMethod};
+    use crate::protocol::mcp::{CompletionMethod, LoggingMethod, TasksMethod};
     use crate::proxy::pipeline::middlewares::test_support::{
         mcp_request, test_context, test_proxy_state,
     };
@@ -162,8 +162,8 @@ mod tests {
         let proxy = test_proxy_state();
         let cx = test_context(proxy);
         // `mcp_request` hard-codes id=1, so build a notification inline.
-        use crate::proxy::pipeline::envelope::JsonRpcEnvelope;
-        use crate::proxy::pipeline::message::ClientNotifMethod;
+        use crate::protocol::jsonrpc::JsonRpcEnvelope;
+        use crate::protocol::mcp::ClientNotifMethod;
         use crate::proxy::pipeline::values::{McpRequest, McpTransport};
         let envelope =
             JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
@@ -185,8 +185,8 @@ mod tests {
 
     #[tokio::test]
     async fn route__sse_legacy_intake_is_sse_legacy_route() {
-        use crate::proxy::pipeline::envelope::JsonRpcEnvelope;
-        use crate::proxy::pipeline::message::ClientNotifMethod;
+        use crate::protocol::jsonrpc::JsonRpcEnvelope;
+        use crate::protocol::mcp::ClientNotifMethod;
         use crate::proxy::pipeline::values::{McpRequest, McpTransport};
         let proxy = test_proxy_state();
         let cx = test_context(proxy);

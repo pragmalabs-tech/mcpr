@@ -19,10 +19,10 @@
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, Uri, header};
 
-use super::pipeline::envelope::JsonRpcEnvelope;
-use super::pipeline::message::{ClientKind, ClientNotifMethod, classify_client};
 use super::pipeline::stubs::SessionId;
 use super::pipeline::values::{McpRequest, McpTransport, RawRequest, Request};
+use crate::protocol::jsonrpc::JsonRpcEnvelope;
+use crate::protocol::mcp::{ClientKind, ClientNotifMethod, classify_client};
 
 pub fn from_axum_parts(method: Method, headers: HeaderMap, uri: Uri, body: Bytes) -> Request {
     let path = uri.path().to_string();
@@ -106,7 +106,7 @@ fn session_hint_from_headers(headers: &HeaderMap) -> Option<SessionId> {
 mod tests {
     use super::*;
 
-    use crate::proxy::pipeline::message::{ClientMethod, LifecycleMethod, ToolsMethod};
+    use crate::protocol::mcp::{ClientMethod, LifecycleMethod, ToolsMethod};
 
     fn uri(path: &str) -> Uri {
         path.parse().unwrap()

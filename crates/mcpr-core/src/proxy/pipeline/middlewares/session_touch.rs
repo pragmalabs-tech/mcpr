@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 
+use crate::protocol::mcp::{ClientKind, ClientNotifMethod};
 use crate::protocol::session::{SessionState, SessionStore};
-use crate::proxy::pipeline::message::{ClientKind, ClientNotifMethod};
 use crate::proxy::pipeline::middleware::{Flow, RequestMiddleware};
 use crate::proxy::pipeline::values::{Context, Request};
 
@@ -50,7 +50,7 @@ mod tests {
     use axum::http::{HeaderMap, Method};
     use serde_json::Value;
 
-    use crate::proxy::pipeline::message::{ClientMethod, ToolsMethod};
+    use crate::protocol::mcp::{ClientMethod, ToolsMethod};
     use crate::proxy::pipeline::middlewares::test_support::{
         mcp_notification, mcp_request, test_context, test_proxy_state,
     };

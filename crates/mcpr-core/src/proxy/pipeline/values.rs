@@ -20,9 +20,9 @@ use crate::proxy::ProxyState;
 use crate::proxy::forwarding::build_response;
 use crate::proxy::sse::wrap_as_sse;
 
-use super::envelope::JsonRpcEnvelope;
-use super::message::{ClientKind, ClientMethod, McpMessage};
-use super::middlewares::shared;
+use crate::protocol::jsonrpc::JsonRpcEnvelope;
+use crate::protocol::mcp::{ClientKind, ClientMethod, McpMessage};
+
 use super::stubs::{OAuthKind, SessionId, TagSet, UrlMap};
 
 // ── Request side ─────────────────────────────────────────────
@@ -148,7 +148,7 @@ impl IntoResponse for Response {
                 status,
                 mut headers,
             } => {
-                let json_bytes = shared::serialize_envelope(&message.envelope);
+                let json_bytes = message.envelope.to_bytes();
                 let (bytes, ct) = match env {
                     Envelope::Json => (json_bytes, "application/json"),
                     Envelope::Sse => (wrap_as_sse(&json_bytes), "text/event-stream"),

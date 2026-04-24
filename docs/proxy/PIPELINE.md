@@ -72,7 +72,7 @@ The axum edge wraps the pipeline in `DefaultBodyLimit`, `tower::limit::Concurren
 
 ## Types
 
-All types live in `mcpr-core::proxy::pipeline::values` unless noted.
+Spec types (`JsonRpcEnvelope`, `McpMessage`, method enums) live in `mcpr-core::protocol::jsonrpc` and `mcpr-core::protocol::mcp` — that's the pure MCP spec layer. Proxy-shaped types (`Request`, `Response`, `Route`, `Context`) live in `mcpr-core::proxy::pipeline::values`.
 
 ### `Request`
 

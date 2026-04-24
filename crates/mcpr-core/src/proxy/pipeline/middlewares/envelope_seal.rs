@@ -14,8 +14,6 @@ use crate::proxy::pipeline::middleware::ResponseMiddleware;
 use crate::proxy::pipeline::values::{Context, Envelope, Response};
 use crate::proxy::sse::wrap_as_sse;
 
-use super::shared;
-
 pub struct EnvelopeSealMiddleware;
 
 #[async_trait]
@@ -35,7 +33,7 @@ impl ResponseMiddleware for EnvelopeSealMiddleware {
             return resp;
         };
 
-        let json_bytes = shared::serialize_envelope(&message.envelope);
+        let json_bytes = message.envelope.to_bytes();
         let (bytes, ct) = match envelope {
             Envelope::Json => (json_bytes, "application/json"),
             Envelope::Sse => (wrap_as_sse(&json_bytes), "text/event-stream"),
@@ -71,8 +69,8 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
     use serde_json::Value;
 
-    use crate::proxy::pipeline::envelope::JsonRpcEnvelope;
-    use crate::proxy::pipeline::message::{McpMessage, MessageKind, ServerKind};
+    use crate::protocol::jsonrpc::JsonRpcEnvelope;
+    use crate::protocol::mcp::{McpMessage, MessageKind, ServerKind};
     use crate::proxy::pipeline::middlewares::test_support::{test_context, test_proxy_state};
 
     fn buffered(envelope: Envelope, body: &str) -> Response {

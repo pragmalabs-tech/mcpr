@@ -26,7 +26,6 @@
 use serde_json::Value;
 
 use super::csp::{CspConfig, Directive, effective_domains, is_public_proxy_origin};
-use crate::protocol as jsonrpc;
 
 /// Runtime configuration for response rewriting.
 #[derive(Clone)]
@@ -61,7 +60,7 @@ impl RewriteConfig {
 pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) -> bool {
     let mut mutated = false;
     match method {
-        jsonrpc::TOOLS_LIST => {
+        "tools/list" => {
             if let Some(tools) = body
                 .get_mut("result")
                 .and_then(|r| r.get_mut("tools"))
@@ -75,13 +74,13 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 }
             }
         }
-        jsonrpc::TOOLS_CALL => {
+        "tools/call" => {
             if let Some(meta) = body.get_mut("result").and_then(|r| r.get_mut("_meta")) {
                 rewrite_widget_meta(meta, None, config);
                 mutated = true;
             }
         }
-        jsonrpc::RESOURCES_LIST => {
+        "resources/list" => {
             if let Some(resources) = body
                 .get_mut("result")
                 .and_then(|r| r.get_mut("resources"))
@@ -106,7 +105,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 }
             }
         }
-        jsonrpc::RESOURCES_TEMPLATES_LIST => {
+        "resources/templates/list" => {
             if let Some(templates) = body
                 .get_mut("result")
                 .and_then(|r| r.get_mut("resourceTemplates"))
@@ -129,7 +128,7 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
                 }
             }
         }
-        jsonrpc::RESOURCES_READ => {
+        "resources/read" => {
             if let Some(contents) = body
                 .get_mut("result")
                 .and_then(|r| r.get_mut("contents"))

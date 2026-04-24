@@ -9,8 +9,7 @@
 
 use async_trait::async_trait;
 
-use crate::protocol;
-use crate::proxy::pipeline::message::{MessageKind, ServerKind, ServerNotifMethod};
+use crate::protocol::mcp::{MessageKind, ServerKind, ServerNotifMethod};
 use crate::proxy::pipeline::middleware::ResponseMiddleware;
 use crate::proxy::pipeline::values::{Context, Response};
 
@@ -31,9 +30,9 @@ impl ResponseMiddleware for SchemaStaleMiddleware {
             return resp;
         };
         let method = match n {
-            ServerNotifMethod::ToolsListChanged => protocol::TOOLS_LIST,
-            ServerNotifMethod::ResourcesListChanged => protocol::RESOURCES_LIST,
-            ServerNotifMethod::PromptsListChanged => protocol::PROMPTS_LIST,
+            ServerNotifMethod::ToolsListChanged => "tools/list",
+            ServerNotifMethod::ResourcesListChanged => "resources/list",
+            ServerNotifMethod::PromptsListChanged => "prompts/list",
             _ => return resp,
         };
         cx.intake.proxy.schema_manager.mark_stale(method);

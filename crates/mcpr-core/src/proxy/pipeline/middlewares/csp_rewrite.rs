@@ -16,12 +16,10 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::proxy::pipeline::message::{ClientMethod, ResourcesMethod, ToolsMethod};
+use crate::protocol::mcp::{ClientMethod, ResourcesMethod, ToolsMethod};
 use crate::proxy::pipeline::middleware::ResponseMiddleware;
 use crate::proxy::pipeline::values::{Context, Response};
 use crate::proxy::{RewriteConfig, rewrite_response};
-
-use super::shared;
 
 /// CSP-shaped keys that `rewrite_response` can mutate. If none of these
 /// appear as a substring in the `result` bytes, there is nothing to
@@ -86,7 +84,7 @@ impl ResponseMiddleware for CspRewriteMiddleware {
             .working
             .request_method
             .as_ref()
-            .and_then(shared::client_method_str)
+            .and_then(crate::protocol::mcp::ClientMethod::as_str)
             .unwrap_or("");
         let Ok(result_val) = serde_json::from_slice::<Value>(raw_bytes.unwrap()) else {
             return Response::McpBuffered {

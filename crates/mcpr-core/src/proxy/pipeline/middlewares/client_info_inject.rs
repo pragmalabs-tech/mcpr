@@ -7,7 +7,7 @@
 
 use async_trait::async_trait;
 
-use crate::proxy::pipeline::message::{ClientKind, ClientMethod, LifecycleMethod};
+use crate::protocol::mcp::{ClientKind, ClientMethod, LifecycleMethod};
 use crate::proxy::pipeline::middleware::{Flow, RequestMiddleware};
 use crate::proxy::pipeline::values::{Context, Request};
 

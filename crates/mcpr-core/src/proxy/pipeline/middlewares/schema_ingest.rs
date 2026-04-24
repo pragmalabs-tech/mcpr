@@ -10,13 +10,10 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::event::{ProxyEvent, SchemaVersionCreatedEvent};
-use crate::protocol::McpMethod;
+use crate::protocol::mcp::{MessageKind, ServerKind};
 use crate::protocol::schema as proto_schema;
-use crate::proxy::pipeline::message::{MessageKind, ServerKind};
 use crate::proxy::pipeline::middleware::ResponseMiddleware;
 use crate::proxy::pipeline::values::{Context, Response};
-
-use super::shared;
 
 pub struct SchemaIngestMiddleware;
 
@@ -37,13 +34,12 @@ impl ResponseMiddleware for SchemaIngestMiddleware {
         let Some(method) = cx.working.request_method.as_ref() else {
             return resp;
         };
-        let Some(method_str) = shared::client_method_str(method) else {
-            return resp;
-        };
-        let mcp_method = McpMethod::parse(method_str);
-        if !proto_schema::is_schema_method(&mcp_method) {
+        if !proto_schema::is_schema_method(method) {
             return resp;
         }
+        let Some(method_str) = method.as_str() else {
+            return resp;
+        };
         let Some(result_val) = message.envelope.result_as::<Value>() else {
             return resp;
         };
@@ -96,7 +92,7 @@ mod tests {
 
     use axum::http::StatusCode;
 
-    use crate::proxy::pipeline::message::{ClientMethod, ToolsMethod};
+    use crate::protocol::mcp::{ClientMethod, ToolsMethod};
     use crate::proxy::pipeline::middlewares::test_support::{
         mcp_buffered_response, set_request_method, test_context, test_proxy_with_sink,
     };

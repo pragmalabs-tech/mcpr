@@ -3,8 +3,8 @@
 
 use async_trait::async_trait;
 
+use crate::protocol::mcp::{ClientMethod, LifecycleMethod};
 use crate::proxy::lock_health;
-use crate::proxy::pipeline::message::{ClientMethod, LifecycleMethod};
 use crate::proxy::pipeline::middleware::ResponseMiddleware;
 use crate::proxy::pipeline::values::{Context, Response};
 
@@ -48,8 +48,8 @@ mod tests {
     use axum::body::Body;
     use axum::http::{HeaderMap, StatusCode};
 
+    use crate::protocol::mcp::{ClientMethod, ToolsMethod};
     use crate::proxy::lock_health;
-    use crate::proxy::pipeline::message::{ClientMethod, ToolsMethod};
     use crate::proxy::pipeline::middlewares::test_support::{
         mcp_buffered_response, set_request_method, test_context, test_proxy_state,
     };

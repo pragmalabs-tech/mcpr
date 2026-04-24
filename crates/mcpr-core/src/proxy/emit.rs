@@ -117,7 +117,7 @@ fn derive_method_and_tool(cx: &Context) -> (Option<String>, Option<String>) {
         .working
         .request_method
         .as_ref()
-        .and_then(shared::client_method_str)
+        .and_then(crate::protocol::mcp::ClientMethod::as_str)
         .map(str::to_owned);
     let mcp_method_str = match (method_str, http_get_is_sse) {
         (Some(m), _) => Some(m),
@@ -205,8 +205,8 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 
     use crate::event::types::StageTimings;
-    use crate::proxy::pipeline::envelope::JsonRpcEnvelope;
-    use crate::proxy::pipeline::message::{
+    use crate::protocol::jsonrpc::JsonRpcEnvelope;
+    use crate::protocol::mcp::{
         ClientMethod, LifecycleMethod, McpMessage, MessageKind, ServerKind, ToolsMethod,
     };
     use crate::proxy::pipeline::middlewares::test_support::{test_context, test_proxy_state};

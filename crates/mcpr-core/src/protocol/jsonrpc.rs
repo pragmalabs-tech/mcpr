@@ -1,16 +1,20 @@
-//! Shallow JSON-RPC envelope for the target proxy pipeline.
+//! Shallow JSON-RPC 2.0 envelope.
 //!
-//! See `PIPELINE.md` §Types. Intake parses only
-//! the envelope: `jsonrpc`, `id`, `method`, `params`, `result`, `error`.
-//! `params` and `result` stay as [`RawValue`] — unparsed bytes — until a
-//! middleware opts in to a typed view via [`JsonRpcEnvelope::params_as`]
-//! or [`JsonRpcEnvelope::result_as`].
+//! [`JsonRpcEnvelope::parse`] extracts `jsonrpc`, `id`, `method`,
+//! `params`, `result`, `error` in one pass. `params` and `result` stay
+//! as [`RawValue`] — unparsed bytes — until a caller opts in to a typed
+//! view via [`JsonRpcEnvelope::params_as`] or
+//! [`JsonRpcEnvelope::result_as`].
 //!
-//! MCP 2025-11-25 does not batch, so [`JsonRpcEnvelope::parse`] rejects
-//! top-level JSON arrays.
+//! [`JsonRpcEnvelope::to_bytes`] is the inverse — reassemble the
+//! envelope into JSON bytes, typically before forwarding.
+//!
+//! MCP 2025-11-25 does not batch, so `parse` rejects top-level JSON
+//! arrays with [`ParseError::InvalidShape`].
 
 use serde::{Deserialize, Deserializer, de::DeserializeOwned};
 use serde_json::value::RawValue;
+use serde_json::{Map, Value};
 
 /// Shallow parse of a single JSON-RPC 2.0 message.
 #[derive(Debug, Clone)]
@@ -159,6 +163,57 @@ impl JsonRpcEnvelope {
     pub fn result_as<T: DeserializeOwned>(&self) -> Option<T> {
         let raw = self.result.as_ref()?;
         serde_json::from_str(raw.get()).ok()
+    }
+
+    /// Reassemble the envelope into JSON-RPC 2.0 bytes.
+    ///
+    /// Used when forwarding upstream (request body) and when sealing a
+    /// buffered response. The inner `RawValue` fields are re-inlined
+    /// verbatim — no re-parsing. Parse failures on the cached bytes
+    /// would have been caught by [`JsonRpcEnvelope::parse`], so we
+    /// default to `Null` rather than panic.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut map = Map::with_capacity(5);
+        map.insert("jsonrpc".into(), Value::String("2.0".into()));
+        if let Some(id) = &self.id {
+            map.insert("id".into(), id_to_value(id));
+        }
+        if let Some(method) = &self.method {
+            map.insert("method".into(), Value::String(method.clone()));
+        }
+        if let Some(params) = &self.params {
+            map.insert(
+                "params".into(),
+                serde_json::from_str(params.get()).unwrap_or(Value::Null),
+            );
+        }
+        if let Some(result) = &self.result {
+            map.insert(
+                "result".into(),
+                serde_json::from_str(result.get()).unwrap_or(Value::Null),
+            );
+        }
+        if let Some(error) = &self.error {
+            let mut err = Map::with_capacity(3);
+            err.insert("code".into(), Value::Number((error.code as i64).into()));
+            err.insert("message".into(), Value::String(error.message.clone()));
+            if let Some(data) = &error.data {
+                err.insert(
+                    "data".into(),
+                    serde_json::from_str(data.get()).unwrap_or(Value::Null),
+                );
+            }
+            map.insert("error".into(), Value::Object(err));
+        }
+        serde_json::to_vec(&Value::Object(map)).unwrap_or_default()
+    }
+}
+
+fn id_to_value(id: &JsonRpcId) -> Value {
+    match id {
+        JsonRpcId::Number(n) => Value::Number((*n).into()),
+        JsonRpcId::String(s) => Value::String(s.clone()),
+        JsonRpcId::Null => Value::Null,
     }
 }
 

@@ -4,8 +4,6 @@
 //! [`crate::proxy::build_default_pipeline`].
 
 pub mod driver;
-pub mod envelope;
-pub mod message;
 pub mod middleware;
 pub mod middlewares;
 pub mod stubs;
