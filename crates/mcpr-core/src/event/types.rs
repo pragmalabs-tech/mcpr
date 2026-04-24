@@ -108,9 +108,6 @@ pub struct StageTimings {
     /// `SchemaManager::ingest` + stale-flag check.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schema_us: Option<u32>,
-    /// Widget overlay attempt (`resources/read` with `ui://widget/*`).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub widget_overlay_us: Option<u32>,
     /// Marker scan (`rewrite::has_markers`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_scan_us: Option<u32>,
@@ -156,7 +153,6 @@ pub struct HeartbeatEvent {
     pub proxy: String,
     pub mcp_status: String,
     pub tunnel_status: String,
-    pub widgets_status: String,
     pub uptime_secs: u64,
     pub request_count: u64,
 }

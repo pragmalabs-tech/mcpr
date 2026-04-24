@@ -6,7 +6,7 @@
 //! `Stream` based on whether the response may need mutation. The MCP
 //! method is embedded so handlers don't need to re-look-up.
 
-use axum::http::{HeaderMap, Method, header};
+use axum::http::{HeaderMap, Method};
 
 use super::context::RequestContext;
 use crate::protocol::McpMethod;
@@ -14,14 +14,8 @@ use crate::protocol::McpMethod;
 /// Shape-aware classification the pipeline dispatches on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RequestKind {
-    /// Widget HTML page: `GET /widgets/{name}.html`.
-    WidgetHtml(String),
-    /// Widget list page: `GET /widgets[/]`.
-    WidgetList,
-    /// Static widget asset (JS/CSS/images/fonts) served via widget source.
-    WidgetAsset,
     /// MCP POST whose response may need mutation (`tools/*`, `resources/*`).
-    /// Handler buffers the body so it can scan, maybe-rewrite, maybe-overlay.
+    /// Handler buffers the body so it can scan and maybe-rewrite.
     McpPostBuffer(McpMethod),
     /// MCP POST whose response never needs mutation (initialize, ping,
     /// notifications, prompts, completion, logging). Handler streams the
@@ -34,31 +28,7 @@ pub enum RequestKind {
 }
 
 /// Classify the request. Pure function: only reads its inputs.
-pub fn classify_request(
-    ctx: &RequestContext,
-    headers: &HeaderMap,
-    has_widgets: bool,
-) -> RequestKind {
-    let path = ctx.path.as_str();
-
-    // Widget HTML / list live under /widgets regardless of widget source.
-    if ctx.http_method == Method::GET {
-        if let Some(name) = path
-            .strip_prefix("/widgets/")
-            .and_then(|s| s.strip_suffix(".html"))
-        {
-            return RequestKind::WidgetHtml(name.to_string());
-        }
-        if path == "/widgets" || path == "/widgets/" {
-            return RequestKind::WidgetList;
-        }
-    }
-
-    // Static widget assets only when a widget source is configured.
-    if ctx.http_method == Method::GET && has_widgets && is_widget_asset(path, headers) {
-        return RequestKind::WidgetAsset;
-    }
-
+pub fn classify_request(ctx: &RequestContext, _headers: &HeaderMap) -> RequestKind {
     // MCP POST — the most common case. Split on whether the response
     // can be mutated for this method.
     if ctx.http_method == Method::POST && ctx.jsonrpc.is_some() {
@@ -81,50 +51,13 @@ pub fn classify_request(
     RequestKind::Passthrough
 }
 
-/// `true` when the path or Accept header looks like a static asset a widget
-/// bundle would request.
-fn is_widget_asset(path: &str, headers: &HeaderMap) -> bool {
-    let ext = path.rsplit('.').next().unwrap_or("");
-    if matches!(
-        ext,
-        "js" | "mjs"
-            | "css"
-            | "html"
-            | "svg"
-            | "png"
-            | "jpg"
-            | "jpeg"
-            | "gif"
-            | "ico"
-            | "woff"
-            | "woff2"
-            | "ttf"
-            | "eot"
-            | "map"
-            | "webp"
-    ) {
-        return true;
-    }
-
-    if let Some(accept) = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok())
-        && (accept.contains("text/html")
-            || accept.contains("text/css")
-            || accept.contains("image/")
-            || accept.contains("font/")
-            || accept.contains("application/javascript"))
-    {
-        return true;
-    }
-
-    false
-}
-
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
     use std::time::Instant;
 
     use axum::body::Bytes;
+    use axum::http::header;
 
     use super::*;
     use crate::proxy::pipeline::parser::build_request_context;
@@ -146,7 +79,7 @@ mod tests {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#;
         let ctx = mk_ctx(Method::POST, "/mcp", &HeaderMap::new(), body);
         assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), false),
+            classify_request(&ctx, &HeaderMap::new()),
             RequestKind::McpPostBuffer(McpMethod::ToolsCall)
         );
     }
@@ -158,7 +91,7 @@ mod tests {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
         let ctx = mk_ctx(Method::POST, "/mcp", &HeaderMap::new(), body);
         assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), false),
+            classify_request(&ctx, &HeaderMap::new()),
             RequestKind::McpPostBuffer(McpMethod::Initialize)
         );
     }
@@ -168,7 +101,7 @@ mod tests {
         let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
         let ctx = mk_ctx(Method::POST, "/mcp", &HeaderMap::new(), body);
         assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), false),
+            classify_request(&ctx, &HeaderMap::new()),
             RequestKind::McpPostStream(McpMethod::Ping)
         );
     }
@@ -191,7 +124,7 @@ mod tests {
                 format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{method_str}"}}"#).into_bytes();
             let ctx = mk_ctx(Method::POST, "/mcp", &HeaderMap::new(), &body);
             assert_eq!(
-                classify_request(&ctx, &HeaderMap::new(), false),
+                classify_request(&ctx, &HeaderMap::new()),
                 RequestKind::McpPostBuffer(expected),
                 "method {method_str} should route to McpPostBuffer"
             );
@@ -203,7 +136,7 @@ mod tests {
         let body = br#"{"client_name":"My App"}"#;
         let ctx = mk_ctx(Method::POST, "/register", &HeaderMap::new(), body);
         assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), false),
+            classify_request(&ctx, &HeaderMap::new()),
             RequestKind::Passthrough
         );
 
@@ -214,7 +147,7 @@ mod tests {
             b"grant_type=x&client_id=y",
         );
         assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), false),
+            classify_request(&ctx, &HeaderMap::new()),
             RequestKind::Passthrough
         );
     }
@@ -227,7 +160,7 @@ mod tests {
         headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
         let ctx = mk_ctx(Method::GET, "/mcp", &headers, b"");
         assert_eq!(
-            classify_request(&ctx, &headers, false),
+            classify_request(&ctx, &headers),
             RequestKind::McpSseStream
         );
     }
@@ -237,83 +170,40 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "text/html".parse().unwrap());
         let ctx = mk_ctx(Method::GET, "/mcp", &headers, b"");
-        // has_widgets=false — no widget asset route, HTML accept doesn't imply SSE.
         assert_eq!(
-            classify_request(&ctx, &headers, false),
+            classify_request(&ctx, &headers),
             RequestKind::Passthrough
         );
     }
 
-    #[test]
-    fn classify__sse_accept_wins_over_widgets() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
-        let ctx = mk_ctx(Method::GET, "/mcp", &headers, b"");
-        assert_eq!(
-            classify_request(&ctx, &headers, true),
-            RequestKind::McpSseStream
-        );
-    }
-
-    // ── Widget routes ──
+    // ── Widget paths now passthrough (regression guards for Phase 1) ──
+    //
+    // Widget static-serving was removed. These three tests fail loudly if
+    // anyone reintroduces a `/widgets/...` or static-asset branch.
 
     #[test]
-    fn classify__widget_html_matches_prefix() {
+    fn classify__widget_html_path_is_now_passthrough() {
         let ctx = mk_ctx(Method::GET, "/widgets/foo.html", &HeaderMap::new(), b"");
         assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), false),
-            RequestKind::WidgetHtml("foo".to_string())
-        );
-    }
-
-    #[test]
-    fn classify__widget_list_at_widgets_root() {
-        let ctx = mk_ctx(Method::GET, "/widgets", &HeaderMap::new(), b"");
-        assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), false),
-            RequestKind::WidgetList
-        );
-    }
-
-    #[test]
-    fn classify__widget_asset_js_with_widgets() {
-        let ctx = mk_ctx(Method::GET, "/assets/main.js", &HeaderMap::new(), b"");
-        assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), true),
-            RequestKind::WidgetAsset
-        );
-    }
-
-    #[test]
-    fn classify__widget_asset_image_accept_with_widgets() {
-        let mut headers = HeaderMap::new();
-        headers.insert(header::ACCEPT, "image/png".parse().unwrap());
-        let ctx = mk_ctx(Method::GET, "/logo", &headers, b"");
-        assert_eq!(
-            classify_request(&ctx, &headers, true),
-            RequestKind::WidgetAsset
-        );
-    }
-
-    #[test]
-    fn classify__widget_asset_gated_by_has_widgets() {
-        let ctx = mk_ctx(Method::GET, "/assets/main.js", &HeaderMap::new(), b"");
-        assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), false),
+            classify_request(&ctx, &HeaderMap::new()),
             RequestKind::Passthrough
         );
     }
 
     #[test]
-    fn classify__well_known_not_widget_asset() {
-        let ctx = mk_ctx(
-            Method::GET,
-            "/.well-known/oauth-authorization-server",
-            &HeaderMap::new(),
-            b"",
-        );
+    fn classify__widget_list_path_is_now_passthrough() {
+        let ctx = mk_ctx(Method::GET, "/widgets", &HeaderMap::new(), b"");
         assert_eq!(
-            classify_request(&ctx, &HeaderMap::new(), true),
+            classify_request(&ctx, &HeaderMap::new()),
+            RequestKind::Passthrough
+        );
+    }
+
+    #[test]
+    fn classify__static_asset_extension_is_now_passthrough() {
+        let ctx = mk_ctx(Method::GET, "/assets/main.js", &HeaderMap::new(), b"");
+        assert_eq!(
+            classify_request(&ctx, &HeaderMap::new()),
             RequestKind::Passthrough
         );
     }

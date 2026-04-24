@@ -117,14 +117,12 @@ pub fn log_startup(
     port: u16,
     public_url: &str,
     mcp_upstream: &str,
-    widgets: Option<&str>,
     cloud_server: Option<&str>,
 ) {
     let mut h = mcpr_core::proxy::lock_health(health);
     h.proxy_url = format!("http://localhost:{port}");
     h.tunnel_url = public_url.to_string();
     h.mcp_upstream = mcp_upstream.to_string();
-    h.widgets = widgets.unwrap_or("(none)").to_string();
     drop(h);
 
     let localhost = format!("http://localhost:{port}");
@@ -137,9 +135,6 @@ pub fn log_startup(
         eprintln!("  tunnel:   {public_url}");
     }
     eprintln!("  upstream: {mcp_upstream}");
-    if let Some(w) = widgets {
-        eprintln!("  widgets:  {w}");
-    }
 
     // Studio link — prefer tunnel URL if available.
     let studio_target = if has_tunnel { public_url } else { &localhost };

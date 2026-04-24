@@ -1,6 +1,6 @@
 //! `forward_and_buffer` — for MCP POST methods whose responses may
 //! need mutation (`tools/*`, `resources/*`). Buffers the upstream body,
-//! decodes optional SSE framing, parses JSON, runs schema/widget/rewrite
+//! decodes optional SSE framing, parses JSON, runs schema/rewrite
 //! steps, and only reserializes if something actually changed. When the
 //! body doesn't need mutation it passes through byte-for-byte.
 
@@ -16,7 +16,7 @@ use crate::proxy::ProxyState;
 use crate::proxy::forwarding::{build_response, read_body_capped};
 use crate::proxy::pipeline::context::RequestContext;
 use crate::proxy::pipeline::emit::{ResponseSummary, emit_request_event};
-use crate::proxy::pipeline::steps::{health, rewrite, schema, session, widget};
+use crate::proxy::pipeline::steps::{health, rewrite, schema, session};
 use crate::proxy::sse::{extract_json_from_sse, wrap_as_sse};
 
 use super::{
@@ -89,11 +89,6 @@ pub async fn forward_and_buffer(
         schema::spawn_ingest(state, ctx, json);
         schema::mark_stale_if_listchanged(state, json);
         timer.mark(Stage::Schema);
-
-        if widget::maybe_overlay(state, ctx, json).await {
-            mutated = true;
-        }
-        timer.mark(Stage::WidgetOverlay);
 
         let markers_present = ctx.mcp_method_str.is_some() && rewrite::has_markers(&json_bytes);
         timer.mark(Stage::MarkerScan);

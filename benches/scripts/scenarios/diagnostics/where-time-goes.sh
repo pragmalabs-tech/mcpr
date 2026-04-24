@@ -81,7 +81,7 @@ OUT="$RESULTS_DIR/$(now)-where-time-goes.txt"
     # For each stage field, compute median / p95 / max across samples.
     # Each call is self-contained — one jq process per stage, raw string output.
     for stage in buffer_us sse_unwrap_us json_parse_us schema_us \
-                 widget_overlay_us marker_scan_us rewrite_us \
+                 marker_scan_us rewrite_us \
                  reserialize_us url_map_us side_effects_us; do
         line=$(jq -r --arg s "$stage" '
             [inputs.stage_timings[$s] // empty]

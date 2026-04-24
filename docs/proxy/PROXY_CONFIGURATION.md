@@ -15,6 +15,8 @@ mcpr runs in one of two modes, set in `mcpr.toml`:
 
 ## Gateway Mode
 
+The proxy does not serve widget HTML or static assets itself — that path was removed to match the MCP spec. CSP rewriting of upstream responses still applies; see [CSP](CSP.md).
+
 ### Minimal
 
 ```toml
@@ -26,9 +28,6 @@ mcp = "http://localhost:9000"
 ```toml
 # Upstream MCP server (required)
 mcp = "http://localhost:9000/mcp"
-
-# Widget source: URL (proxy to dev server) or file path (static serve)
-widgets = "http://localhost:4444"
 
 # Local proxy port (optional in tunnel mode -- picks random port if omitted)
 port = 3000
@@ -111,7 +110,6 @@ rotation = "daily"
 | Field | Description |
 |-------|-------------|
 | `mcp` | Upstream MCP server URL |
-| `widgets` | Widget source: URL or file path |
 | `port` | Local proxy port |
 | `[tunnel].enabled` | Enable tunnel for public URL (default: false) |
 | `[tunnel].relay_url` | Relay server URL |

@@ -1,9 +1,9 @@
 //! Per-proxy connection health and display state.
 //!
 //! Tracks what one proxy instance is currently doing — MCP upstream health,
-//! tunnel connection status, widget discovery, cloud sync, request counters.
-//! Updated by background tasks (health checks, request handlers, tunnel
-//! callbacks) and read by the admin API, TUI, and status commands.
+//! tunnel connection status, cloud sync, request counters. Updated by
+//! background tasks (health checks, request handlers, tunnel callbacks) and
+//! read by the admin API, TUI, and status commands.
 //!
 //! Lives behind an `Arc<Mutex<_>>` because updates come from many callers and
 //! readers pull snapshots; contention is negligible (updates are infrequent).
@@ -11,7 +11,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// Connection status for an upstream service (MCP, tunnel, widgets).
+/// Connection status for an upstream service (MCP, tunnel).
 #[derive(Clone, Copy, PartialEq)]
 pub enum ConnectionStatus {
     /// Status not yet determined (initial state).
@@ -55,8 +55,6 @@ pub struct ProxyHealth {
     pub tunnel_url: String,
     /// Upstream MCP server URL from config.
     pub mcp_upstream: String,
-    /// Widget source description ("URL", "path", or "(none)").
-    pub widgets: String,
 
     /// MCP upstream connection health.
     pub mcp_status: ConnectionStatus,
@@ -64,12 +62,6 @@ pub struct ProxyHealth {
     pub mcp_warning: Option<String>,
     /// Tunnel connection health.
     pub tunnel_status: ConnectionStatus,
-    /// Widget source connection health.
-    pub widgets_status: ConnectionStatus,
-    /// Number of discovered widgets.
-    pub widget_count: Option<usize>,
-    /// Names of discovered widgets.
-    pub widget_names: Vec<String>,
 
     /// Cloud sync endpoint URL (None if cloud not configured).
     pub cloud_endpoint: Option<String>,
@@ -88,13 +80,9 @@ impl ProxyHealth {
             proxy_url: String::new(),
             tunnel_url: String::new(),
             mcp_upstream: String::new(),
-            widgets: "(none)".into(),
             mcp_status: ConnectionStatus::Unknown,
             mcp_warning: None,
             tunnel_status: ConnectionStatus::Disconnected,
-            widgets_status: ConnectionStatus::Unknown,
-            widget_count: None,
-            widget_names: Vec::new(),
             cloud_endpoint: None,
             cloud_sync: None,
             started_at: Instant::now(),
