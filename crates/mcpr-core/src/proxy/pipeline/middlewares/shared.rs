@@ -7,6 +7,9 @@
 //! string (schema ingest, CSP rewrite) call it instead of round-tripping
 //! through `serde_json`.
 
+use serde_json::{Map, Value};
+
+use super::super::envelope::{JsonRpcEnvelope, JsonRpcId};
 use super::super::message::{
     ClientMethod, CompletionMethod, LifecycleMethod, LoggingMethod, PromptsMethod, ResourcesMethod,
     TasksMethod, ToolsMethod,
@@ -26,6 +29,55 @@ pub(crate) fn normalize_platform(client_name: &str) -> &'static str {
         "windsurf"
     } else {
         "unknown"
+    }
+}
+
+/// Reassemble the JSON-RPC message from the shallow envelope. Used by
+/// `EnvelopeSealMiddleware` on the way out and by `ProxyTransport` to
+/// re-serialize the request body before forwarding upstream. Parse
+/// failures on the cached `RawValue` bytes would have been caught at
+/// intake — we default to `Null` rather than panic.
+pub(crate) fn serialize_envelope(env: &JsonRpcEnvelope) -> Vec<u8> {
+    let mut map = Map::with_capacity(5);
+    map.insert("jsonrpc".into(), Value::String("2.0".into()));
+    if let Some(id) = &env.id {
+        map.insert("id".into(), id_to_value(id));
+    }
+    if let Some(method) = &env.method {
+        map.insert("method".into(), Value::String(method.clone()));
+    }
+    if let Some(params) = &env.params {
+        map.insert(
+            "params".into(),
+            serde_json::from_str(params.get()).unwrap_or(Value::Null),
+        );
+    }
+    if let Some(result) = &env.result {
+        map.insert(
+            "result".into(),
+            serde_json::from_str(result.get()).unwrap_or(Value::Null),
+        );
+    }
+    if let Some(error) = &env.error {
+        let mut err = Map::with_capacity(3);
+        err.insert("code".into(), Value::Number((error.code as i64).into()));
+        err.insert("message".into(), Value::String(error.message.clone()));
+        if let Some(data) = &error.data {
+            err.insert(
+                "data".into(),
+                serde_json::from_str(data.get()).unwrap_or(Value::Null),
+            );
+        }
+        map.insert("error".into(), Value::Object(err));
+    }
+    serde_json::to_vec(&Value::Object(map)).unwrap_or_default()
+}
+
+fn id_to_value(id: &JsonRpcId) -> Value {
+    match id {
+        JsonRpcId::Number(n) => Value::Number((*n).into()),
+        JsonRpcId::String(s) => Value::String(s.clone()),
+        JsonRpcId::Null => Value::Null,
     }
 }
 

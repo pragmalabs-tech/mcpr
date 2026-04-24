@@ -113,16 +113,53 @@ pub(crate) fn test_proxy_with_sink() -> (Arc<ProxyState>, CapturingSink, EventBu
 }
 
 pub(crate) fn test_context(proxy: Arc<ProxyState>) -> Context {
+    test_context_with_method(proxy, Method::POST)
+}
+
+pub(crate) fn test_context_with_method(proxy: Arc<ProxyState>, http_method: Method) -> Context {
     Context {
         intake: Intake {
             start: Instant::now(),
             proxy,
-            http_method: Method::POST,
+            http_method,
             path: "/mcp".into(),
             request_size: 0,
         },
         working: Working::default(),
     }
+}
+
+pub(crate) fn test_proxy_state_upstream(url: impl Into<String>) -> Arc<ProxyState> {
+    let url = url.into();
+    let handle = EventManager::new().start();
+    Arc::new(ProxyState {
+        name: "middleware-test".into(),
+        mcp_upstream: url.clone(),
+        upstream: UpstreamClient {
+            http_client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(2))
+                .build()
+                .unwrap(),
+            semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
+            request_timeout: Duration::from_secs(5),
+        },
+        max_request_body: 1 << 20,
+        max_response_body: 1 << 20,
+        rewrite_config: RewriteConfig {
+            proxy_url: "https://proxy.test".into(),
+            proxy_domain: "proxy.test".into(),
+            mcp_upstream: url,
+            csp: CspConfig::default(),
+        }
+        .into_swap(),
+        sessions: MemorySessionStore::new(),
+        schema_manager: Arc::new(SchemaManager::new(
+            "middleware-test",
+            MemorySchemaStore::new(),
+        )),
+        health: new_shared_health(),
+        event_bus: handle.bus.clone(),
+    })
 }
 
 pub(crate) fn mcp_request(method: &str, params: Value, session: Option<&str>) -> Request {
@@ -196,4 +233,23 @@ pub(crate) fn mcp_buffered_response_with_header(
 
 pub(crate) fn set_request_method(cx: &mut Context, m: ClientMethod) {
     cx.working.request_method = Some(m);
+}
+
+/// A DELETE-shaped MCP request. Intake synthesizes the same shape:
+/// empty-body DELETE + `mcp-session-id` header becomes
+/// `Request::Mcp(McpRequest { transport: StreamableHttpPost, .. })` with a
+/// synthetic envelope so `SessionDeleteMiddleware` pattern-matches on
+/// `Request::Mcp` + `cx.intake.http_method == DELETE`.
+pub(crate) fn mcp_delete_request(session: Option<&str>) -> Request {
+    let envelope = JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"delete"}"#).unwrap();
+    let kind = ClientKind::Notification(
+        crate::proxy::pipeline::message::ClientNotifMethod::Unknown("delete".into()),
+    );
+    Request::Mcp(McpRequest {
+        transport: McpTransport::StreamableHttpPost,
+        envelope,
+        kind,
+        headers: HeaderMap::new(),
+        session_hint: session.map(SessionId::new),
+    })
 }

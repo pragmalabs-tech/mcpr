@@ -1165,11 +1165,10 @@ mod tests {
         let _ = rewrite_response("resources/list", &mut body, &config);
 
         let meta = &body["result"]["resources"][0]["_meta"];
-        for shape in ["openai/widgetCSP"] {
-            assert!(meta[shape]["connect_domains"].is_array());
-            assert!(meta[shape]["resource_domains"].is_array());
-            assert!(meta[shape]["frame_domains"].is_array());
-        }
+        let shape = "openai/widgetCSP";
+        assert!(meta[shape]["connect_domains"].is_array());
+        assert!(meta[shape]["resource_domains"].is_array());
+        assert!(meta[shape]["frame_domains"].is_array());
         assert!(meta["ui"]["csp"]["connectDomains"].is_array());
         assert!(meta["ui"]["csp"]["resourceDomains"].is_array());
         assert!(meta["ui"]["csp"]["frameDomains"].is_array());
