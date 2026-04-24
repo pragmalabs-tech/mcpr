@@ -45,6 +45,7 @@ mod tests {
     }
 
     impl MemorySink {
+        #[allow(clippy::type_complexity)]
         fn new() -> (Self, Arc<Mutex<Vec<ProxyEvent>>>, Arc<Mutex<u32>>) {
             let events = Arc::new(Mutex::new(Vec::new()));
             let flush_count = Arc::new(Mutex::new(0u32));

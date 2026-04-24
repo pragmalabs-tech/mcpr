@@ -21,10 +21,13 @@
 pub mod csp;
 pub mod forwarding;
 pub mod health;
+pub mod intake;
 pub mod pipeline;
 pub mod proxy_state;
 pub mod rewrite;
+pub mod router;
 pub mod sse;
+pub mod transport;
 
 pub use csp::{
     CspConfig, Directive, DirectivePolicy, Mode, WidgetScoped, effective_domains, glob_match,
@@ -32,5 +35,8 @@ pub use csp::{
 pub use health::{
     ConnectionStatus, ProxyHealth, SharedProxyHealth, lock_health, new_shared_health,
 };
+pub use intake::from_axum_parts;
 pub use proxy_state::ProxyState;
 pub use rewrite::{RewriteConfig, rewrite_response};
+pub use router::ProxyRouter;
+pub use transport::ProxyTransport;

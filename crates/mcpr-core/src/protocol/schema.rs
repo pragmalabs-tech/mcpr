@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn merge_pages__single() {
         let page = json!({"tools": [{"name": "a"}]});
-        let result = merge_pages("tools/list", &[page.clone()]);
+        let result = merge_pages("tools/list", std::slice::from_ref(&page));
         assert_eq!(result, Some(page));
     }
 
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn merge_pages__unknown_method_single_returns_as_is() {
         let p1 = json!({"serverInfo": {"name": "test"}});
-        let result = merge_pages("initialize", &[p1.clone()]);
+        let result = merge_pages("initialize", std::slice::from_ref(&p1));
         assert_eq!(result, Some(p1));
     }
 

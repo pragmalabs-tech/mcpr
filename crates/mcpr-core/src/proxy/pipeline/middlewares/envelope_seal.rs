@@ -11,12 +11,12 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::HeaderValue;
 use axum::http::header::CONTENT_TYPE;
-use serde_json::{Map, Value};
 
-use crate::proxy::pipeline::envelope::{JsonRpcEnvelope, JsonRpcId};
 use crate::proxy::pipeline::middleware::ResponseMiddleware;
 use crate::proxy::pipeline::values::{Context, Envelope, Response};
 use crate::proxy::sse::wrap_as_sse;
+
+use super::shared;
 
 pub struct EnvelopeSealMiddleware;
 
@@ -37,7 +37,7 @@ impl ResponseMiddleware for EnvelopeSealMiddleware {
             return resp;
         };
 
-        let json_bytes = serialize_envelope(&message.envelope);
+        let json_bytes = shared::serialize_envelope(&message.envelope);
         let (bytes, ct) = match envelope {
             Envelope::Json => (json_bytes, "application/json"),
             Envelope::Sse => (wrap_as_sse(&json_bytes), "text/event-stream"),
@@ -51,60 +51,15 @@ impl ResponseMiddleware for EnvelopeSealMiddleware {
     }
 }
 
-/// Reassemble the JSON-RPC message from the shallow envelope. Parse
-/// failures on cached `RawValue` bytes would have been caught at intake
-/// — we default to `Null` rather than panic.
-fn serialize_envelope(env: &JsonRpcEnvelope) -> Vec<u8> {
-    let mut map = Map::with_capacity(5);
-    map.insert("jsonrpc".into(), Value::String("2.0".into()));
-    if let Some(id) = &env.id {
-        map.insert("id".into(), id_to_value(id));
-    }
-    if let Some(method) = &env.method {
-        map.insert("method".into(), Value::String(method.clone()));
-    }
-    if let Some(params) = &env.params {
-        map.insert(
-            "params".into(),
-            serde_json::from_str(params.get()).unwrap_or(Value::Null),
-        );
-    }
-    if let Some(result) = &env.result {
-        map.insert(
-            "result".into(),
-            serde_json::from_str(result.get()).unwrap_or(Value::Null),
-        );
-    }
-    if let Some(error) = &env.error {
-        let mut err = Map::with_capacity(3);
-        err.insert("code".into(), Value::Number((error.code as i64).into()));
-        err.insert("message".into(), Value::String(error.message.clone()));
-        if let Some(data) = &error.data {
-            err.insert(
-                "data".into(),
-                serde_json::from_str(data.get()).unwrap_or(Value::Null),
-            );
-        }
-        map.insert("error".into(), Value::Object(err));
-    }
-    serde_json::to_vec(&Value::Object(map)).unwrap_or_default()
-}
-
-fn id_to_value(id: &JsonRpcId) -> Value {
-    match id {
-        JsonRpcId::Number(n) => Value::Number((*n).into()),
-        JsonRpcId::String(s) => Value::String(s.clone()),
-        JsonRpcId::Null => Value::Null,
-    }
-}
-
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
 
     use axum::http::{HeaderMap, StatusCode};
+    use serde_json::Value;
 
+    use crate::proxy::pipeline::envelope::JsonRpcEnvelope;
     use crate::proxy::pipeline::message::{McpMessage, MessageKind, ServerKind};
     use crate::proxy::pipeline::middlewares::test_support::{test_context, test_proxy_state};
 
