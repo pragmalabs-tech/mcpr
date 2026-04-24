@@ -26,7 +26,7 @@ impl ResponseMiddleware for EnvelopeSealMiddleware {
         "envelope_seal"
     }
 
-    async fn on_response(&self, resp: Response, _cx: &mut Context) -> Response {
+    async fn on_response(&self, resp: Response, cx: &mut Context) -> Response {
         let Response::McpBuffered {
             envelope,
             message,
@@ -43,6 +43,20 @@ impl ResponseMiddleware for EnvelopeSealMiddleware {
             Envelope::Sse => (wrap_as_sse(&json_bytes), "text/event-stream"),
         };
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+
+        // Phase-5 parity: legacy emit pushed `rewritten` whenever we
+        // parsed JSON (not whether we mutated), plus `sse` when the
+        // upstream body was SSE-framed. We know both facts here — stash
+        // them into `cx.working.tags` so `emit::build_request_event`
+        // reproduces legacy `note` strings.
+        if !cx.working.tags.as_slice().contains(&"rewritten") {
+            cx.working.tags.push("rewritten");
+        }
+        if matches!(envelope, Envelope::Sse) && !cx.working.tags.as_slice().contains(&"sse") {
+            cx.working.tags.push("sse");
+        }
+        cx.working.response_size = Some(bytes.len() as u64);
+
         Response::Raw {
             body: Body::from(bytes),
             status,

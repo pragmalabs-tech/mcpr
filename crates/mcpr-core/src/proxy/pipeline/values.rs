@@ -10,15 +10,19 @@ use std::time::Instant;
 
 use axum::{
     body::{Body, Bytes},
-    http::{HeaderMap, Method, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, header::CONTENT_TYPE},
+    response::IntoResponse,
 };
 
 use crate::event::types::StageTimings;
 use crate::protocol::session::{ClientInfo, SessionInfo};
 use crate::proxy::ProxyState;
+use crate::proxy::forwarding::build_response;
+use crate::proxy::sse::wrap_as_sse;
 
 use super::envelope::JsonRpcEnvelope;
 use super::message::{ClientKind, ClientMethod, McpMessage};
+use super::middlewares::shared;
 use super::stubs::{OAuthKind, SessionId, TagSet, UrlMap};
 
 // ── Request side ─────────────────────────────────────────────
@@ -123,6 +127,50 @@ pub enum Envelope {
     Sse,
 }
 
+impl IntoResponse for Response {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Response::Raw {
+                body,
+                status,
+                headers,
+            } => build_response(status.as_u16(), &headers, body),
+            Response::McpStreamed {
+                body,
+                status,
+                headers,
+                ..
+            } => build_response(status.as_u16(), &headers, body),
+            Response::McpBuffered {
+                envelope: env,
+                message,
+                status,
+                mut headers,
+            } => {
+                let json_bytes = shared::serialize_envelope(&message.envelope);
+                let (bytes, ct) = match env {
+                    Envelope::Json => (json_bytes, "application/json"),
+                    Envelope::Sse => (wrap_as_sse(&json_bytes), "text/event-stream"),
+                };
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+                build_response(status.as_u16(), &headers, Body::from(bytes))
+            }
+            Response::OauthJson {
+                doc,
+                status,
+                mut headers,
+            } => {
+                let bytes = serde_json::to_vec(&doc).unwrap_or_default();
+                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                build_response(status.as_u16(), &headers, Body::from(bytes))
+            }
+            Response::Upstream502 { reason } => {
+                (StatusCode::BAD_GATEWAY, format!("Upstream error: {reason}")).into_response()
+            }
+        }
+    }
+}
+
 // ── Route ────────────────────────────────────────────────────
 
 /// Output of the router. Declarative; no I/O.
@@ -198,6 +246,13 @@ pub struct Working {
     /// Originating client method, stashed on the request side so
     /// response-side middlewares know what produced the response.
     pub request_method: Option<ClientMethod>,
+    /// Tool name for `tools/call`, stashed on the request side so the
+    /// emitter can populate `RequestEvent.tool` without re-parsing.
+    pub request_tool: Option<String>,
+    /// Serialized response body size in bytes. `EnvelopeSealMiddleware`
+    /// fills this on the buffered path; streaming paths leave it `None`.
+    /// Feeds `RequestEvent.response_size`.
+    pub response_size: Option<u64>,
     pub tags: TagSet,
     pub timings: StageTimings,
 }

@@ -36,9 +36,9 @@ impl<R: Router, T: Transport> Pipeline<R, T> {
         router: R,
         transport: T,
     ) -> Self {
-        // TODO(phase-6): emit `info!("middleware registered: {name}")`
-        // once the crate depends on `tracing`. For now the names are
-        // introspectable via `request_chain_names` / `response_chain_names`.
+        // Registration logging is handled by `build_default_pipeline`,
+        // which owns construction ordering and is the single site where
+        // operator-visible chain composition needs to be reported.
         Self {
             request_chain,
             response_chain,

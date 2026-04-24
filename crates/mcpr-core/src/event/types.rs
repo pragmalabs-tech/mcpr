@@ -89,7 +89,7 @@ pub struct RequestEvent {
 /// listed roughly in execution order.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct StageTimings {
-    /// Parsing HTTP → `RequestContext` (includes JSON-RPC request parse).
+    /// Parsing HTTP → intake (shallow JSON-RPC envelope parse).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parse_us: Option<u32>,
     /// Header-phase steps (session touch / DELETE cleanup).

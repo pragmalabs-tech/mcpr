@@ -1,14 +1,7 @@
-//! Per-request proxy pipeline: parse → route → request middleware → handler
-//! → response middleware → emit. [`run`] is the single entrypoint every
-//! HTTP request goes through.
-
-pub mod context;
-pub mod emit;
-pub mod handlers;
-pub mod parser;
-pub mod route;
-pub mod run;
-pub mod steps;
+//! Per-request proxy pipeline: a trait-driven middleware chain built on
+//! a small custom driver (see `PIPELINE_ARCHITECTURE.md`). The entrypoint
+//! is [`driver::Pipeline::run`], constructed once at startup via
+//! [`crate::proxy::build_default_pipeline`].
 
 pub mod driver;
 pub mod envelope;
@@ -17,5 +10,3 @@ pub mod middleware;
 pub mod middlewares;
 pub mod stubs;
 pub mod values;
-
-pub use run::run;

@@ -104,9 +104,9 @@ async fn buffer_and_parse(
 ) -> Response {
     let raw = match read_body_capped(resp, max).await {
         Ok(b) => b,
-        Err(_) => {
+        Err(e) => {
             return Response::Upstream502 {
-                reason: "oversized upstream body".into(),
+                reason: e.to_string(),
             };
         }
     };
@@ -206,9 +206,9 @@ async fn dispatch_raw(state: Arc<ProxyState>, raw: RawRequest, upstream: String)
     let headers = resp.headers().clone();
     let body_bytes = match read_body_capped(resp, state.max_response_body).await {
         Ok(b) => b,
-        Err(_) => {
+        Err(e) => {
             return Response::Upstream502 {
-                reason: "oversized body".into(),
+                reason: e.to_string(),
             };
         }
     };

@@ -1,42 +1,69 @@
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
     body::{Body, Bytes},
     http::{HeaderMap, Method, StatusCode, header},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use futures_util::StreamExt;
-use tokio::sync::Semaphore;
 
 /// Shared upstream connection config for forwarding requests.
+///
+/// Concurrency limiting moved out of this struct in Phase 6 — a
+/// `tower::limit::ConcurrencyLimitLayer` wraps the axum service at the
+/// HTTP boundary. `request_timeout` stays here only for streaming paths
+/// where the tower layer can't reach (tower-http timeout cancels at
+/// response start, not mid-stream).
 #[derive(Clone)]
 pub struct UpstreamClient {
     pub http_client: reqwest::Client,
-    pub semaphore: Arc<Semaphore>,
     pub request_timeout: Duration,
 }
 
-/// Read a response body with a size cap. Returns 502 if the upstream response exceeds `max_bytes`.
+/// Reason the upstream body could not be read.
+///
+/// Typed so `ProxyTransport` can map it to `Response::Upstream502` with
+/// a meaningful reason string — Phase 6 replacement for the old axum-
+/// response return shape that couldn't carry through the response
+/// middleware chain.
+#[derive(Debug)]
+pub enum ReadBodyError {
+    /// `Content-Length` or streamed bytes exceeded `max_bytes`.
+    TooLarge,
+    /// Underlying reqwest stream error.
+    Stream(reqwest::Error),
+}
+
+impl std::fmt::Display for ReadBodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadBodyError::TooLarge => write!(f, "upstream response too large"),
+            ReadBodyError::Stream(e) => write!(f, "upstream read error: {e}"),
+        }
+    }
+}
+
+/// Read a response body with a size cap. Returns a typed error on
+/// overflow or stream failure — callers produce the appropriate
+/// `Response` variant (`Upstream502`) so the failure flows through the
+/// response chain like any other upstream problem.
 pub async fn read_body_capped(
     resp: reqwest::Response,
     max_bytes: usize,
-) -> Result<Bytes, Response> {
+) -> Result<Bytes, ReadBodyError> {
     if let Some(len) = resp.content_length()
         && len as usize > max_bytes
     {
-        return Err((StatusCode::BAD_GATEWAY, "upstream response too large").into_response());
+        return Err(ReadBodyError::TooLarge);
     }
 
     let mut body =
         Vec::with_capacity(resp.content_length().unwrap_or(0).min(max_bytes as u64) as usize);
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|e| {
-            (StatusCode::BAD_GATEWAY, format!("upstream read error: {e}")).into_response()
-        })?;
+        let chunk = chunk.map_err(ReadBodyError::Stream)?;
         if body.len() + chunk.len() > max_bytes {
-            return Err((StatusCode::BAD_GATEWAY, "upstream response too large").into_response());
+            return Err(ReadBodyError::TooLarge);
         }
         body.extend_from_slice(&chunk);
     }
@@ -44,7 +71,11 @@ pub async fn read_body_capped(
 }
 
 /// Send a request to the upstream server, forwarding relevant headers.
-/// When `is_streaming` is false, applies the configured request timeout.
+///
+/// For streaming calls we still apply the per-request reqwest timeout:
+/// the axum-edge `TimeoutLayer` (tower-http) cancels at response start
+/// and can't see mid-stream stalls. For non-streaming calls the tower
+/// layer handles timeout budget end-to-end, so no reqwest timeout here.
 pub async fn forward_request(
     upstream: &UpstreamClient,
     url: &str,
@@ -53,15 +84,9 @@ pub async fn forward_request(
     body: &Bytes,
     is_streaming: bool,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let _permit = upstream
-        .semaphore
-        .acquire()
-        .await
-        .expect("upstream semaphore closed");
-
     let mut req = upstream.http_client.request(method, url);
 
-    if !is_streaming {
+    if is_streaming {
         req = req.timeout(upstream.request_timeout);
     }
 

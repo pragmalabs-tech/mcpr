@@ -19,7 +19,7 @@
 //! mcpr-cli/src/
 //! +-- main.rs           # Entry point, daemon bootstrap, gateway runtime
 //! +-- state.rs          # AppState (axum host container wrapping ProxyState)
-//! +-- proxy.rs          # Axum fallback handler → mcpr_core::proxy::pipeline::run
+//! +-- proxy.rs          # Axum fallback handler → mcpr_core pipeline
 //! +-- config.rs         # CLI args (clap), TOML config, subcommands
 //! +-- render.rs         # All terminal output — tables, colors, formatting
 //! +-- admin.rs          # Health/readiness admin server
@@ -40,9 +40,10 @@
 //! ```
 //!
 //! The proxy engine (pipeline, middleware, `ProxyState`, forwarding,
-//! rewrite, SSE, health) lives in `mcpr_core::proxy`. This
-//! binary assembles a `ProxyState` at boot, wires it into axum, and
-//! delegates every request to `pipeline::run`.
+//! rewrite, SSE, health) lives in `mcpr_core::proxy`. This binary
+//! assembles a `ProxyState` + `ProxyPipeline` at boot, wires them into
+//! axum via `AppState`, and drives every request through
+//! `AppState::pipeline.run`.
 //!
 //! The event bus (routes `ProxyEvent` to sinks) lives in `mcpr_core::event`;
 //! sink implementations (stderr, sqlite, cloud) live in `mcpr_integrations`.
@@ -115,11 +116,32 @@ pub fn build_app(app_state: AppState) -> Router {
         .expose_headers(Any);
 
     let max_request = app_state.proxy.max_request_body;
+    let max_concurrent = app_state.proxy.max_concurrent_upstream;
+    let request_timeout = app_state.proxy.upstream.request_timeout;
 
     let app: Router<AppState> = Router::new();
     let app = proxy_routes(app);
     app.with_state(app_state)
+        // Body cap first — reject oversized requests before they consume
+        // a concurrency slot or start a timeout budget.
         .layer(DefaultBodyLimit::max(max_request))
+        // Concurrency cap — replaces the `UpstreamClient::semaphore`
+        // deleted in Phase 6. For a 1:1 proxy, inbound concurrency ==
+        // upstream concurrency in steady state.
+        .layer(tower::limit::ConcurrencyLimitLayer::new(max_concurrent))
+        // Per-request timeout — covers the buffered path end-to-end.
+        // Streaming responses keep their own per-call reqwest timeout
+        // (see `forward_request`) since this layer can't see mid-stream
+        // stalls.
+        .layer(tower_http::timeout::TimeoutLayer::with_status_code(
+            axum::http::StatusCode::GATEWAY_TIMEOUT,
+            request_timeout,
+        ))
+        // Operator tracing for HTTP metadata: method, path, status,
+        // latency. Orthogonal to the `RequestEvent` bus — tracing is
+        // for log aggregation, `RequestEvent` is the observability
+        // product surface.
+        .layer(tower_http::trace::TraceLayer::new_for_http())
         .layer(cors)
 }
 
@@ -345,6 +367,17 @@ fn main() {
 }
 
 async fn async_main(action: CliAction, ready_fd: Option<i32>) {
+    // Install the global tracing subscriber once per process. Honors
+    // `RUST_LOG` (e.g. `RUST_LOG=info` surfaces middleware registration
+    // + tower trace spans). Defaults to `warn` when unset — operator
+    // CLI output stays terse by default.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+
     match action {
         CliAction::Start { .. } => {
             // Daemon supervisor — no config, no proxy. Already forked in main().
@@ -647,7 +680,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
             .pool_max_idle_per_host(DEFAULT_MAX_IDLE_UPSTREAM_PER_HOST)
             .build()
             .expect("Failed to build HTTP client"),
-        semaphore: Arc::new(tokio::sync::Semaphore::new(max_concurrent)),
         request_timeout,
     };
 
@@ -729,6 +761,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         max_response_body: cfg
             .max_response_body_size
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
+        max_concurrent_upstream: max_concurrent,
         rewrite_config: rewrite_config.into_swap(),
         sessions: MemorySessionStore::new(),
         schema_manager: Arc::new(SchemaManager::new(
@@ -738,8 +771,15 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         health: proxy_health_ref.clone(),
         event_bus: event_bus_handle.bus.clone(),
     });
+    // Pipeline construction itself emits `info!` registration logs for
+    // each middleware — surface them to the operator via tracing
+    // (`RUST_LOG=info`), not as a secondary eprintln! banner.
+    let pipeline = Arc::new(mcpr_core::proxy::build_default_pipeline(
+        proxy.rewrite_config.clone(),
+    ));
     let app_state = AppState {
         proxy: proxy.clone(),
+        pipeline,
     };
 
     // Hydrate SchemaManager from disk so dashboards show the last

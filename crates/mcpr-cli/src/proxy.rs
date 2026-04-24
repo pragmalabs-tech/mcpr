@@ -1,34 +1,56 @@
 //! Axum glue — wraps the per-request pipeline in a catch-all fallback route.
 
-use std::sync::Arc;
+use std::time::Instant;
 
 use axum::{
     Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, Method},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::any,
 };
 
 use crate::state::AppState;
-use mcpr_core::proxy::ProxyState;
-use mcpr_core::proxy::pipeline;
+use mcpr_core::proxy::emit;
+use mcpr_core::proxy::intake::from_axum_parts;
+use mcpr_core::proxy::pipeline::values::{Context, Intake, Working};
 
 /// All proxy routes — catch-all that routes by method + content-type.
 pub fn proxy_routes(router: Router<AppState>) -> Router<AppState> {
     router.fallback(any(handle_request))
 }
 
-/// Catch-all axum handler — delegates every request to [`pipeline::run`].
+/// Catch-all axum handler — drives one request through the full target
+/// pipeline: content-based intake → request middleware chain → router →
+/// transport → response middleware chain → emit → axum response.
 async fn handle_request(
-    State(proxy): State<Arc<ProxyState>>,
+    State(state): State<AppState>,
     method: Method,
     headers: HeaderMap,
     uri: axum::http::Uri,
     body: Bytes,
 ) -> Response {
-    pipeline::run(proxy, method, headers, uri, body).await
+    let start = Instant::now();
+    let request_size = body.len();
+    let path = uri.path().to_string();
+    let http_method = method.clone();
+
+    let req = from_axum_parts(method, headers, uri, body);
+    let mut cx = Context {
+        intake: Intake {
+            start,
+            proxy: state.proxy.clone(),
+            http_method,
+            path,
+            request_size,
+        },
+        working: Working::default(),
+    };
+
+    let resp = state.pipeline.run(req, &mut cx).await;
+    emit::emit(&cx, &resp);
+    resp.into_response()
 }
 
 #[cfg(test)]
@@ -53,11 +75,11 @@ mod tests {
                     .connect_timeout(std::time::Duration::from_secs(5))
                     .build()
                     .unwrap(),
-                semaphore: Arc::new(tokio::sync::Semaphore::new(100)),
                 request_timeout: std::time::Duration::from_secs(30),
             },
             max_request_body: max_request,
             max_response_body: max_response,
+            max_concurrent_upstream: 100,
             rewrite_config: mcpr_core::proxy::RewriteConfig {
                 proxy_url: "http://localhost:0".to_string(),
                 proxy_domain: "localhost".to_string(),
@@ -73,7 +95,10 @@ mod tests {
             health: mcpr_core::proxy::new_shared_health(),
             event_bus: mcpr_core::event::EventManager::new().start().bus,
         });
-        crate::state::AppState { proxy }
+        let pipeline = std::sync::Arc::new(mcpr_core::proxy::build_default_pipeline(
+            proxy.rewrite_config.clone(),
+        ));
+        crate::state::AppState { proxy, pipeline }
     }
 
     #[tokio::test]

@@ -54,11 +54,11 @@ pub(crate) fn test_proxy_state() -> Arc<ProxyState> {
                 .connect_timeout(Duration::from_secs(1))
                 .build()
                 .unwrap(),
-            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             request_timeout: Duration::from_secs(1),
         },
         max_request_body: 1 << 20,
         max_response_body: 1 << 20,
+        max_concurrent_upstream: 1,
         rewrite_config: RewriteConfig {
             proxy_url: "https://proxy.test".into(),
             proxy_domain: "proxy.test".into(),
@@ -89,11 +89,11 @@ pub(crate) fn test_proxy_with_sink() -> (Arc<ProxyState>, CapturingSink, EventBu
                 .connect_timeout(Duration::from_secs(1))
                 .build()
                 .unwrap(),
-            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             request_timeout: Duration::from_secs(1),
         },
         max_request_body: 1 << 20,
         max_response_body: 1 << 20,
+        max_concurrent_upstream: 1,
         rewrite_config: RewriteConfig {
             proxy_url: "https://proxy.test".into(),
             proxy_domain: "proxy.test".into(),
@@ -140,11 +140,11 @@ pub(crate) fn test_proxy_state_upstream(url: impl Into<String>) -> Arc<ProxyStat
                 .connect_timeout(Duration::from_secs(2))
                 .build()
                 .unwrap(),
-            semaphore: Arc::new(tokio::sync::Semaphore::new(4)),
             request_timeout: Duration::from_secs(5),
         },
         max_request_body: 1 << 20,
         max_response_body: 1 << 20,
+        max_concurrent_upstream: 4,
         rewrite_config: RewriteConfig {
             proxy_url: "https://proxy.test".into(),
             proxy_domain: "proxy.test".into(),

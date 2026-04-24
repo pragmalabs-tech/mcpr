@@ -25,6 +25,12 @@ pub struct ProxyState {
     pub upstream: UpstreamClient,
     pub max_request_body: usize,
     pub max_response_body: usize,
+    /// Inbound concurrency cap applied at the axum boundary via
+    /// `tower::limit::ConcurrencyLimitLayer`. For a 1:1 proxy this is
+    /// effectively an upstream concurrency cap too — the old
+    /// `UpstreamClient::semaphore` enforced the same invariant one hop
+    /// further in. Phase-6 move.
+    pub max_concurrent_upstream: usize,
 
     // ── response shaping ──
     /// Lock-free: readers call `.load()` (sync, ~5 ns); a writer
