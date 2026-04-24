@@ -10,4 +10,11 @@ pub mod route;
 pub mod run;
 pub mod steps;
 
+pub mod driver;
+pub mod envelope;
+pub mod message;
+pub mod middleware;
+pub mod stubs;
+pub mod values;
+
 pub use run::run;
