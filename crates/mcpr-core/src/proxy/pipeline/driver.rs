@@ -5,10 +5,62 @@
 //! owns an ordered `Vec<Box<dyn …>>` for each chain. No tower, no
 //! service combinators.
 
+use std::sync::OnceLock;
+use std::time::Instant;
+
 use async_trait::async_trait;
 
 use super::middleware::{Flow, RequestMiddleware, ResponseMiddleware};
-use super::values::{Context, Request, Response, Route};
+use super::values::{Context, Request, Response, Route, StageTiming};
+
+/// `true` if `MCPR_STAGE_TIMING` is set to `1` or `true`. Checked once
+/// per process and cached — the hot path pays one `OnceLock` load
+/// (~1ns) per middleware dispatch.
+pub fn stage_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("MCPR_STAGE_TIMING")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+/// RAII timer — start one at the top of a block, get a
+/// [`StageTiming`] pushed onto `sink` when the guard drops. Honors
+/// [`stage_timing_enabled`] so disabled builds skip the push.
+/// Handles early returns / `?` / panics because `Drop` always runs.
+///
+/// Used by non-middleware sites (transport sub-stages, intake parse).
+/// Middlewares themselves are wrapped by the driver — their bodies
+/// never construct a `StageGuard`.
+pub struct StageGuard<'a> {
+    name: &'static str,
+    start: Instant,
+    sink: &'a mut Vec<StageTiming>,
+    enabled: bool,
+}
+
+impl<'a> StageGuard<'a> {
+    pub fn start(name: &'static str, sink: &'a mut Vec<StageTiming>) -> Self {
+        Self {
+            name,
+            start: Instant::now(),
+            sink,
+            enabled: stage_timing_enabled(),
+        }
+    }
+}
+
+impl Drop for StageGuard<'_> {
+    fn drop(&mut self) {
+        if self.enabled {
+            self.sink.push(StageTiming {
+                name: self.name,
+                elapsed_us: self.start.elapsed().as_micros() as u64,
+            });
+        }
+    }
+}
 
 /// Pure function: decide where a request is headed. No I/O.
 pub trait Router: Send + Sync {
@@ -16,10 +68,12 @@ pub trait Router: Send + Sync {
 }
 
 /// The one layer that touches the network. Reqwest errors become
-/// `Response::Upstream502`.
+/// `Response::Upstream502`. Takes `&mut Context` so the transport can
+/// write per-stage timings (`upstream_us`, `buffer_us`, `sse_unwrap_us`,
+/// `json_parse_us`) onto `cx.working`.
 #[async_trait]
 pub trait Transport: Send + Sync {
-    async fn dispatch(&self, req: Request, route: Route, cx: &Context) -> Response;
+    async fn dispatch(&self, req: Request, route: Route, cx: &mut Context) -> Response;
 }
 
 pub struct Pipeline<R: Router, T: Transport> {
@@ -71,8 +125,17 @@ impl<R: Router, T: Transport> Pipeline<R, T> {
         mut req: Request,
         cx: &mut Context,
     ) -> Result<Request, Response> {
+        let enabled = stage_timing_enabled();
         for mw in &self.request_chain {
-            match mw.on_request(req, cx).await {
+            let started = enabled.then(Instant::now);
+            let flow = mw.on_request(req, cx).await;
+            if let Some(t) = started {
+                cx.working.timings.push(StageTiming {
+                    name: mw.name(),
+                    elapsed_us: t.elapsed().as_micros() as u64,
+                });
+            }
+            match flow {
                 Flow::Continue(r) => req = r,
                 Flow::ShortCircuit(r) => return Err(r),
             }
@@ -81,8 +144,16 @@ impl<R: Router, T: Transport> Pipeline<R, T> {
     }
 
     async fn run_response_chain(&self, mut resp: Response, cx: &mut Context) -> Response {
+        let enabled = stage_timing_enabled();
         for mw in &self.response_chain {
+            let started = enabled.then(Instant::now);
             resp = mw.on_response(resp, cx).await;
+            if let Some(t) = started {
+                cx.working.timings.push(StageTiming {
+                    name: mw.name(),
+                    elapsed_us: t.elapsed().as_micros() as u64,
+                });
+            }
         }
         resp
     }
@@ -176,7 +247,7 @@ mod tests {
 
     #[async_trait]
     impl Transport for FakeTransport {
-        async fn dispatch(&self, _req: Request, _route: Route, _cx: &Context) -> Response {
+        async fn dispatch(&self, _req: Request, _route: Route, _cx: &mut Context) -> Response {
             *self.calls.lock().unwrap() += 1;
             self.response
                 .lock()

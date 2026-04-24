@@ -78,21 +78,29 @@ OUT="$RESULTS_DIR/$(now)-where-time-goes.txt"
     printf '%-22s %10s %10s %10s %10s\n' stage count p50_us p95_us max_us
     printf '%s\n' '----------------------------------------------------------------------'
 
-    # For each stage field, compute median / p95 / max across samples.
-    # Each call is self-contained — one jq process per stage, raw string output.
-    for stage in buffer_us sse_unwrap_us json_parse_us schema_us \
-                 marker_scan_us rewrite_us \
-                 reserialize_us url_map_us side_effects_us; do
-        line=$(jq -r --arg s "$stage" '
-            [inputs.stage_timings[$s] // empty]
-            | if length == 0 then "\($s)\t0\t-\t-\t-"
-              else
-                sort as $s2
-                | "\($s)\t\($s2|length)\t\($s2[($s2|length)/2|floor])\t\($s2[($s2|length*0.95|floor)])\t\($s2|max)"
-              end
-        ' --null-input /tmp/mcpr-bench-events.jsonl 2>/dev/null)
-        IFS=$'\t' read -r s count p50 p95 mx <<<"$line"
-        printf '%-22s %10s %10s %10s %10s\n' "$s" "$count" "$p50" "$p95" "$mx"
+    # The wire shape is a list of { name, elapsed_us } entries.
+    # `jq` groups by name across all events, then reports count / p50 /
+    # p95 / max for each stage name that actually appeared.
+    jq -s -r '
+        [.[] | .stage_timings[]?]
+        | group_by(.name)
+        | map({
+            name: .[0].name,
+            count: length,
+            values: (map(.elapsed_us) | sort)
+          })
+        | map({
+            name,
+            count,
+            p50: .values[(.count / 2 | floor)],
+            p95: .values[(.count * 0.95 | floor)],
+            max: (.values | max)
+          })
+        | .[]
+        | "\(.name)\t\(.count)\t\(.p50)\t\(.p95)\t\(.max)"
+    ' /tmp/mcpr-bench-events.jsonl \
+    | while IFS=$'\t' read -r name count p50 p95 mx; do
+        printf '%-22s %10s %10s %10s %10s\n' "$name" "$count" "$p50" "$p95" "$mx"
     done
 
     echo

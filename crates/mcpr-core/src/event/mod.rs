@@ -31,7 +31,7 @@ pub use manager::EventManager;
 pub use sink::{EventSink, NoopSink};
 pub use types::{
     HeartbeatEvent, ProxyEvent, RequestEvent, SchemaVersionCreatedEvent, SessionEndEvent,
-    SessionStartEvent, StageTimings,
+    SessionStartEvent,
 };
 
 #[cfg(test)]

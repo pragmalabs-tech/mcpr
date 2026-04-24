@@ -101,7 +101,7 @@ capture "http://127.0.0.1:${PROXY_PORT}/mcp" "$PROXY_H"  "$PROXY_B"
 
     # Conditional chunked-preservation: only check if upstream used chunked.
     # This mock returns a single fixed body so it serves with content-length;
-    # the check is noise here. `sse-compat.sh` covers the rmcp chunked case.
+    # the check is noise here.
     if grep -qi 'transfer-encoding: chunked' "$DIRECT_H"; then
         check "proxied preserves transfer-encoding: chunked" \
             "grep -qi 'transfer-encoding: chunked' '$PROXY_H'"

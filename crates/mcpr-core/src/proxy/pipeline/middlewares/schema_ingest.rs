@@ -80,6 +80,9 @@ impl ResponseMiddleware for SchemaIngestMiddleware {
                     },
                 ));
             });
+        // Note: the driver's middleware wrap times the whole call,
+        // including spawn-prep. The background ingest task runs off the
+        // hot path and is deliberately excluded from this figure.
 
         resp
     }

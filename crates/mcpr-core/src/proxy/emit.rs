@@ -8,11 +8,10 @@
 //! `mcpr-cloud/backend/` consumes `RequestEvent` and session-lifecycle
 //! events — the inline tests below cover the field shapes both rely on.
 
-use crate::event::types::StageTimings;
 use crate::event::{ProxyEvent, RequestEvent};
 
 use super::pipeline::middlewares::shared;
-use super::pipeline::values::{Context, Envelope, Response};
+use super::pipeline::values::{Context, Envelope, Response, StageTiming};
 
 /// Build a `RequestEvent` from the accumulated context and the final
 /// response. Separated from [`emit`] so it can be unit-tested without a
@@ -37,7 +36,7 @@ pub fn build_request_event(proxy_name: &str, cx: &Context, resp: &Response) -> R
         tool,
         status,
         latency_us: cx.intake.start.elapsed().as_micros() as u64,
-        upstream_us: None,
+        upstream_us: cx.working.upstream_us,
         request_size: Some(cx.intake.request_size as u64),
         response_size,
         error_code,
@@ -49,19 +48,12 @@ pub fn build_request_event(proxy_name: &str, cx: &Context, resp: &Response) -> R
     }
 }
 
-fn derive_stage_timings(t: &StageTimings) -> Option<StageTimings> {
-    let is_empty = t.parse_us.is_none()
-        && t.header_phase_us.is_none()
-        && t.buffer_us.is_none()
-        && t.sse_unwrap_us.is_none()
-        && t.json_parse_us.is_none()
-        && t.schema_us.is_none()
-        && t.marker_scan_us.is_none()
-        && t.rewrite_us.is_none()
-        && t.reserialize_us.is_none()
-        && t.url_map_us.is_none()
-        && t.side_effects_us.is_none();
-    if is_empty { None } else { Some(t.clone()) }
+fn derive_stage_timings(timings: &[StageTiming]) -> Option<Vec<StageTiming>> {
+    if timings.is_empty() {
+        None
+    } else {
+        Some(timings.to_vec())
+    }
 }
 
 /// Emit a `Request` event to the proxy's event bus. Called once per
@@ -204,7 +196,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 
-    use crate::event::types::StageTimings;
     use crate::protocol::jsonrpc::JsonRpcEnvelope;
     use crate::protocol::mcp::{
         ClientMethod, LifecycleMethod, McpMessage, MessageKind, ServerKind, ToolsMethod,
@@ -363,13 +354,21 @@ mod tests {
     async fn build__stage_timings_propagated() {
         let proxy = test_proxy_state();
         let mut cx = test_context(proxy);
-        cx.working.timings = StageTimings {
-            parse_us: Some(42),
-            ..Default::default()
-        };
+        cx.working.timings.push(StageTiming {
+            name: "intake_parse",
+            elapsed_us: 42,
+        });
+        cx.working.timings.push(StageTiming {
+            name: "csp_rewrite",
+            elapsed_us: 100,
+        });
         let resp = buffered_ok(r#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
         let ev = build_request_event("p", &cx, &resp);
-        assert_eq!(ev.stage_timings.unwrap().parse_us, Some(42));
+        let timings = ev.stage_timings.expect("stage_timings populated");
+        assert_eq!(timings.len(), 2);
+        assert_eq!(timings[0].name, "intake_parse");
+        assert_eq!(timings[0].elapsed_us, 42);
+        assert_eq!(timings[1].name, "csp_rewrite");
     }
 
     #[tokio::test]

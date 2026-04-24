@@ -22,7 +22,7 @@ scripts/all.sh
 
 # Or run a single scenario.
 scripts/scenarios/perf/overhead.sh
-scripts/scenarios/correctness/sse-compat.sh
+scripts/scenarios/correctness/multi-event-sse.sh
 scripts/scenarios/diagnostics/where-time-goes.sh
 ```
 
@@ -34,7 +34,6 @@ dated report in `reports/`.
 ```
 scripts/scenarios/
 ├── correctness/                ← deterministic, CI-gateable
-│   ├── sse-compat.sh
 │   ├── multi-event-sse.sh
 │   └── passthrough-binary.sh
 ├── perf/                       ← directional, dev-run
@@ -51,7 +50,6 @@ scripts/scenarios/
 
 | Scenario              | Asserts                                              |
 |-----------------------|------------------------------------------------------|
-| `sse-compat.sh`       | SSE body byte-match + `transfer-encoding: chunked`   |
 | `multi-event-sse.sh`  | Multi-event SSE framing preserved                    |
 | `passthrough-binary.sh` | Non-JSON binary byte-pass                           |
 
@@ -126,17 +124,14 @@ auto-stop any existing one on start.
 
 ## Historical findings
 
-Three scenarios in this harness originally caught mcpr bugs that the
-unit tests missed:
+Scenarios in this harness originally caught mcpr bugs that the unit
+tests missed:
 
-- **SSE byte-pass** (sse-compat) — upstream `text/event-stream` responses
-  are now forwarded unchanged; `transfer-encoding: chunked` preserved,
-  SSE metadata intact, JSON byte-for-byte identical.
 - **Multi-event SSE** — multi-event responses stream through correctly
   (old code silently dropped framing when more than one `data:` line was
   present).
 - **Binary passthrough** — non-JSON responses stream via `Body::from_stream`
   instead of going through `String::from_utf8_lossy` + `.replace()`.
 
-All three are fixed in the branch-by-shape pipeline refactor (see
-`docs/proxy/REFACTOR_PLAN.md`). Scenarios remain as regression guards.
+Both are fixed in the pipeline refactor (see `docs/proxy/PIPELINE.md`).
+Scenarios remain as regression guards.

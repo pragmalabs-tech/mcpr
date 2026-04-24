@@ -14,6 +14,7 @@ use axum::{
 use crate::state::AppState;
 use mcpr_core::proxy::emit;
 use mcpr_core::proxy::intake::from_axum_parts;
+use mcpr_core::proxy::pipeline::driver::StageGuard;
 use mcpr_core::proxy::pipeline::values::{Context, Intake, Working};
 
 /// All proxy routes — catch-all that routes by method + content-type.
@@ -36,7 +37,6 @@ async fn handle_request(
     let path = uri.path().to_string();
     let http_method = method.clone();
 
-    let req = from_axum_parts(method, headers, uri, body);
     let mut cx = Context {
         intake: Intake {
             start,
@@ -46,6 +46,12 @@ async fn handle_request(
             request_size,
         },
         working: Working::default(),
+    };
+    // Scoped guard pushes `intake_parse` timing on drop (skipped when
+    // `MCPR_STAGE_TIMING` is off).
+    let req = {
+        let _g = StageGuard::start("intake_parse", &mut cx.working.timings);
+        from_axum_parts(method, headers, uri, body)
     };
 
     let resp = state.pipeline.run(req, &mut cx).await;

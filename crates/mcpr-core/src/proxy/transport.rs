@@ -5,6 +5,7 @@
 //! comes from the `Route` — no content-type sniffing at dispatch time.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use axum::body::{Body, Bytes};
@@ -12,9 +13,9 @@ use axum::http::{HeaderMap, Method, StatusCode, header};
 
 use super::ProxyState;
 use super::forwarding::{forward_request, read_body_capped};
-use super::pipeline::driver::Transport;
+use super::pipeline::driver::{StageGuard, Transport};
 use super::pipeline::values::{
-    BufferPolicy, Context, Envelope, McpRequest, RawRequest, Request, Response, Route,
+    BufferPolicy, Context, Envelope, McpRequest, RawRequest, Request, Response, Route, Working,
 };
 use super::sse::{extract_json_from_sse, split_upstream};
 use crate::protocol::jsonrpc::JsonRpcEnvelope;
@@ -24,7 +25,7 @@ pub struct ProxyTransport;
 
 #[async_trait]
 impl Transport for ProxyTransport {
-    async fn dispatch(&self, req: Request, route: Route, cx: &Context) -> Response {
+    async fn dispatch(&self, req: Request, route: Route, cx: &mut Context) -> Response {
         let state = cx.intake.proxy.clone();
         match (req, route) {
             (
@@ -34,12 +35,12 @@ impl Transport for ProxyTransport {
                     buffer_policy,
                     ..
                 },
-            ) => dispatch_mcp_post(state, mcp, upstream, buffer_policy).await,
+            ) => dispatch_mcp_post(state, mcp, upstream, buffer_policy, &mut cx.working).await,
             (Request::Mcp(mcp), Route::McpSseLegacy { upstream }) => {
-                dispatch_sse_legacy(state, mcp, upstream).await
+                dispatch_sse_legacy(state, mcp, upstream, &mut cx.working).await
             }
             (Request::Raw(raw), Route::Raw { upstream }) => {
-                dispatch_raw(state, raw, upstream).await
+                dispatch_raw(state, raw, upstream, &mut cx.working).await
             }
             // Intake never produces `Request::OAuth` today; arm is defensive.
             (Request::OAuth(_), Route::Oauth { .. }) => Response::Upstream502 {
@@ -57,9 +58,11 @@ async fn dispatch_mcp_post(
     mcp: McpRequest,
     upstream: String,
     buffer_policy: BufferPolicy,
+    working: &mut Working,
 ) -> Response {
     let body_bytes = Bytes::from(mcp.envelope.to_bytes());
     let is_streaming = matches!(buffer_policy, BufferPolicy::Streamed);
+    let upstream_started = Instant::now();
     let resp = match forward_request(
         &state.upstream,
         &upstream,
@@ -72,16 +75,20 @@ async fn dispatch_mcp_post(
     {
         Ok(r) => r,
         Err(e) => {
+            working.upstream_us = Some(upstream_started.elapsed().as_micros() as u64);
             return Response::Upstream502 {
                 reason: format!("{e}"),
             };
         }
     };
+    working.upstream_us = Some(upstream_started.elapsed().as_micros() as u64);
     let status = resp.status();
     let headers = resp.headers().clone();
 
     match buffer_policy {
-        BufferPolicy::Buffered { max } => buffer_and_parse(resp, max, status, headers).await,
+        BufferPolicy::Buffered { max } => {
+            buffer_and_parse(resp, max, status, headers, working).await
+        }
         BufferPolicy::Streamed => Response::McpStreamed {
             envelope: Envelope::Json,
             body: Body::from_stream(resp.bytes_stream()),
@@ -96,35 +103,49 @@ async fn buffer_and_parse(
     max: usize,
     status: StatusCode,
     headers: HeaderMap,
+    working: &mut Working,
 ) -> Response {
-    let raw = match read_body_capped(resp, max).await {
-        Ok(b) => b,
-        Err(e) => {
-            return Response::Upstream502 {
-                reason: e.to_string(),
-            };
+    // `StageGuard` pushes a named timing on drop. Each wrapping block
+    // scopes one phase; `?` / early returns still fire the guard's
+    // Drop, so failure paths are measured too.
+    let raw = {
+        let _g = StageGuard::start("transport_buffer", &mut working.timings);
+        match read_body_capped(resp, max).await {
+            Ok(b) => b,
+            Err(e) => {
+                return Response::Upstream502 {
+                    reason: e.to_string(),
+                };
+            }
         }
     };
+
     let was_sse = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .map(|ct| ct.contains("text/event-stream"))
         .unwrap_or(false);
     let json_bytes: Vec<u8> = if was_sse {
+        let _g = StageGuard::start("transport_sse_unwrap", &mut working.timings);
         extract_json_from_sse(&raw).unwrap_or_else(|| raw.to_vec())
     } else {
         raw.to_vec()
     };
-    let envelope = match JsonRpcEnvelope::parse(&json_bytes) {
-        Ok(e) => e,
-        Err(_) => {
-            return Response::Raw {
-                body: Body::from(raw),
-                status,
-                headers,
-            };
+
+    let envelope = {
+        let _g = StageGuard::start("transport_json_parse", &mut working.timings);
+        match JsonRpcEnvelope::parse(&json_bytes) {
+            Ok(e) => e,
+            Err(_) => {
+                return Response::Raw {
+                    body: Body::from(raw),
+                    status,
+                    headers,
+                };
+            }
         }
     };
+
     let kind = MessageKind::Server(classify_server(&envelope));
     let message = McpMessage { envelope, kind };
     Response::McpBuffered {
@@ -143,8 +164,10 @@ async fn dispatch_sse_legacy(
     state: Arc<ProxyState>,
     mcp: McpRequest,
     upstream: String,
+    working: &mut Working,
 ) -> Response {
     let empty = Bytes::new();
+    let upstream_started = Instant::now();
     let resp = match forward_request(
         &state.upstream,
         &upstream,
@@ -157,11 +180,13 @@ async fn dispatch_sse_legacy(
     {
         Ok(r) => r,
         Err(e) => {
+            working.upstream_us = Some(upstream_started.elapsed().as_micros() as u64);
             return Response::Upstream502 {
                 reason: format!("{e}"),
             };
         }
     };
+    working.upstream_us = Some(upstream_started.elapsed().as_micros() as u64);
     let status = resp.status();
     let headers = resp.headers().clone();
     Response::McpStreamed {
@@ -172,7 +197,12 @@ async fn dispatch_sse_legacy(
     }
 }
 
-async fn dispatch_raw(state: Arc<ProxyState>, raw: RawRequest, upstream: String) -> Response {
+async fn dispatch_raw(
+    state: Arc<ProxyState>,
+    raw: RawRequest,
+    upstream: String,
+    working: &mut Working,
+) -> Response {
     let (base, _) = split_upstream(&upstream);
     let url = format!("{}{}", base.trim_end_matches('/'), raw.path);
     // Passthrough does not cap the request body — `DefaultBodyLimit`
@@ -181,6 +211,7 @@ async fn dispatch_raw(state: Arc<ProxyState>, raw: RawRequest, upstream: String)
     let body_bytes = axum::body::to_bytes(raw.body, usize::MAX)
         .await
         .unwrap_or_default();
+    let upstream_started = Instant::now();
     let resp = match forward_request(
         &state.upstream,
         &url,
@@ -193,19 +224,24 @@ async fn dispatch_raw(state: Arc<ProxyState>, raw: RawRequest, upstream: String)
     {
         Ok(r) => r,
         Err(e) => {
+            working.upstream_us = Some(upstream_started.elapsed().as_micros() as u64);
             return Response::Upstream502 {
                 reason: format!("{e}"),
             };
         }
     };
+    working.upstream_us = Some(upstream_started.elapsed().as_micros() as u64);
     let status = resp.status();
     let headers = resp.headers().clone();
-    let body_bytes = match read_body_capped(resp, state.max_response_body).await {
-        Ok(b) => b,
-        Err(e) => {
-            return Response::Upstream502 {
-                reason: e.to_string(),
-            };
+    let body_bytes = {
+        let _g = StageGuard::start("transport_buffer", &mut working.timings);
+        match read_body_capped(resp, state.max_response_body).await {
+            Ok(b) => b,
+            Err(e) => {
+                return Response::Upstream502 {
+                    reason: e.to_string(),
+                };
+            }
         }
     };
     Response::Raw {
@@ -273,7 +309,7 @@ mod tests {
         );
         let url = format!("{}/mcp", spawn_upstream(app).await);
         let proxy = test_proxy_state_upstream(url.clone());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = mcp_request(
             "tools/list",
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -285,7 +321,9 @@ mod tests {
             buffer_policy: BufferPolicy::Buffered { max: 1 << 20 },
         };
 
-        let out = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         match out {
             Response::McpBuffered {
                 envelope, message, ..
@@ -320,7 +358,7 @@ mod tests {
         );
         let url = format!("{}/mcp", spawn_upstream(app).await);
         let proxy = test_proxy_state_upstream(url.clone());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = mcp_request(
             "tools/list",
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -332,7 +370,9 @@ mod tests {
             buffer_policy: BufferPolicy::Buffered { max: 1 << 20 },
         };
 
-        let out = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         match out {
             Response::McpBuffered { envelope, .. } => assert_eq!(envelope, Envelope::Sse),
             other => panic!("expected McpBuffered, got {other:?}"),
@@ -356,7 +396,7 @@ mod tests {
         );
         let url = format!("{}/mcp", spawn_upstream(app).await);
         let proxy = test_proxy_state_upstream(url.clone());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = mcp_request(
             "tools/list",
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -368,7 +408,9 @@ mod tests {
             buffer_policy: BufferPolicy::Buffered { max: 1024 },
         };
 
-        let out = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         assert!(matches!(out, Response::Upstream502 { .. }));
     }
 
@@ -386,7 +428,7 @@ mod tests {
         );
         let url = format!("{}/mcp", spawn_upstream(app).await);
         let proxy = test_proxy_state_upstream(url.clone());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = mcp_request(
             "tools/list",
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -398,7 +440,9 @@ mod tests {
             buffer_policy: BufferPolicy::Buffered { max: 1 << 20 },
         };
 
-        let out = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         assert!(matches!(out, Response::Raw { .. }));
     }
 
@@ -416,7 +460,7 @@ mod tests {
         );
         let url = format!("{}/mcp", spawn_upstream(app).await);
         let proxy = test_proxy_state_upstream(url.clone());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = mcp_request("ping", r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#, None);
         let route = Route::McpStreamableHttp {
             upstream: url,
@@ -424,7 +468,9 @@ mod tests {
             buffer_policy: BufferPolicy::Streamed,
         };
 
-        let out = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         match out {
             Response::McpStreamed { body, status, .. } => {
                 assert_eq!(status, StatusCode::OK);
@@ -450,7 +496,7 @@ mod tests {
         );
         let url = format!("{}/mcp", spawn_upstream(app).await);
         let proxy = test_proxy_state_upstream(url.clone());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = McpRequest {
             transport: McpTransport::SseLegacyGet,
             envelope: JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"ping"}"#).unwrap(),
@@ -462,7 +508,9 @@ mod tests {
         };
         let route = Route::McpSseLegacy { upstream: url };
 
-        let out = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         assert!(matches!(
             out,
             Response::McpStreamed {
@@ -490,7 +538,7 @@ mod tests {
             .with_state(recorded.clone());
         let base = spawn_upstream(app).await;
         let proxy = test_proxy_state_upstream(format!("{base}/mcp"));
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = RawRequest {
             method: Method::POST,
             path: "/token".into(),
@@ -501,7 +549,9 @@ mod tests {
             upstream: format!("{base}/mcp"),
         };
 
-        let out = ProxyTransport.dispatch(Request::Raw(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Raw(req), route, &mut cx)
+            .await;
         assert!(matches!(out, Response::Raw { .. }));
         assert_eq!(
             recorded.0.lock().unwrap().as_deref(),
@@ -515,7 +565,7 @@ mod tests {
         // Random unused port — nothing listening.
         let url = "http://127.0.0.1:1".to_string();
         let proxy = test_proxy_state_upstream(url.clone());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = mcp_request(
             "tools/list",
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -527,14 +577,16 @@ mod tests {
             buffer_policy: BufferPolicy::Buffered { max: 1 << 20 },
         };
 
-        let out = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         assert!(matches!(out, Response::Upstream502 { .. }));
     }
 
     #[tokio::test]
     async fn dispatch__variant_mismatch_is_502() {
         let proxy = test_proxy_state_upstream("http://unused.test".to_string());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = mcp_request(
             "tools/list",
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -544,7 +596,9 @@ mod tests {
             upstream: "http://unused.test".into(),
         };
 
-        let out = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let out = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         assert!(matches!(out, Response::Upstream502 { reason } if reason.contains("mismatch")));
     }
 
@@ -575,7 +629,7 @@ mod tests {
             .with_state(recorded.clone());
         let url = format!("{}/mcp", spawn_upstream(app).await);
         let proxy = test_proxy_state_upstream(url.clone());
-        let cx = test_context(proxy);
+        let mut cx = test_context(proxy);
         let req = mcp_request(
             "tools/list",
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
@@ -587,7 +641,9 @@ mod tests {
             buffer_policy: BufferPolicy::Buffered { max: 1 << 20 },
         };
 
-        let _ = ProxyTransport.dispatch(Request::Mcp(req), route, &cx).await;
+        let _ = ProxyTransport
+            .dispatch(Request::Mcp(req), route, &mut cx)
+            .await;
         // Give the upstream task a moment to observe (serve completes before dispatch returns).
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(

@@ -14,7 +14,6 @@ use axum::{
     response::IntoResponse,
 };
 
-use crate::event::types::StageTimings;
 use crate::protocol::session::{ClientInfo, SessionInfo};
 use crate::proxy::ProxyState;
 use crate::proxy::forwarding::build_response;
@@ -254,6 +253,26 @@ pub struct Working {
     /// fills this on the buffered path; streaming paths leave it `None`.
     /// Feeds `RequestEvent.response_size`.
     pub response_size: Option<u64>,
+    /// Wall-clock time spent in `forward_request` (network RTT +
+    /// upstream work). Populated by `ProxyTransport`. Feeds
+    /// `RequestEvent.upstream_us`.
+    pub upstream_us: Option<u64>,
     pub tags: TagSet,
-    pub timings: StageTimings,
+    /// Per-stage wall-clock timings, pushed in order as each stage
+    /// completes. Populated only when `MCPR_STAGE_TIMING` is set —
+    /// otherwise stays empty. Feeds `RequestEvent.stage_timings`.
+    pub timings: Vec<StageTiming>,
+}
+
+/// One named wall-clock measurement for a single pipeline stage.
+///
+/// Each middleware and named non-middleware site (intake parse,
+/// transport upstream/buffer/unwrap/parse) pushes one of these onto
+/// `Working.timings` when stage timing is enabled. The driver sums
+/// nothing — duplicates are fine; aggregators (e.g. the bench
+/// diagnostic) group by `name`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StageTiming {
+    pub name: &'static str,
+    pub elapsed_us: u64,
 }
