@@ -1,6 +1,6 @@
 //! Top-level value types for the target pipeline.
 //!
-//! See `PIPELINE_ARCHITECTURE.md` §Types. These are the sum types
+//! See `PIPELINE.md` §Types. These are the sum types
 //! passed between pipeline stages: `Request` in, `Response` out, with
 //! `Context` threaded by reference.
 

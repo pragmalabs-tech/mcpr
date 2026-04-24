@@ -1,7 +1,7 @@
 //! Default middleware chain construction for the target pipeline.
 //!
 //! One call to [`build_default_pipeline`] produces the ordered chain
-//! from `PIPELINE_ARCHITECTURE.md` §"Registered chains". Order matters:
+//! from `PIPELINE.md` §Middleware. Order matters:
 //! schema ingest runs before CSP rewrite so the schema store captures
 //! the raw upstream CSP (cloud-backend contract), and envelope seal runs
 //! last so content-inspecting middlewares operate on `McpBuffered`

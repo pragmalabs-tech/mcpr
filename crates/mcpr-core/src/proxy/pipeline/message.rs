@@ -1,6 +1,6 @@
 //! MCP message taxonomy (spec v2025-11-25).
 //!
-//! See `PIPELINE_ARCHITECTURE.md` §MCP message taxonomy. Method identity
+//! See `PIPELINE.md` §Types. Method identity
 //! is a cheap enum — one string match per message. Grouping by feature
 //! area (`Tools`, `Resources`, …) matches the spec table and lets
 //! middlewares pattern-match at the granularity they need.

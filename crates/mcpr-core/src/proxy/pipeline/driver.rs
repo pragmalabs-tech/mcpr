@@ -1,7 +1,7 @@
 //! Pipeline driver — the engine that runs middleware chains, the
 //! router, and the transport.
 //!
-//! See `PIPELINE_ARCHITECTURE.md` §Driver. A short explicit loop that
+//! See `PIPELINE.md` §Layers. A short explicit loop that
 //! owns an ordered `Vec<Box<dyn …>>` for each chain. No tower, no
 //! service combinators.
 

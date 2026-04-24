@@ -1,6 +1,6 @@
 //! Middleware traits for the target pipeline.
 //!
-//! See `PIPELINE_ARCHITECTURE.md` §Middleware. `RequestMiddleware`
+//! See `PIPELINE.md` §Middleware. `RequestMiddleware`
 //! inspects and may transform or short-circuit a `Request`;
 //! `ResponseMiddleware` mirrors the pattern on the way out.
 //!
