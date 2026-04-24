@@ -1,10 +1,5 @@
 //! Response-side middleware: flip the shared proxy-health flag to
 //! "connected" on a successful `initialize` response.
-//!
-//! Ports `pipeline/steps/health.rs::track_post_response`. Today's step
-//! handles only the connected-flip; the TODO below mirrors it and notes
-//! where a full success/failure counter hook lands (Phase 4 when the
-//! counter API exists).
 
 use async_trait::async_trait;
 
@@ -39,8 +34,8 @@ impl ResponseMiddleware for HealthTrackMiddleware {
         {
             lock_health(&cx.intake.proxy.health).confirm_mcp_connected();
         }
-        // TODO(phase-4): record per-request success / failure once the
-        // counter API lands on ProxyHealth.
+        // TODO: record per-request success / failure once the counter
+        // API lands on ProxyHealth.
         resp
     }
 }

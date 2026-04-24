@@ -1,11 +1,10 @@
-//! End-to-end pipeline integration tests — the Phase 5 compatibility gate.
+//! End-to-end pipeline integration tests.
 //!
-//! These tests exercise the full target pipeline (intake → request chain →
+//! These tests exercise the full pipeline (intake → request chain →
 //! router → transport → response chain → emit → `IntoResponse`) against
-//! real axum upstreams. They are the port of the OLD `pipeline/run.rs`
-//! test suite onto the new engine: same scenarios, same assertions on
-//! event shape and HTTP output — cloud-backend consumers of `RequestEvent`
-//! / session-lifecycle events should see no drift after the cutover.
+//! real axum upstreams. They assert on `RequestEvent` wire shape and
+//! session-lifecycle event contents — `mcpr-cloud/backend/` consumers
+//! rely on both.
 //!
 //! Run with: `cargo test -p mcpr-core --test pipeline_integration`.
 

@@ -1,11 +1,9 @@
 //! Response-side middleware: serialize the buffered MCP message and
 //! re-wrap as SSE if the upstream framing requires it.
 //!
-//! Replaces the inline serialize + `wrap_as_sse` dance at the end of
-//! `handlers/buffered.rs`. Emits `Response::Raw` carrying the final
-//! bytes and the correct `Content-Type` header, so the axum
-//! `IntoResponse` edge (Phase 6) needs no discriminator beyond what is
-//! already on the response.
+//! Emits `Response::Raw` carrying the final bytes and the correct
+//! `Content-Type` header, so the axum `IntoResponse` edge needs no
+//! discriminator beyond what is already on the response.
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -44,11 +42,11 @@ impl ResponseMiddleware for EnvelopeSealMiddleware {
         };
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(ct));
 
-        // Phase-5 parity: legacy emit pushed `rewritten` whenever we
-        // parsed JSON (not whether we mutated), plus `sse` when the
-        // upstream body was SSE-framed. We know both facts here — stash
-        // them into `cx.working.tags` so `emit::build_request_event`
-        // reproduces legacy `note` strings.
+        // Tag `rewritten` whenever we parsed JSON (regardless of whether
+        // a middleware mutated it), plus `sse` when the upstream body
+        // was SSE-framed. Both facts are known here; stashing them on
+        // `cx.working.tags` lets `emit::build_request_event` produce the
+        // `note` string without re-inspecting the response.
         if !cx.working.tags.as_slice().contains(&"rewritten") {
             cx.working.tags.push("rewritten");
         }

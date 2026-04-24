@@ -1,9 +1,7 @@
 //! Request-side middleware: decode `clientInfo` from a client
 //! `initialize` request and stash it on `Working`.
 //!
-//! Today's pipeline does this inline in `parser.rs:45-51`. In the new
-//! shape, intake builds the shallow envelope and this middleware opts
-//! into the typed `InitializeParams` view via `params_as::<Value>()`.
+//! Opts into the typed `InitializeParams` view via `params_as::<Value>()`.
 //! `SessionRecordMiddleware` later reads `cx.working.client` to emit a
 //! populated `SessionStart`.
 

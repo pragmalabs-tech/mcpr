@@ -9,11 +9,10 @@ use futures_util::StreamExt;
 
 /// Shared upstream connection config for forwarding requests.
 ///
-/// Concurrency limiting moved out of this struct in Phase 6 — a
-/// `tower::limit::ConcurrencyLimitLayer` wraps the axum service at the
-/// HTTP boundary. `request_timeout` stays here only for streaming paths
-/// where the tower layer can't reach (tower-http timeout cancels at
-/// response start, not mid-stream).
+/// Concurrency and buffered-path timeout are enforced at the axum edge
+/// by `ConcurrencyLimitLayer` / `TimeoutLayer`. `request_timeout` here
+/// applies only to streaming calls, which the tower-http timeout can't
+/// cover (it cancels at response start, not mid-stream).
 #[derive(Clone)]
 pub struct UpstreamClient {
     pub http_client: reqwest::Client,
@@ -22,10 +21,8 @@ pub struct UpstreamClient {
 
 /// Reason the upstream body could not be read.
 ///
-/// Typed so `ProxyTransport` can map it to `Response::Upstream502` with
-/// a meaningful reason string — Phase 6 replacement for the old axum-
-/// response return shape that couldn't carry through the response
-/// middleware chain.
+/// `ProxyTransport` maps this to `Response::Upstream502 { reason }` so
+/// the failure flows through the response middleware chain.
 #[derive(Debug)]
 pub enum ReadBodyError {
     /// `Content-Length` or streamed bytes exceeded `max_bytes`.

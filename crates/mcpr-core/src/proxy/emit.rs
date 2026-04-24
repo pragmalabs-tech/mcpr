@@ -1,14 +1,12 @@
-//! `RequestEvent` construction and emission for the target pipeline.
+//! `RequestEvent` construction and emission.
 //!
-//! The sole construction site for [`RequestEvent`] in the new pipeline.
-//! `handle_request` calls [`emit`] once, immediately after the response
-//! chain has finished, before `IntoResponse` converts the value to an
-//! axum response.
+//! The sole construction site for [`RequestEvent`]. `handle_request`
+//! calls [`emit`] once, immediately after the response chain has
+//! finished, before `IntoResponse` converts the value to an axum
+//! response.
 //!
-//! Event wire shape must match the legacy `pipeline/emit.rs` byte-for-byte
-//! — `mcpr-cloud/backend/` consumes `RequestEvent` and session-lifecycle
-//! events, and there is no cross-repo lockstep story. The inline tests at
-//! the bottom cover the fields that matter.
+//! `mcpr-cloud/backend/` consumes `RequestEvent` and session-lifecycle
+//! events — the inline tests below cover the field shapes both rely on.
 
 use crate::event::types::StageTimings;
 use crate::event::{ProxyEvent, RequestEvent};
@@ -191,10 +189,9 @@ fn derive_note(cx: &Context, resp: &Response) -> String {
 }
 
 /// Normalize a client name to a platform identifier used in `SessionStart`.
-/// Kept here so the single Phase-5 port of legacy emit logic owns both
-/// `RequestEvent` construction and platform normalization; middlewares
-/// that also need this (`SessionRecord`) reach for the middleware-local
-/// `shared::normalize_platform` to avoid a cross-module cycle.
+/// Thin re-export of `pipeline::middlewares::shared::normalize_platform`
+/// so external callers of this module don't have to reach into the
+/// middlewares submodule.
 pub fn normalize_platform(client_name: &str) -> &'static str {
     shared::normalize_platform(client_name)
 }

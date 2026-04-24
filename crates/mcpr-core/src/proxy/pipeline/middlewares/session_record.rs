@@ -1,10 +1,8 @@
 //! Response-side middleware: on a successful `initialize` response,
 //! create the session, stash client info, emit `SessionStart`.
 //!
-//! Ports `pipeline/steps/session.rs::maybe_record_start` and absorbs the
-//! `populate_client_info` helper that the old pipeline called
-//! separately. Reads `cx.working.request_method` to detect the
-//! originating method and `cx.working.client` for `ClientInfo` that
+//! Reads `cx.working.request_method` to detect the originating method
+//! and `cx.working.client` for `ClientInfo` that
 //! `ClientInfoInjectMiddleware` stashed on the request side.
 
 use async_trait::async_trait;

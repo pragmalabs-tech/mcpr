@@ -1,11 +1,10 @@
 //! Response-side middleware: spawn fire-and-forget schema ingest on
 //! list-method result responses.
 //!
-//! Ports `pipeline/steps/schema.rs::spawn_ingest`. Reads the originating
-//! method from `cx.working.request_method` (stashed by
-//! `SessionTouchMiddleware`), reconstructs the request envelope the
-//! ingest task needs, and hands ownership to the spawned task. The hot
-//! path never waits for merge / hash / store.
+//! Reads the originating method from `cx.working.request_method`
+//! (stashed by `SessionTouchMiddleware`), reconstructs the request
+//! envelope the ingest task needs, and hands ownership to the spawned
+//! task. The hot path never waits for merge / hash / store.
 
 use async_trait::async_trait;
 use serde_json::Value;

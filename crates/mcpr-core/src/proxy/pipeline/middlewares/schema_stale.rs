@@ -1,14 +1,11 @@
 //! Response-side middleware: mark schema stale on server-initiated
-//! `list_changed` notifications.
+//! `list_changed` notifications. Pattern-matches on `ServerNotifMethod`
+//! directly — no JSON tree walk.
 //!
-//! Ports `pipeline/steps/schema.rs::mark_stale_if_listchanged`. The old
-//! helper inspected a parsed `Value`; this middleware pattern-matches
-//! on `ServerNotifMethod` directly — no JSON tree walk.
-//!
-//! Known limitation: fires only on `Response::McpBuffered`. `list_changed`
-//! notifications that arrive mid-stream in `McpStreamed` bodies stay
-//! unobserved — same gap the current step has. The server-push
-//! observability track (deferred) closes it.
+//! Known limitation: fires only on `Response::McpBuffered`.
+//! `list_changed` notifications that arrive mid-stream inside
+//! `McpStreamed` bodies stay unobserved until server-push observability
+//! lands.
 
 use async_trait::async_trait;
 

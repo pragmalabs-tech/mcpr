@@ -1,11 +1,12 @@
 //! Helpers shared across middlewares.
 //!
-//! `normalize_platform` lifts the client-name-to-platform mapping from
-//! `pipeline/emit.rs` so `SessionRecordMiddleware` does not depend on a
-//! module scheduled for deletion in Phase 5. `client_method_str` is the
-//! inverse of `ClientMethod::parse` — middlewares that need the method
-//! string (schema ingest, CSP rewrite) call it instead of round-tripping
-//! through `serde_json`.
+//! `normalize_platform` maps a client name (e.g. "claude-desktop") to a
+//! platform identifier ("claude"). `serialize_envelope` reassembles a
+//! `JsonRpcEnvelope` into JSON bytes (used by `EnvelopeSeal` on the way
+//! out and by `ProxyTransport` to re-serialize request bodies).
+//! `client_method_str` is the inverse of `ClientMethod::parse` —
+//! middlewares that need the method string (schema ingest, CSP rewrite)
+//! call it instead of round-tripping through `serde_json`.
 
 use serde_json::{Map, Value};
 

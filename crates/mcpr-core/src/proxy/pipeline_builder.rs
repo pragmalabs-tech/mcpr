@@ -1,4 +1,4 @@
-//! Default middleware chain construction for the target pipeline.
+//! Default middleware chain construction for the pipeline.
 //!
 //! One call to [`build_default_pipeline`] produces the ordered chain
 //! from `PIPELINE.md` §Middleware. Order matters:

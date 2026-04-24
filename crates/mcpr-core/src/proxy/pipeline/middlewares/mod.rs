@@ -1,9 +1,6 @@
-//! Middleware implementations — one struct per file, each ported from
-//! a `pipeline/steps/*.rs` free function.
-//!
-//! These live alongside the old `steps/` functions during Phase 3. Phase
-//! 5 flips the live pipeline over to this module and deletes `steps/`.
-//! Until then, no production code path references anything here.
+//! Middleware implementations — one struct per file. Each implements
+//! `RequestMiddleware` or `ResponseMiddleware` and matches on the
+//! `Request` / `Response` variants it cares about.
 
 pub mod client_info_inject;
 pub mod csp_rewrite;

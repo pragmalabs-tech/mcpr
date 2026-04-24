@@ -1,8 +1,8 @@
-//! Middleware traits for the target pipeline.
+//! Middleware traits for the pipeline.
 //!
-//! See `PIPELINE.md` §Middleware. `RequestMiddleware`
-//! inspects and may transform or short-circuit a `Request`;
-//! `ResponseMiddleware` mirrors the pattern on the way out.
+//! See `PIPELINE.md` §Middleware. `RequestMiddleware` inspects and may
+//! transform or short-circuit a `Request`; `ResponseMiddleware` mirrors
+//! the pattern on the way out.
 //!
 //! The driver that runs these traits lives in [`super::driver`].
 
@@ -24,8 +24,8 @@ pub enum Flow {
 
 #[async_trait]
 pub trait RequestMiddleware: Send + Sync {
-    /// Stable identifier. Used for registration logs (Phase 6) and
-    /// test introspection. Return a `&'static str` literal.
+    /// Stable identifier used for `info!` registration logs and test
+    /// introspection. Return a `&'static str` literal.
     fn name(&self) -> &'static str;
 
     /// Inspect or transform the request. Variants the middleware does

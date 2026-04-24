@@ -1,4 +1,4 @@
-//! Top-level value types for the target pipeline.
+//! Top-level value types for the pipeline.
 //!
 //! See `PIPELINE.md` §Types. These are the sum types
 //! passed between pipeline stages: `Request` in, `Response` out, with
@@ -81,8 +81,8 @@ pub struct RawRequest {
 // ── Response side ────────────────────────────────────────────
 
 /// Sum type produced by the transport, or by a short-circuiting
-/// middleware. `IntoResponse` (Phase 6) converts this into an axum
-/// response at the edge.
+/// middleware. `impl IntoResponse for Response` (below) converts this
+/// into an axum response at the edge.
 #[derive(Debug)]
 pub enum Response {
     /// Buffered MCP response: one parsed `McpMessage`, mutated in place
@@ -115,7 +115,8 @@ pub enum Response {
         headers: HeaderMap,
     },
     /// Upstream failure. Travels through the response chain like any
-    /// other response; replaces today's ad-hoc `emit_upstream_error`.
+    /// other response — `HealthTrack` records it, `emit` tags the event
+    /// as `upstream error`, and `IntoResponse` renders a 502.
     Upstream502 { reason: String },
 }
 

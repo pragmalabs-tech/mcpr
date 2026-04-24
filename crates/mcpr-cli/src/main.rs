@@ -125,8 +125,7 @@ pub fn build_app(app_state: AppState) -> Router {
         // Body cap first — reject oversized requests before they consume
         // a concurrency slot or start a timeout budget.
         .layer(DefaultBodyLimit::max(max_request))
-        // Concurrency cap — replaces the `UpstreamClient::semaphore`
-        // deleted in Phase 6. For a 1:1 proxy, inbound concurrency ==
+        // Concurrency cap. For a 1:1 proxy, inbound concurrency ==
         // upstream concurrency in steady state.
         .layer(tower::limit::ConcurrencyLimitLayer::new(max_concurrent))
         // Per-request timeout — covers the buffered path end-to-end.
