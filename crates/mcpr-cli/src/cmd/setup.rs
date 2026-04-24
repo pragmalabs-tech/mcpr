@@ -138,20 +138,9 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
     };
 
     let mut client = CloudClient::new(cloud_url);
+    let mut authed = false;
 
-    // ── 1. Authenticate (try cached JWT first) ─────────────────────────
-    if let Some(cached) = load_cached_auth(cloud_url) {
-        client.set_jwt(cached.jwt);
-        println!(
-            "  {} Logged in as {} (cached)\n",
-            "✓".green(),
-            cached.email.bold()
-        );
-    } else {
-        authenticate(&mut client, cloud_url).await?;
-    }
-
-    // ── 2. MCP server URL ──────────────────────────────────────────────
+    // ── 1. MCP server URL ──────────────────────────────────────────────
     let mut prompt = Text::new("MCP server URL (e.g. http://localhost:8080):");
     if let Some(ref mcp) = defaults.mcp {
         prompt = prompt.with_default(mcp);
@@ -162,7 +151,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         return Err("MCP server URL is required".into());
     }
 
-    // ── 2b. Listen port ────────────────────────────────────────────────
+    // ── 2. Listen port ─────────────────────────────────────────────────
     let port: Option<u16> = loop {
         let port_str = Text::new("Listen port (leave empty for auto):")
             .with_default("")
@@ -184,28 +173,72 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         println!("  {} port {p} is already in use", "✗".red());
     };
 
-    // ── 3. Project selection ───────────────────────────────────────────
-    let project = select_or_create_project(&client).await?;
-
-    // ── 4. Server selection ────────────────────────────────────────────
-    let server = select_or_create_server(&client, &project.id, &defaults).await?;
-
-    // ── 5. Tunnel ──────────────────────────────────────────────────────
-    let enable_tunnel = Confirm::new("Enable tunnel?")
-        .with_default(true)
+    // ── 3. Public tunnel? (login on yes) ───────────────────────────────
+    println!();
+    println!(
+        "  {}",
+        "Test in ChatGPT / Claude / other AI clients, or share with teammates.".dimmed()
+    );
+    println!("  {}", "Docs: https://mcpr.app/tunnels/overview/".dimmed());
+    let enable_tunnel = Confirm::new("Expose this proxy on a public HTTPS URL?")
+        .with_default(false)
         .prompt()
         .map_err(|e| format!("prompt error: {e}"))?;
 
+    if enable_tunnel {
+        ensure_authenticated(&mut client, cloud_url, &mut authed).await?;
+    }
+
+    // ── 4. Cloud dashboard? (login on yes, reuse session) ──────────────
+    println!();
+    println!(
+        "  {}",
+        "Debug slow tool calls, track performance, and inspect errors in a web UI.".dimmed()
+    );
+    println!(
+        "  {}",
+        "Docs: https://mcpr.app/cloud/server-overview/".dimmed()
+    );
+    let enable_cloud = Confirm::new("Send request metrics to the mcpr.app dashboard?")
+        .with_default(false)
+        .prompt()
+        .map_err(|e| format!("prompt error: {e}"))?;
+
+    if enable_cloud {
+        ensure_authenticated(&mut client, cloud_url, &mut authed).await?;
+    }
+
+    // ── 5. Local-only shortcut ─────────────────────────────────────────
+    if !enable_tunnel && !enable_cloud {
+        let name = default_local_name(&defaults, &mcp_url);
+        let config_path = match output {
+            Some(explicit) => explicit.to_string(),
+            None => next_available_config_path(),
+        };
+        let config = build_config(&name, &mcp_url, port, None, None);
+        std::fs::write(&config_path, &config)
+            .map_err(|e| format!("failed to write {config_path}: {e}"))?;
+        println!("\n    {} Saved {}", "✓".green(), config_path);
+        println!("\n  {}", "Run your proxy:".bold());
+        println!("    mcpr start && mcpr proxy run {config_path}");
+        println!();
+        return Ok(());
+    }
+
+    // ── 6. Project + server (needed for both tunnel and cloud) ─────────
+    let project = select_or_create_project(&client).await?;
+    let server = select_or_create_server(&client, &project.id, &defaults).await?;
+
+    // ── 7. Endpoint (tunnel only) ──────────────────────────────────────
     let endpoint = if enable_tunnel {
         Some(select_or_create_endpoint(&client, &server).await?)
     } else {
         None
     };
 
-    // ── 6. Create or reuse project token ─────────────────────────────
+    // ── 8. Create or reuse project token ───────────────────────────────
     println!("\n  Setting up...");
 
-    // If the existing config has a token for the same server, offer to reuse it.
     let token_value = if let Some(ref existing_token) = defaults.cloud_token
         && defaults.cloud_server.as_deref() == Some(&server.slug)
     {
@@ -235,19 +268,25 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         token.token
     };
 
-    // ── 7. Write config ────────────────────────────────────────────────
+    // ── 9. Write config ────────────────────────────────────────────────
     let config_path = match output {
         Some(explicit) => explicit.to_string(),
         None => next_available_config_path(),
     };
-    let config = build_config(
-        &mcp_url,
-        &server,
-        endpoint.as_ref(),
-        &token_value,
-        cloud_url,
-        port,
-    );
+    let tunnel_cfg = endpoint.as_ref().map(|ep| TunnelCfg {
+        subdomain: &ep.name,
+        token: &token_value,
+    });
+    let cloud_cfg = if enable_cloud {
+        Some(CloudCfg {
+            server_slug: &server.slug,
+            token: &token_value,
+            cloud_url,
+        })
+    } else {
+        None
+    };
+    let config = build_config(&server.slug, &mcp_url, port, tunnel_cfg, cloud_cfg);
     std::fs::write(&config_path, &config)
         .map_err(|e| format!("failed to write {config_path}: {e}"))?;
     println!("    {} Saved {}", "✓".green(), config_path);
@@ -264,15 +303,62 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         );
     }
 
-    println!(
-        "  {} https://cloud.mcpr.app/projects/{}/servers/{}",
-        "Dashboard: ".bold(),
-        project.slug,
-        server.slug
-    );
+    if enable_cloud {
+        println!(
+            "  {} https://cloud.mcpr.app/projects/{}/servers/{}",
+            "Dashboard: ".bold(),
+            project.slug,
+            server.slug
+        );
+    }
     println!();
 
     Ok(())
+}
+
+/// Lazily authenticate the cloud client. No-op if already authed this run.
+/// Tries cached JWT first; otherwise prompts email + 6-digit code.
+async fn ensure_authenticated(
+    client: &mut CloudClient,
+    cloud_url: &str,
+    authed: &mut bool,
+) -> Result<(), String> {
+    if *authed {
+        return Ok(());
+    }
+    if let Some(cached) = load_cached_auth(cloud_url) {
+        client.set_jwt(cached.jwt);
+        println!(
+            "  {} Logged in as {} (cached)",
+            "✓".green(),
+            cached.email.bold()
+        );
+    } else {
+        authenticate(client, cloud_url).await?;
+    }
+    *authed = true;
+    Ok(())
+}
+
+/// Derive a proxy name when no cloud server is selected. Falls back to the
+/// existing config's name, then to a slug of the MCP URL's host:port.
+fn default_local_name(defaults: &ExistingConfig, mcp_url: &str) -> String {
+    if let Some(ref n) = defaults.name {
+        return n.clone();
+    }
+    let host = mcp_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .trim_end_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("proxy");
+    let slug = slugify(host);
+    if slug.is_empty() {
+        "proxy".to_string()
+    } else {
+        slug
+    }
 }
 
 // ── Authentication ─────────────────────────────────────────────────────
@@ -483,35 +569,47 @@ async fn create_endpoint(client: &CloudClient, server: &Server) -> Result<Endpoi
 
 // ── Config generation ──────────────────────────────────────────────────
 
+struct TunnelCfg<'a> {
+    subdomain: &'a str,
+    token: &'a str,
+}
+
+struct CloudCfg<'a> {
+    server_slug: &'a str,
+    token: &'a str,
+    cloud_url: &'a str,
+}
+
 fn build_config(
+    name: &str,
     mcp_url: &str,
-    server: &Server,
-    endpoint: Option<&Endpoint>,
-    token: &str,
-    cloud_url: &str,
     port: Option<u16>,
+    tunnel: Option<TunnelCfg>,
+    cloud: Option<CloudCfg>,
 ) -> String {
     let mut cfg = String::new();
-    writeln!(cfg, "name = \"{}\"", server.slug).unwrap();
+    writeln!(cfg, "name = \"{}\"", name).unwrap();
     writeln!(cfg, "mcp = \"{}\"", mcp_url).unwrap();
     if let Some(p) = port {
         writeln!(cfg, "port = {}", p).unwrap();
     }
 
-    if let Some(ep) = endpoint {
+    if let Some(t) = tunnel {
         writeln!(cfg).unwrap();
         writeln!(cfg, "[tunnel]").unwrap();
         writeln!(cfg, "enabled = true").unwrap();
-        writeln!(cfg, "token = \"{}\"", token).unwrap();
-        writeln!(cfg, "subdomain = \"{}\"", ep.name).unwrap();
+        writeln!(cfg, "token = \"{}\"", t.token).unwrap();
+        writeln!(cfg, "subdomain = \"{}\"", t.subdomain).unwrap();
     }
 
-    writeln!(cfg).unwrap();
-    writeln!(cfg, "[cloud]").unwrap();
-    writeln!(cfg, "token = \"{}\"", token).unwrap();
-    writeln!(cfg, "server = \"{}\"", server.slug).unwrap();
-    if cloud_url != DEFAULT_CLOUD_URL {
-        writeln!(cfg, "endpoint = \"{}\"", cloud_url).unwrap();
+    if let Some(c) = cloud {
+        writeln!(cfg).unwrap();
+        writeln!(cfg, "[cloud]").unwrap();
+        writeln!(cfg, "token = \"{}\"", c.token).unwrap();
+        writeln!(cfg, "server = \"{}\"", c.server_slug).unwrap();
+        if c.cloud_url != DEFAULT_CLOUD_URL {
+            writeln!(cfg, "endpoint = \"{}\"", c.cloud_url).unwrap();
+        }
     }
 
     cfg
@@ -648,26 +746,20 @@ mod tests {
     // ── build_config ────────────────────────────────────────────────
 
     #[test]
-    fn build_config__with_tunnel() {
-        let server = Server {
-            id: "s1".into(),
-            name: "prod".into(),
-            slug: "prod".into(),
-            project_id: "p1".into(),
-        };
-        let endpoint = Endpoint {
-            id: "e1".into(),
-            name: "my-app".into(),
-            status: "active".into(),
-            server_id: Some("s1".into()),
-        };
+    fn build_config__tunnel_and_cloud() {
         let config = build_config(
+            "prod",
             "http://localhost:8080",
-            &server,
-            Some(&endpoint),
-            "mcpr_token123",
-            DEFAULT_CLOUD_URL,
             None,
+            Some(TunnelCfg {
+                subdomain: "my-app",
+                token: "mcpr_token123",
+            }),
+            Some(CloudCfg {
+                server_slug: "prod",
+                token: "mcpr_token123",
+                cloud_url: DEFAULT_CLOUD_URL,
+            }),
         );
         assert!(config.contains("name = \"prod\""));
         assert!(config.contains("mcp = \"http://localhost:8080\""));
@@ -682,20 +774,17 @@ mod tests {
     }
 
     #[test]
-    fn build_config__without_tunnel() {
-        let server = Server {
-            id: "s1".into(),
-            name: "dev".into(),
-            slug: "dev".into(),
-            project_id: "p1".into(),
-        };
+    fn build_config__cloud_only() {
         let config = build_config(
+            "dev",
             "http://localhost:3000",
-            &server,
             None,
-            "mcpr_abc",
-            DEFAULT_CLOUD_URL,
             None,
+            Some(CloudCfg {
+                server_slug: "dev",
+                token: "mcpr_abc",
+                cloud_url: DEFAULT_CLOUD_URL,
+            }),
         );
         assert!(config.contains("name = \"dev\""));
         assert!(config.contains("mcp = \"http://localhost:3000\""));
@@ -705,20 +794,44 @@ mod tests {
     }
 
     #[test]
-    fn build_config__custom_cloud_url() {
-        let server = Server {
-            id: "s1".into(),
-            name: "dev".into(),
-            slug: "dev".into(),
-            project_id: "p1".into(),
-        };
+    fn build_config__tunnel_only() {
         let config = build_config(
+            "dev",
             "http://localhost:3000",
-            &server,
             None,
-            "mcpr_abc",
-            "http://localhost:8000",
+            Some(TunnelCfg {
+                subdomain: "dev",
+                token: "mcpr_abc",
+            }),
+            None,
+        );
+        assert!(config.contains("[tunnel]"));
+        assert!(config.contains("subdomain = \"dev\""));
+        assert!(!config.contains("[cloud]"));
+    }
+
+    #[test]
+    fn build_config__local_only() {
+        let config = build_config("local", "http://localhost:3000", Some(4000), None, None);
+        assert!(config.contains("name = \"local\""));
+        assert!(config.contains("mcp = \"http://localhost:3000\""));
+        assert!(config.contains("port = 4000"));
+        assert!(!config.contains("[tunnel]"));
+        assert!(!config.contains("[cloud]"));
+    }
+
+    #[test]
+    fn build_config__custom_cloud_url() {
+        let config = build_config(
+            "dev",
+            "http://localhost:3000",
             Some(8080),
+            None,
+            Some(CloudCfg {
+                server_slug: "dev",
+                token: "mcpr_abc",
+                cloud_url: "http://localhost:8000",
+            }),
         );
         assert!(config.contains("endpoint = \"http://localhost:8000\""));
         assert!(config.contains("port = 8080"));
@@ -726,40 +839,72 @@ mod tests {
 
     #[test]
     fn build_config__with_explicit_port() {
-        let server = Server {
-            id: "s1".into(),
-            name: "dev".into(),
-            slug: "dev".into(),
-            project_id: "p1".into(),
-        };
         let config = build_config(
+            "dev",
             "http://localhost:3000",
-            &server,
-            None,
-            "mcpr_abc",
-            DEFAULT_CLOUD_URL,
             Some(4000),
+            None,
+            Some(CloudCfg {
+                server_slug: "dev",
+                token: "mcpr_abc",
+                cloud_url: DEFAULT_CLOUD_URL,
+            }),
         );
         assert!(config.contains("port = 4000"));
     }
 
     #[test]
     fn build_config__no_port_omits_line() {
-        let server = Server {
-            id: "s1".into(),
-            name: "dev".into(),
-            slug: "dev".into(),
-            project_id: "p1".into(),
-        };
         let config = build_config(
+            "dev",
             "http://localhost:3000",
-            &server,
             None,
-            "mcpr_abc",
-            DEFAULT_CLOUD_URL,
             None,
+            Some(CloudCfg {
+                server_slug: "dev",
+                token: "mcpr_abc",
+                cloud_url: DEFAULT_CLOUD_URL,
+            }),
         );
         assert!(!config.contains("port ="));
+    }
+
+    // ── default_local_name ──────────────────────────────────────────
+
+    #[test]
+    fn default_local_name__uses_existing_name() {
+        let defaults = ExistingConfig {
+            name: Some("my-existing".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            default_local_name(&defaults, "http://localhost:8080"),
+            "my-existing"
+        );
+    }
+
+    #[test]
+    fn default_local_name__derives_from_url() {
+        let defaults = ExistingConfig::default();
+        assert_eq!(
+            default_local_name(&defaults, "http://localhost:8080"),
+            "localhost-8080"
+        );
+    }
+
+    #[test]
+    fn default_local_name__strips_path() {
+        let defaults = ExistingConfig::default();
+        assert_eq!(
+            default_local_name(&defaults, "http://api.example.com/v1"),
+            "api-example-com"
+        );
+    }
+
+    #[test]
+    fn default_local_name__fallback_on_empty() {
+        let defaults = ExistingConfig::default();
+        assert_eq!(default_local_name(&defaults, ""), "proxy");
     }
 
     // ── is_port_available ──────────────────────────────────────────
