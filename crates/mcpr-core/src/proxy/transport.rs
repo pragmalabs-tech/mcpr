@@ -1,12 +1,8 @@
-//! The single I/O layer for the target pipeline.
+//! The single I/O layer for the pipeline.
 //!
 //! Wraps `forward_request` from `proxy/forwarding.rs` and maps reqwest
 //! failures to [`Response::Upstream502`]. Buffer vs stream decision
 //! comes from the `Route` — no content-type sniffing at dispatch time.
-//!
-//! Replaces (for the new pipeline) the upstream-forward logic in
-//! `pipeline/handlers/buffered.rs`, `streamed.rs`, `passthrough.rs`,
-//! and `sse.rs`. The old handlers stay on disk until Phase 5.
 
 use std::sync::Arc;
 
@@ -46,7 +42,7 @@ impl Transport for ProxyTransport {
             (Request::Raw(raw), Route::Raw { upstream }) => {
                 dispatch_raw(state, raw, upstream).await
             }
-            // Phase 4 produces no OAuth intakes; arm is defensive.
+            // Intake never produces `Request::OAuth` today; arm is defensive.
             (Request::OAuth(_), Route::Oauth { .. }) => Response::Upstream502 {
                 reason: "oauth dispatch not implemented".into(),
             },
@@ -104,9 +100,9 @@ async fn buffer_and_parse(
 ) -> Response {
     let raw = match read_body_capped(resp, max).await {
         Ok(b) => b,
-        Err(_) => {
+        Err(e) => {
             return Response::Upstream502 {
-                reason: "oversized upstream body".into(),
+                reason: e.to_string(),
             };
         }
     };
@@ -180,8 +176,9 @@ async fn dispatch_sse_legacy(
 async fn dispatch_raw(state: Arc<ProxyState>, raw: RawRequest, upstream: String) -> Response {
     let (base, _) = split_upstream(&upstream);
     let url = format!("{}{}", base.trim_end_matches('/'), raw.path);
-    // TODO(phase-5 parity): today passthrough does not cap request body.
-    // `usize::MAX` preserves legacy behavior; a later PR can enforce.
+    // Passthrough does not cap the request body — `DefaultBodyLimit`
+    // at the axum edge already rejected oversize requests, so everything
+    // reaching here is within the configured limit.
     let body_bytes = axum::body::to_bytes(raw.body, usize::MAX)
         .await
         .unwrap_or_default();
@@ -206,9 +203,9 @@ async fn dispatch_raw(state: Arc<ProxyState>, raw: RawRequest, upstream: String)
     let headers = resp.headers().clone();
     let body_bytes = match read_body_capped(resp, state.max_response_body).await {
         Ok(b) => b,
-        Err(_) => {
+        Err(e) => {
             return Response::Upstream502 {
-                reason: "oversized body".into(),
+                reason: e.to_string(),
             };
         }
     };

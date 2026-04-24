@@ -1,10 +1,6 @@
 //! Content-based classification of axum request parts into the
 //! [`Request`] sum type.
 //!
-//! Replaces `pipeline/parser.rs::build_request_context` and
-//! `pipeline/route.rs::classify_request` for the new pipeline — the old
-//! functions stay on disk until Phase 5 cuts over.
-//!
 //! Rules:
 //!
 //! 1. `POST` + body parses as JSON-RPC → `Request::Mcp` with
@@ -18,7 +14,7 @@
 //! 4. Everything else → `Request::Raw`.
 //!
 //! OAuth classification is deferred. Non-MCP traffic becomes
-//! `Request::Raw`; `UrlMapMiddleware` already rewrites JSON Raw bodies.
+//! `Request::Raw`; `UrlMapMiddleware` rewrites JSON Raw bodies.
 
 use axum::body::{Body, Bytes};
 use axum::http::{HeaderMap, Method, Uri, header};

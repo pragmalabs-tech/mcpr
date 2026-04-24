@@ -21,5 +21,6 @@ futures-util = { workspace = true }
 sha2 = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
+tracing = { workspace = true }
 # Lock-free reads for `ProxyState.rewrite_config` — hot path.
 arc-swap = "1"

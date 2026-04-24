@@ -1,6 +1,6 @@
 //! Shallow JSON-RPC envelope for the target proxy pipeline.
 //!
-//! See `PIPELINE_ARCHITECTURE.md` §Two-stage parse. Intake parses only
+//! See `PIPELINE.md` §Types. Intake parses only
 //! the envelope: `jsonrpc`, `id`, `method`, `params`, `result`, `error`.
 //! `params` and `result` stay as [`RawValue`] — unparsed bytes — until a
 //! middleware opts in to a typed view via [`JsonRpcEnvelope::params_as`]

@@ -1,9 +1,5 @@
 //! Request-side middleware: touch the session store, stash the
 //! originating `ClientMethod` on `Working` for response middlewares.
-//!
-//! Ports `pipeline/steps/session.rs::touch`. Also absorbs the
-//! `request_method` stash that Phase 4's router would otherwise have to
-//! add separately.
 
 use async_trait::async_trait;
 

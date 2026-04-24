@@ -1,13 +1,8 @@
 //! Response-side middleware: rewrite upstream base URLs to the proxy
 //! URL in OAuth discovery / JSON passthrough bodies.
 //!
-//! Ports `pipeline/steps/url_map.rs::rewrite_passthrough_urls`. The
-//! logic is copied into this file (not re-imported) so Phase 5 can
-//! delete the old `steps/url_map.rs` without touching this middleware.
-//!
-//! `Response::Raw` rewriting is gated on a JSON content-type header —
-//! mirroring today's `passthrough` handler. Non-JSON `Raw` responses
-//! stream through untouched.
+//! `Response::Raw` rewriting is gated on a JSON content-type header.
+//! Non-JSON `Raw` responses stream through untouched.
 
 use std::sync::Arc;
 

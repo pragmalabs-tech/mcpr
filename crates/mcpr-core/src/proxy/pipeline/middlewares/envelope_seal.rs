@@ -1,11 +1,9 @@
 //! Response-side middleware: serialize the buffered MCP message and
 //! re-wrap as SSE if the upstream framing requires it.
 //!
-//! Replaces the inline serialize + `wrap_as_sse` dance at the end of
-//! `handlers/buffered.rs`. Emits `Response::Raw` carrying the final
-//! bytes and the correct `Content-Type` header, so the axum
-//! `IntoResponse` edge (Phase 6) needs no discriminator beyond what is
-//! already on the response.
+//! Emits `Response::Raw` carrying the final bytes and the correct
+//! `Content-Type` header, so the axum `IntoResponse` edge needs no
+//! discriminator beyond what is already on the response.
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -26,7 +24,7 @@ impl ResponseMiddleware for EnvelopeSealMiddleware {
         "envelope_seal"
     }
 
-    async fn on_response(&self, resp: Response, _cx: &mut Context) -> Response {
+    async fn on_response(&self, resp: Response, cx: &mut Context) -> Response {
         let Response::McpBuffered {
             envelope,
             message,
@@ -43,6 +41,20 @@ impl ResponseMiddleware for EnvelopeSealMiddleware {
             Envelope::Sse => (wrap_as_sse(&json_bytes), "text/event-stream"),
         };
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+
+        // Tag `rewritten` whenever we parsed JSON (regardless of whether
+        // a middleware mutated it), plus `sse` when the upstream body
+        // was SSE-framed. Both facts are known here; stashing them on
+        // `cx.working.tags` lets `emit::build_request_event` produce the
+        // `note` string without re-inspecting the response.
+        if !cx.working.tags.as_slice().contains(&"rewritten") {
+            cx.working.tags.push("rewritten");
+        }
+        if matches!(envelope, Envelope::Sse) && !cx.working.tags.as_slice().contains(&"sse") {
+            cx.working.tags.push("sse");
+        }
+        cx.working.response_size = Some(bytes.len() as u64);
+
         Response::Raw {
             body: Body::from(bytes),
             status,

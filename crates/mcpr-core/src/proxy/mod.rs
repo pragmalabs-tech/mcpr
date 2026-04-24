@@ -1,9 +1,10 @@
 //! # mcpr-proxy
 //!
-//! Full MCP proxy engine: per-request pipeline (parse → route → middleware
-//! → forward → emit), upstream forwarding, SSE streaming, widget CSP
-//! rewriting, per-proxy health. Embed this crate and wire a frontend
-//! (axum, warp, anything) around [`pipeline::run`].
+//! Full MCP proxy engine: per-request pipeline (intake → request chain
+//! → router → transport → response chain → emit), upstream forwarding,
+//! SSE streaming, widget CSP rewriting, per-proxy health. Embed this
+//! crate and wire a frontend (axum, warp, anything) around
+//! [`build_default_pipeline`] + [`pipeline::driver::Pipeline::run`].
 //!
 //! ## Module layout
 //!
@@ -19,10 +20,12 @@
 //! ```
 
 pub mod csp;
+pub mod emit;
 pub mod forwarding;
 pub mod health;
 pub mod intake;
 pub mod pipeline;
+pub mod pipeline_builder;
 pub mod proxy_state;
 pub mod rewrite;
 pub mod router;
@@ -36,6 +39,7 @@ pub use health::{
     ConnectionStatus, ProxyHealth, SharedProxyHealth, lock_health, new_shared_health,
 };
 pub use intake::from_axum_parts;
+pub use pipeline_builder::{ProxyPipeline, build_default_pipeline};
 pub use proxy_state::ProxyState;
 pub use rewrite::{RewriteConfig, rewrite_response};
 pub use router::ProxyRouter;

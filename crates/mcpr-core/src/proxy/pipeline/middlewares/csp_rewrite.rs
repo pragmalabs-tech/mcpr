@@ -1,9 +1,9 @@
 //! Response-side middleware: rewrite widget CSP directives carried in
 //! list / call / read results.
 //!
-//! Ports `pipeline/steps/rewrite.rs`. Holds the same `ArcSwap` handle
-//! that `ProxyState` holds so `mcpr.toml` reloads swap the inner `Arc`
-//! without restarting the middleware.
+//! Holds the same `ArcSwap<RewriteConfig>` handle that `ProxyState`
+//! holds so `mcpr.toml` reloads swap the inner `Arc` without restarting
+//! the middleware.
 //!
 //! Fast path: byte-scan the raw `result` bytes for CSP-shaped keys
 //! (`connect_domains`, `openai/widgetCSP`, etc). Miss → no parse, no

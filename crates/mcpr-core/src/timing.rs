@@ -141,8 +141,7 @@ impl StageTimer {
 
     /// Consume the timer and return the accumulated timings. Returns
     /// `None` when disabled — callers assign directly into
-    /// `ResponseSummary::stage_timings` so `None` means "don't emit
-    /// this field."
+    /// `Working::timings` so `None` means "don't emit this field."
     pub fn finish(self) -> Option<StageTimings> {
         match self.state {
             State::Enabled { timings, .. } => Some(timings),

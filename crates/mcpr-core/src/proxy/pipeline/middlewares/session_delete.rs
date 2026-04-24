@@ -1,11 +1,7 @@
 //! Request-side middleware: on `DELETE` + `mcp-session-id`, tear down
-//! the local session and emit `SessionEnd` before Transport forwards
-//! the DELETE upstream.
-//!
-//! Ports `pipeline/steps/session.rs::maybe_handle_delete`. Matches
-//! today's behavior exactly: no short-circuit, let Transport forward
-//! the request. Architecture's "short-circuit 204" is a behavior change
-//! tracked separately.
+//! the local session and emit `SessionEnd`, then let the transport
+//! forward the DELETE upstream. (No short-circuit — forwarding the
+//! DELETE lets the upstream release its own session state.)
 
 use async_trait::async_trait;
 use axum::http::Method;
