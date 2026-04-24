@@ -2,8 +2,6 @@
 //! later refactor phases — each item carries the phase it moves to,
 //! so the cleanup grep is `rg '// phase-[0-9]+' crates`.
 
-use std::time::Instant;
-
 // phase-3: replaced by subsystems::session::SessionId (newtype on String).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SessionId(pub String);
@@ -16,13 +14,6 @@ impl SessionId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-}
-
-// phase-3: replaced by subsystems::session::SessionRecord.
-#[derive(Debug, Clone)]
-pub struct SessionRecord {
-    pub id: SessionId,
-    pub created_at: Instant,
 }
 
 // phase-5: replaced by transport::UrlMap. For now `Route::Oauth` carries

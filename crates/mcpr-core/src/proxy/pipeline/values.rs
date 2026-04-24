@@ -14,12 +14,12 @@ use axum::{
 };
 
 use crate::event::types::StageTimings;
-use crate::protocol::session::ClientInfo;
+use crate::protocol::session::{ClientInfo, SessionInfo};
 use crate::proxy::ProxyState;
 
 use super::envelope::JsonRpcEnvelope;
 use super::message::{ClientKind, ClientMethod, McpMessage};
-use super::stubs::{OAuthKind, SessionId, SessionRecord, TagSet, UrlMap};
+use super::stubs::{OAuthKind, SessionId, TagSet, UrlMap};
 
 // ── Request side ─────────────────────────────────────────────
 
@@ -193,8 +193,11 @@ impl fmt::Debug for Intake {
 /// contents feed the `Emit` stage.
 #[derive(Debug, Default)]
 pub struct Working {
-    pub session: Option<SessionRecord>,
+    pub session: Option<SessionInfo>,
     pub client: Option<ClientInfo>,
+    /// Originating client method, stashed on the request side so
+    /// response-side middlewares know what produced the response.
+    pub request_method: Option<ClientMethod>,
     pub tags: TagSet,
     pub timings: StageTimings,
 }
