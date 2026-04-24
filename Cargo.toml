@@ -11,7 +11,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-version = "0.4.55"
+version = "0.4.56"
 repository = "https://github.com/cptrodgers/mcpr"
 homepage = "https://mcpr.app"
 description = "MCPR is a reverse proxy for MCP servers — operating at the JSON-RPC layer to route, authenticate, observe, and secure MCP traffic."
@@ -31,9 +31,9 @@ url = "2"
 base64 = "0.22"
 sha2 = "0.11"
 tokio-tungstenite = { version = "0.28", features = ["connect", "rustls-tls-webpki-roots"] }
-mcpr-core = { path = "crates/mcpr-core", version = "0.4.55" }
-mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.55" }
-mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.55" }
+mcpr-core = { path = "crates/mcpr-core", version = "0.4.56" }
+mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.56" }
+mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.56" }
 
 # Release builds — tuned for runtime perf at the cost of build time.
 # `lto = "thin"` enables cross-crate inlining (5–15% perf on hot paths);
