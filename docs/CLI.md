@@ -271,7 +271,7 @@ mcpr proxy sessions --json
 
 #### `mcpr proxy status [name]`
 
-Show a proxy status overview: request count, error rate, active sessions, and per-tool breakdown.
+Show a proxy status overview: every known proxy with its current state (running / stopped / stale), plus request count, error rate, active sessions, and per-tool breakdown.
 
 ```bash
 mcpr proxy status                        # auto-detect proxy name

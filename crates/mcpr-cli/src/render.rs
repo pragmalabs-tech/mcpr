@@ -787,12 +787,22 @@ pub fn clients(rows: &[ClientRow], proxy: &Option<String>, since: &str, mode: Ou
 struct RunningProxyRow {
     #[tabled(rename = "PROXY")]
     proxy: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
     #[tabled(rename = "PORT")]
     port: String,
     #[tabled(rename = "PID")]
-    pid: u32,
+    pid: String,
     #[tabled(rename = "UPTIME")]
     uptime: String,
+}
+
+fn status_label(status: &LockStatus) -> &'static str {
+    match status {
+        LockStatus::Held(_) => "running",
+        LockStatus::Stale(_) => "stale",
+        LockStatus::Free => "stopped",
+    }
 }
 
 fn format_uptime(seconds: i64) -> String {
@@ -805,50 +815,60 @@ fn format_uptime(seconds: i64) -> String {
     }
 }
 
-/// Render the running-proxies header for `mcpr proxy status`.
-pub fn status_running_proxies(running: &[&(String, LockStatus)]) {
-    if running.is_empty() {
-        return;
-    }
-
-    let held: Vec<(&String, &LockInfo)> = running
-        .iter()
-        .filter_map(|(name, status)| match status {
-            LockStatus::Held(info) => Some((name, info)),
-            _ => None,
-        })
-        .collect();
-    if held.is_empty() {
+/// Render the proxies header for `mcpr proxy status` — one row per known
+/// proxy with its current state (running / stopped / stale), followed by
+/// URL details for the running ones.
+pub fn status_proxies(proxies: &[&(String, LockStatus)]) {
+    if proxies.is_empty() {
         return;
     }
 
     let now = chrono::Utc::now().timestamp();
-    let rows: Vec<RunningProxyRow> = held
+    let rows: Vec<RunningProxyRow> = proxies
         .iter()
-        .map(|(name, info)| RunningProxyRow {
-            proxy: (*name).clone(),
-            port: format!(":{}", info.port),
-            pid: info.pid,
-            uptime: format_uptime(now - info.started_at),
+        .map(|(name, status)| {
+            let label = status_label(status).to_string();
+            match status {
+                LockStatus::Held(info) | LockStatus::Stale(info) => RunningProxyRow {
+                    proxy: name.clone(),
+                    status: label,
+                    port: format!(":{}", info.port),
+                    pid: info.pid.to_string(),
+                    uptime: if matches!(status, LockStatus::Held(_)) {
+                        format_uptime(now - info.started_at)
+                    } else {
+                        "—".to_string()
+                    },
+                },
+                LockStatus::Free => RunningProxyRow {
+                    proxy: name.clone(),
+                    status: label,
+                    port: "—".to_string(),
+                    pid: "—".to_string(),
+                    uptime: "—".to_string(),
+                },
+            }
         })
         .collect();
     println!("{}", render_table(rows));
 
-    for (name, info) in &held {
-        let localhost_url = format!("http://localhost:{}", info.port);
-        let encoded_localhost = encode_uri_component(&localhost_url);
-        let tunnel_url = crate::proxy_lock::read_tunnel_url(name);
+    for (name, status) in proxies {
+        if let LockStatus::Held(info) = status {
+            let localhost_url = format!("http://localhost:{}", info.port);
+            let encoded_localhost = encode_uri_component(&localhost_url);
+            let tunnel_url = crate::proxy_lock::read_tunnel_url(name);
 
-        println!();
-        println!("  localhost: {localhost_url}");
-        println!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded_localhost}");
-        if let Some(ref turl) = tunnel_url
-            && *turl != localhost_url
-        {
-            let encoded_tunnel = encode_uri_component(turl);
             println!();
-            println!("  tunnel:   {turl}");
-            println!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded_tunnel}");
+            println!("  {name}");
+            println!("    localhost: {localhost_url}");
+            println!("    studio:    https://cloud.mcpr.app/studio?proxy={encoded_localhost}");
+            if let Some(ref turl) = tunnel_url
+                && *turl != localhost_url
+            {
+                let encoded_tunnel = encode_uri_component(turl);
+                println!("    tunnel:    {turl}");
+                println!("    studio:    https://cloud.mcpr.app/studio?proxy={encoded_tunnel}");
+            }
         }
     }
     println!();
@@ -858,7 +878,7 @@ pub fn status_running_proxies(running: &[&(String, LockStatus)]) {
 pub fn status_overview(
     stats_result: &StatsResult,
     session_rows: &[SessionRow],
-    running: &[&(String, LockStatus)],
+    proxies: &[&(String, LockStatus)],
     proxy: &Option<String>,
     since: &str,
     mode: OutputMode,
@@ -866,28 +886,37 @@ pub fn status_overview(
     let active_sessions = session_rows.iter().filter(|s| s.is_active).count();
 
     if mode == OutputMode::Json {
-        let proxies_json: Vec<_> = running
+        let proxies_json: Vec<_> = proxies
             .iter()
-            .filter_map(|(name, status)| {
-                if let LockStatus::Held(info) = status {
+            .map(|(name, status)| match status {
+                LockStatus::Held(info) => {
                     let localhost = format!("http://localhost:{}", info.port);
                     let tunnel =
                         crate::proxy_lock::read_tunnel_url(name).filter(|t| *t != localhost);
                     let tunnel_studio = tunnel
                         .as_ref()
                         .map(|t| format!("https://cloud.mcpr.app/studio?proxy={}", encode_uri_component(t)));
-                    Some(serde_json::json!({
+                    serde_json::json!({
                         "name": name,
+                        "status": "running",
                         "port": info.port,
                         "pid": info.pid,
                         "localhost_url": localhost,
                         "studio_url": format!("https://cloud.mcpr.app/studio?proxy={}", encode_uri_component(&localhost)),
                         "tunnel_url": tunnel,
                         "tunnel_studio_url": tunnel_studio,
-                    }))
-                } else {
-                    None
+                    })
                 }
+                LockStatus::Stale(info) => serde_json::json!({
+                    "name": name,
+                    "status": "stale",
+                    "port": info.port,
+                    "pid": info.pid,
+                }),
+                LockStatus::Free => serde_json::json!({
+                    "name": name,
+                    "status": "stopped",
+                }),
             })
             .collect();
 
@@ -898,7 +927,7 @@ pub fn status_overview(
             "error_pct": stats_result.error_pct,
             "active_sessions": active_sessions,
             "total_sessions": session_rows.len(),
-            "running_proxies": proxies_json,
+            "proxies": proxies_json,
             "tools": stats_result.tools,
         });
         println!("{}", serde_json::to_string(&snapshot).unwrap_or_default());
@@ -1401,7 +1430,7 @@ mod tests {
         relay_status(&info);
     }
 
-    // ── status_running_proxies ────────────────────────────────────────
+    // ── status_proxies ────────────────────────────────────────────────
 
     fn held_proxy(name: &str, port: u16) -> (String, LockStatus) {
         (
@@ -1416,23 +1445,47 @@ mod tests {
         )
     }
 
-    #[test]
-    fn status_running_proxies__empty_is_noop() {
-        status_running_proxies(&[]);
+    fn stopped_proxy(name: &str) -> (String, LockStatus) {
+        (name.to_string(), LockStatus::Free)
     }
 
     #[test]
-    fn status_running_proxies__shows_proxy_info() {
+    fn status_proxies__empty_is_noop() {
+        status_proxies(&[]);
+    }
+
+    #[test]
+    fn status_proxies__shows_running_proxy() {
         let proxy = held_proxy("test-proxy", 3000);
-        // Should not panic — writes proxy table + localhost/studio URLs.
-        status_running_proxies(&[&proxy]);
+        status_proxies(&[&proxy]);
     }
 
     #[test]
-    fn status_running_proxies__multiple_proxies() {
+    fn status_proxies__shows_stopped_proxy() {
+        let proxy = stopped_proxy("idle-proxy");
+        status_proxies(&[&proxy]);
+    }
+
+    #[test]
+    fn status_proxies__mixed_running_and_stopped() {
         let a = held_proxy("alpha", 3000);
-        let b = held_proxy("beta", 3001);
-        status_running_proxies(&[&a, &b]);
+        let b = stopped_proxy("beta");
+        status_proxies(&[&a, &b]);
+    }
+
+    #[test]
+    fn status_label__variants() {
+        let held = held_proxy("x", 1);
+        assert_eq!(status_label(&held.1), "running");
+        assert_eq!(status_label(&LockStatus::Free), "stopped");
+        let stale = LockStatus::Stale(LockInfo {
+            pid: 99999999,
+            port: 1234,
+            started_at: 0,
+            config_path: "/x".into(),
+            daemon_pid: None,
+        });
+        assert_eq!(status_label(&stale), "stale");
     }
 
     // ── encode_uri_component ───────────────────────────────────────
