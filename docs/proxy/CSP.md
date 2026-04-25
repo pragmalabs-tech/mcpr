@@ -23,25 +23,25 @@ domains = ["cdn.example.com"]
 
 Defaults: `mode = "extend"` for connect and resource, `mode = "replace"` for frame. Frames fail closed.
 
-## Public widget domain
+## Widget domain
 
-`csp.publicWidgetDomain` is the bare host (no scheme) this proxy is served from publicly. It feeds two things:
+`csp.domain` is the bare host (no scheme) this proxy is served from publicly. It feeds two things:
 
-1. **`_meta.openai/widgetDomain`** — ChatGPT requires a unique origin per app for submission; `publicWidgetDomain` becomes this value on every widget meta that declared the field upstream.
+1. **The widget-domain meta fields** — `_meta.openai/widgetDomain` (ChatGPT) and `_meta.ui.domain` (MCP-UI / Apps spec, used by Claude and VS Code for CORS allowlisting). Both shapes receive the same value on every widget meta that declared the field upstream in either shape.
 2. **The proxy-URL injected into `connect` and `resource` CSP arrays** — widgets need a reachable origin to call back to the proxy for JSON-RPC and asset loads.
 
 ```toml
 [csp]
-publicWidgetDomain = "widgets.example.com"
+domain = "widgets.example.com"
 ```
 
 Resolution order:
 
-1. `csp.publicWidgetDomain` if set.
+1. `csp.domain` if set.
 2. Else the tunnel URL (when `[tunnel].enabled = true`).
-3. Else — local-only dev — **no public origin is available**, so the proxy *skips* the CSP injection and leaves any upstream `openai/widgetDomain` untouched. `localhost` is never written into widget CSP or the `widgetDomain` field; shipping it to ChatGPT would be invalid, and cluttering the local output with it helps no one.
+3. Else — local-only dev — **no public origin is available**, so the proxy *skips* the CSP injection and leaves any upstream domain field untouched. `localhost` is never written into widget CSP or the domain fields; shipping it to a host would be invalid, and cluttering the local output with it helps no one.
 
-Claude and VS Code don't currently read a `widgetDomain` equivalent — the field is emitted in the OpenAI shape only. The resolution rule is host-agnostic so future spec adoption doesn't require a config rename.
+Both domain shapes are kept in sync: an upstream that declared only `openai/widgetDomain` will also have `ui.domain` written, and vice versa. Hosts ignore keys they don't understand, so emitting both is safe everywhere.
 
 ## Directives
 
@@ -99,17 +99,19 @@ The proxy URL is deliberately **not** prepended to `frame`. Widgets don't iframe
 
 ## What the proxy emits
 
-The merged domain list lands in both shapes on every widget meta:
+The merged domain list lands in both shapes on every widget meta. The widget domain is mirrored into both `openai/widgetDomain` and `ui.domain` when upstream declared the field in either shape:
 
 ```json
 {
   "_meta": {
+    "openai/widgetDomain": "proxy.example.com",
     "openai/widgetCSP": {
       "connect_domains": ["https://proxy.example.com", "https://api.example.com"],
       "resource_domains": [...],
       "frame_domains": [...]
     },
     "ui": {
+      "domain": "proxy.example.com",
       "csp": {
         "connectDomains": ["https://proxy.example.com", "https://api.example.com"],
         "resourceDomains": [...],
@@ -165,7 +167,7 @@ Loads into `connectDomains` and `resourceDomains` with the given mode. `mode = "
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `csp.publicWidgetDomain` | `string` | — | Bare public host (no scheme). Feeds `openai/widgetDomain` and CSP injection. Falls back to tunnel URL when unset; suppresses injection in local-only mode. |
+| `csp.domain` | `string` | — | Bare public host (no scheme). Feeds the widget-domain meta fields (`openai/widgetDomain` and `ui.domain`) and CSP injection. Falls back to tunnel URL when unset; suppresses injection in local-only mode. |
 | `[csp.connectDomains].domains` | `string[]` | `[]` | Domains allowed for `connect-src` |
 | `[csp.connectDomains].mode` | `"extend" \| "replace"` | `"extend"` | Merge mode with upstream |
 | `[csp.resourceDomains].domains` | `string[]` | `[]` | Domains allowed for scripts, styles, images, fonts, media |

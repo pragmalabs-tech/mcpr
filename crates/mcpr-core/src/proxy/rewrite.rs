@@ -181,12 +181,21 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
 /// a widget — a tool call result's `_meta`, for example — so non-widget metas
 /// are not polluted with CSP fields they don't need.
 fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &RewriteConfig) {
-    // Only overwrite when we actually have a public domain to write. If
-    // `proxy_domain` is empty (local-only dev with no `publicWidgetDomain`
-    // set), leave the upstream value alone rather than clobbering it with ""
-    // — and never synthesize the key when the upstream didn't declare it.
-    if !config.proxy_domain.is_empty() && meta.get("openai/widgetDomain").is_some() {
-        meta["openai/widgetDomain"] = Value::String(config.proxy_domain.clone());
+    // Hosts disagree about where they read the widget domain: ChatGPT reads
+    // `openai/widgetDomain`, the MCP-UI / Apps spec reads `_meta.ui.domain`.
+    // Same playbook as CSP — when the upstream declared the field in *either*
+    // shape, emit our public domain into *both* so the widget is portable
+    // across hosts.
+    //
+    // Two guards:
+    //   * `proxy_domain` empty (local-only dev) — leave upstream alone rather
+    //     than clobbering with "".
+    //   * Neither shape declared upstream — never synthesize the key on a meta
+    //     that didn't ask for it.
+    if !config.proxy_domain.is_empty()
+        && (meta.get("openai/widgetDomain").is_some() || meta.pointer("/ui/domain").is_some())
+    {
+        write_widget_domain(meta, &config.proxy_domain);
     }
 
     if !is_widget_meta(meta, explicit_uri) {
@@ -301,6 +310,27 @@ fn collect_upstream(meta: &Value, directive: Directive) -> Vec<String> {
 }
 
 /// Write the OpenAI-shaped CSP block, creating the parent object when needed.
+/// Write the proxy's public domain into both widget-domain shapes
+/// (`openai/widgetDomain` and `ui.domain`), creating `ui` when needed.
+fn write_widget_domain(meta: &mut Value, domain: &str) {
+    let Some(obj) = meta.as_object_mut() else {
+        return;
+    };
+    obj.insert(
+        "openai/widgetDomain".to_string(),
+        Value::String(domain.to_string()),
+    );
+    let ui = obj
+        .entry("ui".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !ui.is_object() {
+        *ui = Value::Object(serde_json::Map::new());
+    }
+    ui.as_object_mut()
+        .unwrap()
+        .insert("domain".to_string(), Value::String(domain.to_string()));
+}
+
 fn write_openai_csp(meta: &mut Value, connect: &[String], resource: &[String], frame: &[String]) {
     let Some(obj) = meta.as_object_mut() else {
         return;
@@ -529,6 +559,57 @@ mod tests {
         assert!(connect.contains(&"https://abc.tunnel.example.com"));
         assert!(connect.contains(&"https://api.external.com"));
         assert!(!connect.iter().any(|d| d.contains("localhost")));
+    }
+
+    #[test]
+    fn rewrite_widget_meta__upstream_openai_only_emits_both_domain_shapes() {
+        let config = rewrite_config();
+        let mut meta = json!({
+            "openai/widgetDomain": "old.domain.com"
+        });
+
+        rewrite_widget_meta(&mut meta, Some("ui://widget/x"), &config);
+
+        assert_eq!(
+            meta["openai/widgetDomain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+        assert_eq!(
+            meta["ui"]["domain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+    }
+
+    #[test]
+    fn rewrite_widget_meta__upstream_ui_only_emits_both_domain_shapes() {
+        let config = rewrite_config();
+        let mut meta = json!({
+            "ui": { "domain": "old.domain.com" }
+        });
+
+        rewrite_widget_meta(&mut meta, Some("ui://widget/x"), &config);
+
+        assert_eq!(
+            meta["ui"]["domain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+        assert_eq!(
+            meta["openai/widgetDomain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+    }
+
+    #[test]
+    fn rewrite_widget_meta__no_upstream_domain_does_not_synthesize() {
+        let config = rewrite_config();
+        let mut meta = json!({
+            "openai/widgetCSP": { "connect_domains": [] }
+        });
+
+        rewrite_widget_meta(&mut meta, Some("ui://widget/x"), &config);
+
+        assert!(meta.get("openai/widgetDomain").is_none());
+        assert!(meta.pointer("/ui/domain").is_none());
     }
 
     // ── tools/call: rewrites result.meta ───────────────────────────────────
@@ -1635,7 +1716,7 @@ mod tests {
 
     fn local_only_config() -> RewriteConfig {
         // Mirrors what main.rs builds when tunnel is off and
-        // `csp.publicWidgetDomain` is unset: proxy_url stays as the local
+        // `csp.domain` is unset: proxy_url stays as the local
         // bind address for internal wiring, proxy_domain is empty to flag
         // "no public origin".
         RewriteConfig {
@@ -1667,6 +1748,36 @@ mod tests {
                 .as_str()
                 .unwrap(),
             "dev.example.com",
+        );
+    }
+
+    #[test]
+    fn rewrite_response__local_only_leaves_ui_domain_untouched() {
+        let config = local_only_config();
+        let mut body = json!({
+            "result": {
+                "contents": [{
+                    "uri": "ui://widget/card",
+                    "_meta": {
+                        "ui": { "domain": "dev.example.com" }
+                    }
+                }]
+            }
+        });
+
+        let _ = rewrite_response("resources/read", &mut body, &config);
+
+        assert_eq!(
+            body["result"]["contents"][0]["_meta"]["ui"]["domain"]
+                .as_str()
+                .unwrap(),
+            "dev.example.com",
+        );
+        assert!(
+            body["result"]["contents"][0]["_meta"]
+                .get("openai/widgetDomain")
+                .is_none(),
+            "must not synthesize the openai shape in local-only mode"
         );
     }
 
