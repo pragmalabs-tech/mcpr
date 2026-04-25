@@ -12,7 +12,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 RUN ARCH=$(case "$TARGETARCH" in amd64) echo x86_64;; arm64) echo aarch64;; *) echo "$TARGETARCH";; esac) \
- && curl -fsSL "https://github.com/cptrodgers/mcpr/releases/download/${VERSION}/mcpr-${VERSION}-${ARCH}-unknown-linux-gnu.tar.gz" \
+ && curl -fsSL "https://github.com/pragmalabs-tech/mcpr/releases/download/${VERSION}/mcpr-${VERSION}-${ARCH}-unknown-linux-gnu.tar.gz" \
     | tar -xz -C /usr/local/bin/ \
  && chmod +x /usr/local/bin/mcpr
 
@@ -44,6 +44,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 
-LABEL org.opencontainers.image.source="https://github.com/cptrodgers/mcpr" \
+LABEL org.opencontainers.image.source="https://github.com/pragmalabs-tech/mcpr" \
       org.opencontainers.image.description="MCP-aware reverse proxy" \
       org.opencontainers.image.licenses="Apache-2.0"

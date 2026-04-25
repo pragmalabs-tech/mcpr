@@ -364,14 +364,14 @@ docker run -d \
   --restart unless-stopped \
   -p 8080:8080 \
   -v ./relay.toml:/app/relay.toml \
-  ghcr.io/cptrodgers/mcpr:latest \
+  ghcr.io/pragmalabs-tech/mcpr:latest \
   relay run /app/relay.toml
 ```
 
 Update:
 
 ```bash
-docker pull ghcr.io/cptrodgers/mcpr:latest
+docker pull ghcr.io/pragmalabs-tech/mcpr:latest
 docker stop mcpr-relay && docker rm mcpr-relay
 # re-run the docker run command above
 ```

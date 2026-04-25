@@ -4,8 +4,8 @@
 
 # mcpr
 
-[![CI](https://github.com/cptrodgers/mcpr/actions/workflows/check.yml/badge.svg)](https://github.com/cptrodgers/mcpr/actions/workflows/check.yml)
-[![codecov](https://codecov.io/gh/cptrodgers/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/cptrodgers/mcpr)
+[![CI](https://github.com/pragmalabs-tech/mcpr/actions/workflows/check.yml/badge.svg)](https://github.com/pragmalabs-tech/mcpr/actions/workflows/check.yml)
+[![codecov](https://codecov.io/gh/pragmalabs-tech/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/pragmalabs-tech/mcpr)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 **Observability-first proxy for MCP servers.** Per-tool metrics, session capture, and schema tracking in a single Rust binary — with [~1ms p99](benches/reports/v0.4.42-post-refactor.md) overhead. Sits in front of your MCP app and records every JSON-RPC call to a local SQLite store.

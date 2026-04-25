@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="cptrodgers/mcpr"
+REPO="pragmalabs-tech/mcpr"
 BINARY="mcpr"
 INSTALL_DIR="/usr/local/bin"
 

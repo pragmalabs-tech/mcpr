@@ -3,9 +3,9 @@
 mcpr publishes a multi-arch Linux image to GitHub Container Registry on every release. One image serves both the daemon and a proxy — if you bind-mount a config, the proxy starts automatically.
 
 ```
-ghcr.io/cptrodgers/mcpr:latest       # latest release
-ghcr.io/cptrodgers/mcpr:0.4.33       # pinned semver
-ghcr.io/cptrodgers/mcpr:0.4          # latest 0.4.x
+ghcr.io/pragmalabs-tech/mcpr:latest       # latest release
+ghcr.io/pragmalabs-tech/mcpr:0.4.33       # pinned semver
+ghcr.io/pragmalabs-tech/mcpr:0.4          # latest 0.4.x
 ```
 
 Platforms: `linux/amd64`, `linux/arm64`.
@@ -25,7 +25,7 @@ docker run -d --name mcpr \
   -v "$(pwd)/mcpr.toml:/etc/mcpr/mcpr.toml:ro" \
   -v mcpr-state:/var/lib/mcpr \
   -p 3000:3000 \
-  ghcr.io/cptrodgers/mcpr:latest
+  ghcr.io/pragmalabs-tech/mcpr:latest
 ```
 
 The container starts the daemon, waits for it to become ready, then launches the proxy defined in your config. Traffic flows through `http://localhost:3000`.
@@ -116,14 +116,14 @@ securityContext:
 Any argument passed to `docker run` is forwarded to `mcpr`:
 
 ```bash
-docker run --rm ghcr.io/cptrodgers/mcpr:latest version
+docker run --rm ghcr.io/pragmalabs-tech/mcpr:latest version
 # → {"target":"unknown","version":"0.4.33"}
 
 docker run --rm -v "$(pwd)/mcpr.toml:/etc/mcpr/mcpr.toml:ro" \
-  ghcr.io/cptrodgers/mcpr:latest validate -c /etc/mcpr/mcpr.toml
+  ghcr.io/pragmalabs-tech/mcpr:latest validate -c /etc/mcpr/mcpr.toml
 
 docker run --rm -v mcpr-state:/var/lib/mcpr \
-  ghcr.io/cptrodgers/mcpr:latest store stats
+  ghcr.io/pragmalabs-tech/mcpr:latest store stats
 ```
 
 `docker exec` into a running container works the same way:
@@ -139,7 +139,7 @@ docker exec mcpr mcpr proxy status
 ```yaml
 services:
   mcpr:
-    image: ghcr.io/cptrodgers/mcpr:latest
+    image: ghcr.io/pragmalabs-tech/mcpr:latest
     restart: unless-stopped
     ports:
       - "3000:3000"
