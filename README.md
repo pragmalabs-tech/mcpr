@@ -34,9 +34,9 @@ Docker is in beta — see [docs/DOCKER.md](docs/DOCKER.md) for volumes, health p
 
 mcpr sits in front of your MCP app and does three things, in order of how much work each one saves you:
 
-1. **Observe** — records every `tools/call`, `resources/*`, and `prompts/*` request to a local SQLite store. Per-tool p50/p95/max latency, error rates, session traces, client breakdowns, and schema diffs over time. No instrumentation in your app.
-2. **Route** — one upstream per proxy today. JSON-RPC classification, and CSP rewriting that emits the shape each AI client (ChatGPT, Claude, Copilot) expects.
-3. **Authenticate** *(in progress)* — OAuth 2.1 and API key handling at the proxy layer. Your app receives a verified `x-user-id` header instead of implementing auth flows itself.
+1. **Observe**: records every `tools/call`, `resources/*`, and `prompts/*` request to a local SQLite store. Per-tool p50/p95/max latency, error rates, session traces, client breakdowns, and schema diffs over time. No instrumentation in your app.
+2. **Route**: one upstream per proxy today. JSON-RPC classification, and CSP rewriting that emits the shape each AI client (ChatGPT, Claude, Copilot) expects.
+3. **Authenticate** *(in progress)*: OAuth 2.1 and API key handling at the proxy layer. Your app receives a verified `x-user-id` header instead of implementing auth flows itself.
 
 Running in front of [mcp.usestudykit.com/mcp](https://mcp.usestudykit.com/mcp) today.
 
@@ -44,7 +44,7 @@ Running in front of [mcp.usestudykit.com/mcp](https://mcp.usestudykit.com/mcp) t
 
 ## Observe
 
-mcpr writes every request to a local SQLite database — tool name, latency, status, error code, request/response size, session ID. All `mcpr proxy` commands read from this store and work whether or not the daemon is running.
+mcpr capture all mcp request — tool name, latency, status, error code, request/response size, session ID. All `mcpr proxy` commands read from this store and work whether or not the daemon is running. Use `mcpr proxy help` to see all observe supporting commands.
 
 ### Per-tool metrics
 
@@ -133,33 +133,39 @@ Each proxy instance fronts one upstream MCP app. mcpr classifies requests by JSO
 mcp = "http://localhost:9000"
 ```
 
-Multi-upstream routing from a single port is not supported yet. Run one `mcpr proxy` per upstream.
+To proxy multiple MCP servers, write one `mcpr.toml` per upstream and launch each with `mcpr proxy run --config <path>`.
 
 ### Widget CSP
 
-MCP Apps (ChatGPT Apps, Claude connectors) render widgets in sandboxed iframes with CSP rules. ChatGPT reads `openai/widgetCSP`, Claude reads `ui.csp`. Each platform interprets domain lists differently.
-
-mcpr rewrites CSP domain arrays in `tools/list`, `tools/call`, `resources/list`, `resources/templates/list`, and `resources/read` responses. It replaces localhost URLs with the proxy's public domain, merges configured domains, and emits the shape each client expects.
-
-CSP has three independent directives — `connectDomains` (fetch / WebSocket), `resourceDomains` (scripts, styles, images), and `frameDomains` (iframes) — each with its own `mode` (`extend` or `replace`). Widget entries layer glob-matched overrides on top of the global policy.
+mcpr applies widget CSP in both shapes — the legacy OpenAI per-widget format and the current MCP standard — so a single config block works for both Claude and ChatGPT.
 
 ```toml
 [csp]
-# Apply to openai widgetDomain and default csp domain
+# Public host the proxy is reachable on — written into both the
+# OpenAI `widgetDomain` field and the MCP `ui.domain` field.
 domain = "widgets.example.com"
 
+# Lands in `connect-src` — fetch / WebSocket / EventSource targets.
+# `extend` merges with whatever the upstream MCP server declared;
+# `replace` ignores upstream.
 [csp.connectDomains]
 domains = ["api.example.com"]
 mode    = "extend"
 
+# Lands in `script-src`, `style-src`, `img-src`, `font-src`, `media-src`
+# — one bucket for everything the widget loads. Same merge semantics.
 [csp.resourceDomains]
 domains = ["cdn.example.com"]
 mode    = "extend"
 
+# Lands in `frame-src` — nested iframes. Defaults to `replace` so
+# upstream cannot silently widen this directive.
 [csp.frameDomains]
 domains = []
 mode    = "replace"
 
+# Per-widget override, matched by URI pattern (glob). Only the
+# payment widget gets `connect-src` to Stripe.
 [[csp.widget]]
 match              = "ui://widget/payment*"
 connectDomains     = ["api.stripe.com"]
@@ -182,9 +188,9 @@ Track progress in the [Auth roadmap](#roadmap) below. Open an issue if your prov
 
 ---
 
-## mcpr cloud (optional hosted dashboard)
+## mcpr cloud dashboard (Optional)
 
-Self-hosting the CLI is enough for local development and single-machine deployments. For teams, [cloud.mcpr.app](https://cloud.mcpr.app) is a managed dashboard that ingests events from your mcpr proxies and renders them as a web UI — analytics, log search, schema views, slow-call drill-downs, per-client breakdowns.
+For a shared web UI instead of CLI access, [cloud.mcpr.app](https://cloud.mcpr.app) ingests events from your proxies — metadata only (tool name, latency, status, sizes). We don't sync request and response bodies.
 
 Data flows one way: proxy → cloud, pushed via a project token from `mcpr proxy setup`. Your local SQLite remains the source of truth.
 

@@ -250,6 +250,36 @@ mod tests {
         assert!(!proxy_lock::proxy_dir_exists(name));
     }
 
+    // ── reload_proxy ──────────────────────────────────────────
+
+    #[test]
+    fn reload_proxy__not_running_returns_err() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "[mcp]\nurl=\"http://localhost:9000\"\n").unwrap();
+
+        let err = reload_proxy("__nonexistent_reload_target_zzz__", tmp.path()).unwrap_err();
+
+        assert!(
+            err.contains("not running"),
+            "expected 'not running' in err, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reload_proxy__missing_config_file_returns_err() {
+        // Lock points at the current process so `check_lock` returns Held,
+        // which lets us exercise the config-read path. Path is bogus → err.
+        let name = "__test_reload_proxy_missing_cfg__";
+        proxy_lock::write_lock(name, 4242, "/tmp/x.toml", None).unwrap();
+
+        let result = reload_proxy(name, std::path::Path::new("/nonexistent/missing.toml"));
+        let _ = std::fs::remove_dir_all(proxy_lock_dir(name));
+
+        let err = result.unwrap_err();
+        assert!(err.contains("failed to read"), "got: {err}");
+    }
+
     // ── wait_for_reload_result ────────────────────────────────
 
     #[test]

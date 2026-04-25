@@ -1001,19 +1001,32 @@ async fn apply_reload(
         ));
     }
 
-    let (proxy_url, proxy_domain) = resolve_proxy_origin(new_cfg.csp.domain.as_deref(), public_url);
-
     let current = proxy.rewrite_config.load();
-    let new_rewrite = RewriteConfig {
-        proxy_url,
-        proxy_domain,
-        mcp_upstream: current.mcp_upstream.clone(),
-        csp: new_cfg.csp.clone(),
-    };
+    let new_rewrite = build_reload_rewrite_config(&new_cfg, public_url, &current.mcp_upstream);
     drop(current);
     proxy.rewrite_config.store(Arc::new(new_rewrite));
     *applied_guard = new_cfg;
     Ok(())
+}
+
+/// Build the `RewriteConfig` that the SIGHUP path swaps in. Pure: no IO,
+/// no locks. Recomputes the public origin from the new snapshot's
+/// `csp.domain` so a domain change actually takes effect — the previous
+/// code reused the boot-time origin and silently dropped any update there.
+/// `mcp_upstream` is carried from the running config because `mcp` is in
+/// the unsafe-changes set and so cannot have moved.
+fn build_reload_rewrite_config(
+    new_cfg: &GatewayConfig,
+    public_url: &str,
+    mcp_upstream: &str,
+) -> RewriteConfig {
+    let (proxy_url, proxy_domain) = resolve_proxy_origin(new_cfg.csp.domain.as_deref(), public_url);
+    RewriteConfig {
+        proxy_url,
+        proxy_domain,
+        mcp_upstream: mcp_upstream.to_string(),
+        csp: new_cfg.csp.clone(),
+    }
 }
 
 /// Run the relay server process. Called from `mcpr relay run` / `mcpr relay start`.
@@ -1451,5 +1464,160 @@ async fn health_check_loop(proxy: Arc<ProxyState>) {
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    }
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use config::{LogFormat, RuntimeOptions};
+    use mcpr_core::proxy::csp::{CspConfig, WidgetScoped};
+
+    // ── helpers ──────────────────────────────────────────────
+
+    fn gateway_config() -> GatewayConfig {
+        GatewayConfig {
+            name: "test".into(),
+            mcp: Some("http://localhost:9000".into()),
+            port: Some(3000),
+            csp: CspConfig::default(),
+            relay_url: Some("https://tunnel.mcpr.app".into()),
+            tunnel_token: None,
+            tunnel_subdomain: None,
+            tunnel: false,
+            max_request_body_size: None,
+            max_response_body_size: None,
+            max_concurrent_upstream: None,
+            connect_timeout: None,
+            request_timeout: None,
+            cloud_token: None,
+            cloud_server: None,
+            cloud_endpoint: None,
+            cloud_batch_size: None,
+            cloud_flush_interval_ms: None,
+            runtime: RuntimeOptions {
+                drain_timeout: 30,
+                log_format: LogFormat::Json,
+                admin_bind: "127.0.0.1:9901".into(),
+            },
+        }
+    }
+
+    // ── resolve_proxy_origin ─────────────────────────────────
+
+    #[test]
+    fn resolve_proxy_origin__csp_domain_takes_precedence() {
+        let (url, domain) =
+            resolve_proxy_origin(Some("example.com"), "https://abc.tunnel.mcpr.app");
+        assert_eq!(url, "https://example.com");
+        assert_eq!(domain, "example.com");
+    }
+
+    #[test]
+    fn resolve_proxy_origin__csp_domain_strips_https_scheme() {
+        let (url, domain) =
+            resolve_proxy_origin(Some("https://example.com"), "https://other.example.com");
+        assert_eq!(url, "https://example.com");
+        assert_eq!(domain, "example.com");
+    }
+
+    #[test]
+    fn resolve_proxy_origin__csp_domain_strips_http_scheme() {
+        let (url, domain) =
+            resolve_proxy_origin(Some("http://example.com"), "https://other.example.com");
+        assert_eq!(url, "https://example.com");
+        assert_eq!(domain, "example.com");
+    }
+
+    #[test]
+    fn resolve_proxy_origin__csp_domain_strips_trailing_slash() {
+        let (url, domain) =
+            resolve_proxy_origin(Some("https://example.com/"), "https://other.example.com");
+        assert_eq!(url, "https://example.com");
+        assert_eq!(domain, "example.com");
+    }
+
+    #[test]
+    fn resolve_proxy_origin__falls_back_to_public_url() {
+        let (url, domain) = resolve_proxy_origin(None, "https://abc.tunnel.mcpr.app");
+        assert_eq!(url, "https://abc.tunnel.mcpr.app");
+        assert_eq!(domain, "abc.tunnel.mcpr.app");
+    }
+
+    #[test]
+    fn resolve_proxy_origin__localhost_yields_empty_domain() {
+        let (url, domain) = resolve_proxy_origin(None, "http://localhost:3000");
+        assert_eq!(url, "http://localhost:3000");
+        assert_eq!(domain, "");
+    }
+
+    #[test]
+    fn resolve_proxy_origin__loopback_ip_yields_empty_domain() {
+        let (url, domain) = resolve_proxy_origin(None, "http://127.0.0.1:3000");
+        assert_eq!(url, "http://127.0.0.1:3000");
+        assert_eq!(domain, "");
+    }
+
+    #[test]
+    fn resolve_proxy_origin__csp_domain_overrides_localhost_public_url() {
+        let (url, domain) =
+            resolve_proxy_origin(Some("custom.example.com"), "http://localhost:3000");
+        assert_eq!(url, "https://custom.example.com");
+        assert_eq!(domain, "custom.example.com");
+    }
+
+    // ── build_reload_rewrite_config ──────────────────────────
+    //
+    // These guard the regression we just fixed: previously the SIGHUP path
+    // reused `proxy_url`/`proxy_domain` from the running config and silently
+    // dropped any change to `csp.domain`. The expectation now is that the
+    // new origin is recomputed from the *new* config every time.
+
+    #[test]
+    fn build_reload_rewrite_config__picks_up_new_csp_domain() {
+        let mut cfg = gateway_config();
+        cfg.csp.domain = Some("new.example.com".into());
+
+        let r = build_reload_rewrite_config(&cfg, "https://stale.tunnel.app", "http://up:9000");
+
+        assert_eq!(r.proxy_url, "https://new.example.com");
+        assert_eq!(r.proxy_domain, "new.example.com");
+    }
+
+    #[test]
+    fn build_reload_rewrite_config__no_csp_domain_falls_back_to_public_url() {
+        let cfg = gateway_config();
+        let r = build_reload_rewrite_config(&cfg, "https://abc.tunnel.mcpr.app", "http://up:9000");
+        assert_eq!(r.proxy_url, "https://abc.tunnel.mcpr.app");
+        assert_eq!(r.proxy_domain, "abc.tunnel.mcpr.app");
+    }
+
+    #[test]
+    fn build_reload_rewrite_config__preserves_csp_block() {
+        let mut cfg = gateway_config();
+        cfg.csp.widgets.push(WidgetScoped {
+            match_pattern: "ui://widget/test".into(),
+            ..Default::default()
+        });
+
+        let r = build_reload_rewrite_config(&cfg, "https://abc.tunnel.mcpr.app", "http://up:9000");
+
+        assert_eq!(r.csp.widgets.len(), 1);
+        assert_eq!(r.csp.widgets[0].match_pattern, "ui://widget/test");
+    }
+
+    #[test]
+    fn build_reload_rewrite_config__keeps_mcp_upstream_arg() {
+        // `mcp` is in the unsafe-changes set, so reload always carries the
+        // boot-time string in via the `mcp_upstream` arg rather than reading
+        // it from the new snapshot.
+        let cfg = gateway_config();
+        let r = build_reload_rewrite_config(
+            &cfg,
+            "https://abc.tunnel.mcpr.app",
+            "http://boot-upstream:9000",
+        );
+        assert_eq!(r.mcp_upstream, "http://boot-upstream:9000");
     }
 }

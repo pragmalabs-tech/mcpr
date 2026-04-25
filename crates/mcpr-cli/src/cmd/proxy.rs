@@ -64,18 +64,23 @@ pub fn restart(args: ProxyRestartArgs) -> Result<(), String> {
 
 pub fn reload(args: ProxyReloadArgs) -> Result<(), String> {
     let outcome = logic::proxy::reload_proxy(&args.name, Path::new(&args.config))?;
+    render_reload_outcome(&args.name, outcome)
+}
+
+/// Map a `ReloadOutcome` to a `Result` for the CLI: applied → printed
+/// success, anything else → hard error so the binary exits non-zero with a
+/// concrete reason.
+fn render_reload_outcome(name: &str, outcome: logic::proxy::ReloadOutcome) -> Result<(), String> {
     match outcome {
         logic::proxy::ReloadOutcome::Applied => {
-            render::proxy_reload_applied(&args.name);
+            render::proxy_reload_applied(name);
             Ok(())
         }
-        logic::proxy::ReloadOutcome::Rejected { message } => Err(format!(
-            "reload of proxy \"{}\" rejected: {message}",
-            args.name
-        )),
+        logic::proxy::ReloadOutcome::Rejected { message } => {
+            Err(format!("reload of proxy \"{name}\" rejected: {message}"))
+        }
         logic::proxy::ReloadOutcome::Timeout => Err(format!(
-            "reload signal sent to proxy \"{}\", but no acknowledgment within 3s. Check `mcpr proxy logs {}`.",
-            args.name, args.name
+            "reload signal sent to proxy \"{name}\", but no acknowledgment within 3s. Check `mcpr proxy logs {name}`."
         )),
     }
 }
@@ -105,4 +110,38 @@ pub fn delete(args: ProxyDeleteArgs) -> Result<(), String> {
     logic::proxy::delete_proxy(&args.name)?;
     render::proxy_deleted(&args.name);
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use logic::proxy::ReloadOutcome;
+
+    #[test]
+    fn render_reload_outcome__applied_is_ok() {
+        assert!(render_reload_outcome("svc", ReloadOutcome::Applied).is_ok());
+    }
+
+    #[test]
+    fn render_reload_outcome__rejected_is_err_with_name_and_reason() {
+        let err = render_reload_outcome(
+            "svc",
+            ReloadOutcome::Rejected {
+                message: "fields require restart: mcp".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("svc"));
+        assert!(err.contains("rejected"));
+        assert!(err.contains("fields require restart: mcp"));
+    }
+
+    #[test]
+    fn render_reload_outcome__timeout_is_err_with_logs_hint() {
+        let err = render_reload_outcome("svc", ReloadOutcome::Timeout).unwrap_err();
+        assert!(err.contains("svc"));
+        assert!(err.contains("no acknowledgment"));
+        assert!(err.contains("mcpr proxy logs"));
+    }
 }
