@@ -63,9 +63,21 @@ pub fn restart(args: ProxyRestartArgs) -> Result<(), String> {
 }
 
 pub fn reload(args: ProxyReloadArgs) -> Result<(), String> {
-    logic::proxy::reload_proxy(&args.name, Path::new(&args.config))?;
-    render::proxy_reloaded(&args.name);
-    Ok(())
+    let outcome = logic::proxy::reload_proxy(&args.name, Path::new(&args.config))?;
+    match outcome {
+        logic::proxy::ReloadOutcome::Applied => {
+            render::proxy_reload_applied(&args.name);
+            Ok(())
+        }
+        logic::proxy::ReloadOutcome::Rejected { message } => Err(format!(
+            "reload of proxy \"{}\" rejected: {message}",
+            args.name
+        )),
+        logic::proxy::ReloadOutcome::Timeout => Err(format!(
+            "reload signal sent to proxy \"{}\", but no acknowledgment within 3s. Check `mcpr proxy logs {}`.",
+            args.name, args.name
+        )),
+    }
 }
 
 pub fn list(args: ProxyListArgs) -> Result<(), String> {

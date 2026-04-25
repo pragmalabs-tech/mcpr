@@ -619,37 +619,8 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         }
     };
 
-    // Resolve the public origin used for widget CSP injection and for the
-    // widget-domain rewrite (`openai/widgetDomain` and `ui.domain`). Precedence:
-    //   1. `csp.domain` in mcpr.toml (operator-declared)
-    //   2. tunnel URL (when a tunnel is active)
-    //   3. nothing — local-only dev. `proxy_url` stays as `http://localhost:*`
-    //      for internal wiring, but downstream gates on `is_public_proxy_origin`
-    //      suppress widget injection so `localhost` never leaks into a
-    //      submitted template.
-    let (proxy_url_for_rewrite, proxy_domain) = match cfg.csp.domain.as_deref() {
-        Some(domain) => {
-            let bare = domain
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .trim_end_matches('/')
-                .to_string();
-            (format!("https://{bare}"), bare)
-        }
-        None => {
-            let bare = public_url
-                .trim_start_matches("https://")
-                .trim_start_matches("http://")
-                .trim_end_matches('/')
-                .to_string();
-            let domain = if bare.contains("localhost") || bare.contains("127.0.0.1") {
-                String::new()
-            } else {
-                bare
-            };
-            (public_url.clone(), domain)
-        }
-    };
+    let (proxy_url_for_rewrite, proxy_domain) =
+        resolve_proxy_origin(cfg.csp.domain.as_deref(), &public_url);
 
     let rewrite_config = RewriteConfig {
         proxy_url: proxy_url_for_rewrite,
@@ -880,6 +851,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         let reload_proxy = proxy.clone();
         let reload_name = proxy_name_for_shutdown.clone();
         let reload_applied = reload_applied_cfg.clone();
+        let reload_public_url = public_url.clone();
         tokio::spawn(async move {
             use tokio::signal::unix::{SignalKind, signal};
             let mut sighup = match signal(SignalKind::hangup()) {
@@ -890,7 +862,13 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
                 }
             };
             while sighup.recv().await.is_some() {
-                handle_reload(&reload_name, &reload_applied, &reload_proxy).await;
+                handle_reload(
+                    &reload_name,
+                    &reload_applied,
+                    &reload_proxy,
+                    &reload_public_url,
+                )
+                .await;
             }
         });
     }
@@ -929,47 +907,113 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
     eprintln!("[mcpr] Shutdown complete.");
 }
 
+/// Compute the rewrite-time `(proxy_url, proxy_domain)` from the operator's
+/// `csp.domain` declaration plus the bound public URL (tunnel or local).
+///
+/// Precedence:
+///   1. `csp.domain` in mcpr.toml (operator-declared)
+///   2. The public URL the proxy was bound to (tunnel URL or `http://localhost:PORT`)
+///   3. Local-only dev — `proxy_url` stays as `http://localhost:*` for internal
+///      wiring, but `proxy_domain` is empty so widget-domain rewriting is
+///      suppressed (no `localhost` leaks into a submitted template).
+fn resolve_proxy_origin(csp_domain: Option<&str>, public_url: &str) -> (String, String) {
+    if let Some(domain) = csp_domain {
+        let bare = domain
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .trim_end_matches('/')
+            .to_string();
+        return (format!("https://{bare}"), bare);
+    }
+    let bare = public_url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let domain = if bare.contains("localhost") || bare.contains("127.0.0.1") {
+        String::new()
+    } else {
+        bare
+    };
+    (public_url.to_string(), domain)
+}
+
 /// Apply a SIGHUP-triggered config reload.
 ///
-/// Re-parses the on-disk snapshot, rejects the reload when any non-csp field
-/// changed (those need a full restart), and otherwise atomically swaps the
-/// `RewriteConfig` so in-flight requests see the new CSP on their next read.
+/// Pairs the SIGHUP with the request nonce the CLI just wrote, performs the
+/// reload, and writes the outcome back so the waiting CLI can print success
+/// or the rejection reason. SIGHUPs that arrive without a request file
+/// (e.g. external `kill -HUP`) still run the reload; they just don't get a
+/// result file written.
 async fn handle_reload(
     proxy_name: &str,
     applied: &tokio::sync::Mutex<GatewayConfig>,
     proxy: &Arc<ProxyState>,
+    public_url: &str,
 ) {
-    let snapshot_path = proxy_lock::config_snapshot_path(proxy_name);
-    let new_cfg = match config::load_gateway_from_path(&snapshot_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[mcpr] reload: rejected — {e}");
-            return;
+    let nonce = proxy_lock::read_reload_request(proxy_name).ok();
+
+    let outcome = apply_reload(proxy_name, applied, proxy, public_url).await;
+
+    match &outcome {
+        Ok(()) => eprintln!("[mcpr] reload: applied"),
+        Err(reason) => eprintln!("[mcpr] reload: rejected — {reason}"),
+    }
+
+    if let Some(n) = nonce {
+        let (status, message) = match &outcome {
+            Ok(()) => (proxy_lock::ReloadStatus::Applied, String::from("ok")),
+            Err(reason) => (proxy_lock::ReloadStatus::Rejected, reason.clone()),
+        };
+        if let Err(e) = proxy_lock::write_reload_result(proxy_name, n, status, &message) {
+            eprintln!("[mcpr] reload: failed to write result file: {e}");
         }
-    };
+    }
+}
+
+/// Pure reload step: parse the snapshot, reject on unsafe changes, and swap
+/// in a freshly-built `RewriteConfig`. Returns `Ok(())` when the live config
+/// has been swapped, or `Err(reason)` when the proxy must keep running on
+/// the old config.
+///
+/// `proxy_url`/`proxy_domain` are recomputed from the new snapshot's
+/// `csp.domain` — reusing the old values would silently drop a domain change
+/// even though the rest of the CSP block updated. `mcp_upstream` is kept
+/// from the running config because `mcp` is in the unsafe-changes set, so
+/// it cannot have moved.
+async fn apply_reload(
+    proxy_name: &str,
+    applied: &tokio::sync::Mutex<GatewayConfig>,
+    proxy: &Arc<ProxyState>,
+    public_url: &str,
+) -> Result<(), String> {
+    let snapshot_path = proxy_lock::config_snapshot_path(proxy_name);
+    let new_cfg = config::load_gateway_from_path(&snapshot_path)
+        .map_err(|e| format!("snapshot parse failed: {e}"))?;
 
     let mut applied_guard = applied.lock().await;
     let changed = applied_guard.reload_unsafe_changes(&new_cfg);
     if !changed.is_empty() {
-        eprintln!(
-            "[mcpr] reload: rejected — fields require restart: {}. Use `mcpr proxy restart {} --config <path>` to apply.",
+        return Err(format!(
+            "fields require restart: {}. Use `mcpr proxy restart {} --config <path>` to apply.",
             changed.join(", "),
             proxy_name,
-        );
-        return;
+        ));
     }
+
+    let (proxy_url, proxy_domain) = resolve_proxy_origin(new_cfg.csp.domain.as_deref(), public_url);
 
     let current = proxy.rewrite_config.load();
     let new_rewrite = RewriteConfig {
-        proxy_url: current.proxy_url.clone(),
-        proxy_domain: current.proxy_domain.clone(),
+        proxy_url,
+        proxy_domain,
         mcp_upstream: current.mcp_upstream.clone(),
         csp: new_cfg.csp.clone(),
     };
     drop(current);
     proxy.rewrite_config.store(Arc::new(new_rewrite));
     *applied_guard = new_cfg;
-    eprintln!("[mcpr] reload: applied (csp)");
+    Ok(())
 }
 
 /// Run the relay server process. Called from `mcpr relay run` / `mcpr relay start`.
