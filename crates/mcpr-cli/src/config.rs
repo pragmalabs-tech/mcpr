@@ -145,6 +145,8 @@ pub enum ProxyCommand {
     Start(ProxyStartArgs),
     /// List all known proxies and their status
     List(ProxyListArgs),
+    /// Delete a proxy — stops it if running, then removes its on-disk state
+    Delete(ProxyDeleteArgs),
 
     // ── Observability ────────────────────────────────────────────────
     /// Show recent request logs
@@ -228,6 +230,17 @@ pub struct ProxyListArgs {
     /// Output as JSON (one object per proxy)
     #[arg(long)]
     pub json: bool,
+}
+
+/// Arguments for `mcpr proxy delete [name]`.
+#[derive(Parser, Clone)]
+pub struct ProxyDeleteArgs {
+    /// Proxy name to delete
+    pub name: Option<String>,
+
+    /// Delete every known proxy (stops any that are running)
+    #[arg(long)]
+    pub all: bool,
 }
 
 /// Arguments for `mcpr proxy logs [name]`.

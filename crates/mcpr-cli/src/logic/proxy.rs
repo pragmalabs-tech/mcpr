@@ -148,3 +148,73 @@ fn send_sighup(_pid: u32) -> Result<(), String> {
 pub fn list_proxies() -> Vec<(String, proxy_lock::LockStatus)> {
     proxy_lock::list_proxies()
 }
+
+/// Result of deleting a proxy.
+#[derive(Debug)]
+pub struct DeleteResult {
+    pub name: String,
+    /// True if the proxy was running and had to be stopped before removal.
+    pub was_running: bool,
+}
+
+/// Delete a single proxy by name.  Stops it first if it is running.
+pub fn delete_proxy(name: &str) -> Result<DeleteResult, String> {
+    let was_running = match proxy_lock::check_lock(name) {
+        proxy_lock::LockStatus::Held(_) => {
+            proxy_lock::stop_proxy(name);
+            true
+        }
+        proxy_lock::LockStatus::Stale(_) => {
+            proxy_lock::remove_lock(name);
+            false
+        }
+        proxy_lock::LockStatus::Free => {
+            if !proxy_lock::proxy_dir_exists(name) {
+                return Err(format!("proxy \"{name}\" not found."));
+            }
+            false
+        }
+    };
+
+    proxy_lock::delete_proxy_dir(name)
+        .map_err(|e| format!("failed to remove proxy \"{name}\" directory: {e}"))?;
+
+    Ok(DeleteResult {
+        name: name.to_string(),
+        was_running,
+    })
+}
+
+/// Delete every known proxy.  Stops any that are running first.
+pub fn delete_all_proxies() -> Result<Vec<DeleteResult>, String> {
+    let proxies = proxy_lock::list_proxies();
+    let mut deleted = Vec::with_capacity(proxies.len());
+    for (name, _) in proxies {
+        deleted.push(delete_proxy(&name)?);
+    }
+    Ok(deleted)
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_proxy__missing_returns_not_found() {
+        let err = delete_proxy("__test_delete_logic_missing_zzz__").unwrap_err();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn delete_proxy__stopped_proxy_removes_dir() {
+        let name = "__test_delete_logic_stopped__";
+        proxy_lock::snapshot_config(name, "[mcp]\nurl=\"x\"\n").unwrap();
+        assert!(proxy_lock::proxy_dir_exists(name));
+
+        let result = delete_proxy(name).unwrap();
+        assert_eq!(result.name, name);
+        assert!(!result.was_running);
+        assert!(!proxy_lock::proxy_dir_exists(name));
+    }
+}

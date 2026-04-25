@@ -71,3 +71,23 @@ pub fn list(args: ProxyListArgs) -> Result<(), String> {
     render::proxy_list(&proxies, args.json.into());
     Ok(())
 }
+
+pub fn delete(args: ProxyDeleteArgs) -> Result<(), String> {
+    if args.all {
+        let deleted = logic::proxy::delete_all_proxies()?;
+        if deleted.is_empty() {
+            render::no_proxies_to_delete();
+        } else {
+            render::deleted_proxies(&deleted);
+        }
+        return Ok(());
+    }
+
+    let name = args
+        .name
+        .ok_or_else(|| "proxy name required. Use --all to delete all proxies.".to_string())?;
+
+    let result = logic::proxy::delete_proxy(&name)?;
+    render::proxy_deleted(&result.name, result.was_running);
+    Ok(())
+}
