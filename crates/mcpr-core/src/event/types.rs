@@ -48,6 +48,10 @@ pub struct RequestEvent {
     pub mcp_method: Option<String>,
     /// Tool name for `tools/call` requests.
     pub tool: Option<String>,
+    /// Resource URI for `resources/{read,subscribe,unsubscribe}` requests.
+    pub resource_uri: Option<String>,
+    /// Prompt name for `prompts/get` requests.
+    pub prompt_name: Option<String>,
 
     /// HTTP response status code.
     pub status: u16,

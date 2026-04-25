@@ -11,7 +11,7 @@ pub mod schema_stale;
 pub mod session_delete;
 pub mod session_record;
 pub mod session_touch;
-pub mod tool_extract;
+pub mod target_extract;
 pub mod url_map;
 
 pub(crate) mod shared;
@@ -28,5 +28,5 @@ pub use schema_stale::SchemaStaleMiddleware;
 pub use session_delete::SessionDeleteMiddleware;
 pub use session_record::SessionRecordMiddleware;
 pub use session_touch::SessionTouchMiddleware;
-pub use tool_extract::ToolExtractMiddleware;
+pub use target_extract::TargetExtractMiddleware;
 pub use url_map::UrlMapMiddleware;

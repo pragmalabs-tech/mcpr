@@ -82,6 +82,8 @@ mod tests {
             path: "/mcp".into(),
             mcp_method: Some("tools/call".into()),
             tool: Some("search".into()),
+            resource_uri: None,
+            prompt_name: None,
             status: 200,
             latency_us: 42_000,
             upstream_us: Some(40_000),

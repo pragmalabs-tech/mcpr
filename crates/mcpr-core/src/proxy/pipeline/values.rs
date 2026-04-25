@@ -249,6 +249,11 @@ pub struct Working {
     /// Tool name for `tools/call`, stashed on the request side so the
     /// emitter can populate `RequestEvent.tool` without re-parsing.
     pub request_tool: Option<String>,
+    /// Resource URI for `resources/{read,subscribe,unsubscribe}`. Feeds
+    /// `RequestEvent.resource_uri`.
+    pub request_resource_uri: Option<String>,
+    /// Prompt name for `prompts/get`. Feeds `RequestEvent.prompt_name`.
+    pub request_prompt_name: Option<String>,
     /// Serialized response body size in bytes. `EnvelopeSealMiddleware`
     /// fills this on the buffered path; streaming paths leave it `None`.
     /// Feeds `RequestEvent.response_size`.

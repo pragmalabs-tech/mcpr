@@ -17,7 +17,7 @@ use super::pipeline::middleware::{RequestMiddleware, ResponseMiddleware};
 use super::pipeline::middlewares::{
     ClientInfoInjectMiddleware, CspRewriteMiddleware, EnvelopeSealMiddleware,
     HealthTrackMiddleware, SchemaIngestMiddleware, SchemaStaleMiddleware, SessionDeleteMiddleware,
-    SessionRecordMiddleware, SessionTouchMiddleware, ToolExtractMiddleware, UrlMapMiddleware,
+    SessionRecordMiddleware, SessionTouchMiddleware, TargetExtractMiddleware, UrlMapMiddleware,
 };
 use super::router::ProxyRouter;
 use super::transport::ProxyTransport;
@@ -35,7 +35,7 @@ pub fn build_default_pipeline(rewrite_config: Arc<ArcSwap<RewriteConfig>>) -> Pr
         Box::new(SessionDeleteMiddleware),
         Box::new(SessionTouchMiddleware),
         Box::new(ClientInfoInjectMiddleware),
-        Box::new(ToolExtractMiddleware),
+        Box::new(TargetExtractMiddleware),
     ];
     let response_chain: Vec<Box<dyn ResponseMiddleware>> = vec![
         // `SchemaIngest` reads the raw upstream result BEFORE `CspRewrite`
@@ -85,7 +85,7 @@ mod tests {
                 "session_delete",
                 "session_touch",
                 "client_info_inject",
-                "tool_extract",
+                "target_extract",
             ],
         );
         assert_eq!(

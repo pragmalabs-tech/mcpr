@@ -34,6 +34,8 @@ pub fn build_request_event(proxy_name: &str, cx: &Context, resp: &Response) -> R
         path: cx.intake.path.clone(),
         mcp_method: mcp_method_str,
         tool,
+        resource_uri: cx.working.request_resource_uri.clone(),
+        prompt_name: cx.working.request_prompt_name.clone(),
         status,
         latency_us: cx.intake.start.elapsed().as_micros() as u64,
         upstream_us: cx.working.upstream_us,
