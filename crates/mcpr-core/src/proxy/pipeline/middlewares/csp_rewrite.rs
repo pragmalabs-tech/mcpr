@@ -218,8 +218,8 @@ mod tests {
     #[tokio::test]
     async fn on_response__resources_list_rewrites_csp() {
         // Regression: the eligibility gate must accept resources/list, or the
-        // operator's publicWidgetDomain never replaces upstream localhost in
-        // widget resource listings.
+        // operator's csp.domain never replaces upstream localhost in widget
+        // resource listings.
         let proxy = test_proxy_state();
         let mut cx = test_context(proxy.clone());
         set_request_method(&mut cx, ClientMethod::Resources(ResourcesMethod::List));

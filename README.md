@@ -19,16 +19,11 @@
 Install and run:
 
 ```bash
+# Install
 curl -fsSL https://mcpr.app/install.sh | sh
-mcpr proxy run
-```
 
-Minimal config:
-
-```toml
-# mcpr.toml
-mcp = "http://localhost:9000"
-port = 3000
+# Onboarding - help you to setup
+mcpr proxy setup
 ```
 
 Docker is in beta — see [docs/DOCKER.md](docs/DOCKER.md) for volumes, health probes, and compose/Kubernetes examples.

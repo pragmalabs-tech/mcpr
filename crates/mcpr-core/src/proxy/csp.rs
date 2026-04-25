@@ -159,12 +159,13 @@ pub struct CspConfig {
     pub resource_domains: DirectivePolicy,
     pub frame_domains: DirectivePolicy,
     pub widgets: Vec<WidgetScoped>,
-    /// Bare public host (no scheme) declared by the operator — feeds
-    /// `openai/widgetDomain` and the proxy-URL injection into widget CSP.
-    /// When `None`, the runtime falls back to the tunnel URL, and when no
-    /// public origin is available at all (local-only dev) the injection
-    /// is suppressed rather than polluting widget config with `localhost`.
-    pub public_widget_domain: Option<String>,
+    /// Bare public host (no scheme) declared by the operator — feeds the
+    /// widget-domain meta fields (`openai/widgetDomain` and `ui.domain`) and
+    /// the proxy-URL injection into widget CSP. When `None`, the runtime
+    /// falls back to the tunnel URL, and when no public origin is available
+    /// at all (local-only dev) the injection is suppressed rather than
+    /// polluting widget config with `localhost`.
+    pub domain: Option<String>,
 }
 
 impl Default for CspConfig {
@@ -177,7 +178,7 @@ impl Default for CspConfig {
             resource_domains: DirectivePolicy::default(),
             frame_domains: DirectivePolicy::strict(),
             widgets: Vec::new(),
-            public_widget_domain: None,
+            domain: None,
         }
     }
 }
