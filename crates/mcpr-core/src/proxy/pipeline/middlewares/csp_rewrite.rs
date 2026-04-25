@@ -67,6 +67,8 @@ impl ResponseMiddleware for CspRewriteMiddleware {
             cx.working.request_method,
             Some(ClientMethod::Tools(ToolsMethod::List))
                 | Some(ClientMethod::Tools(ToolsMethod::Call))
+                | Some(ClientMethod::Resources(ResourcesMethod::List))
+                | Some(ClientMethod::Resources(ResourcesMethod::TemplatesList))
                 | Some(ClientMethod::Resources(ResourcesMethod::Read))
         );
         let raw_bytes = message.envelope.result.as_ref().map(|r| r.get().as_bytes());
@@ -210,6 +212,73 @@ mod tests {
         assert!(
             rewritten,
             "expected upstream rewritten into proxy URL, got {connect:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response__resources_list_rewrites_csp() {
+        // Regression: the eligibility gate must accept resources/list, or the
+        // operator's publicWidgetDomain never replaces upstream localhost in
+        // widget resource listings.
+        let proxy = test_proxy_state();
+        let mut cx = test_context(proxy.clone());
+        set_request_method(&mut cx, ClientMethod::Resources(ResourcesMethod::List));
+        let resp = mcp_buffered_response(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"resources":[{"uri":"ui://widget/x","_meta":{"openai/widgetCSP":{"connect_domains":["http://localhost:9002"]}}}]}}"#,
+            StatusCode::OK,
+        );
+
+        let out = middleware(&proxy).on_response(resp, &mut cx).await;
+        let result = extract_result(&out);
+        let connect = result["resources"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]
+            .as_array()
+            .unwrap();
+        assert!(
+            connect
+                .iter()
+                .any(|v| v.as_str() == Some("https://proxy.test")),
+            "expected proxy URL injected, got {connect:?}"
+        );
+        assert!(
+            !connect
+                .iter()
+                .any(|v| v.as_str().unwrap_or("").contains("localhost")),
+            "expected localhost stripped, got {connect:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response__resources_templates_list_rewrites_csp() {
+        // Regression: same gate fix for resources/templates/list. Without it,
+        // ChatGPT's template fetch sees raw upstream CSP with localhost.
+        let proxy = test_proxy_state();
+        let mut cx = test_context(proxy.clone());
+        set_request_method(
+            &mut cx,
+            ClientMethod::Resources(ResourcesMethod::TemplatesList),
+        );
+        let resp = mcp_buffered_response(
+            r#"{"jsonrpc":"2.0","id":1,"result":{"resourceTemplates":[{"uriTemplate":"ui://widget/{n}","_meta":{"openai/widgetCSP":{"connect_domains":["http://localhost:9002"]}}}]}}"#,
+            StatusCode::OK,
+        );
+
+        let out = middleware(&proxy).on_response(resp, &mut cx).await;
+        let result = extract_result(&out);
+        let connect =
+            result["resourceTemplates"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]
+                .as_array()
+                .unwrap();
+        assert!(
+            connect
+                .iter()
+                .any(|v| v.as_str() == Some("https://proxy.test")),
+            "expected proxy URL injected, got {connect:?}"
+        );
+        assert!(
+            !connect
+                .iter()
+                .any(|v| v.as_str().unwrap_or("").contains("localhost")),
+            "expected localhost stripped, got {connect:?}"
         );
     }
 
