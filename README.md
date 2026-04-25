@@ -144,6 +144,10 @@ mcpr rewrites CSP domain arrays in `tools/list`, `tools/call`, `resources/list`,
 CSP has three independent directives — `connectDomains` (fetch / WebSocket), `resourceDomains` (scripts, styles, images), and `frameDomains` (iframes) — each with its own `mode` (`extend` or `replace`). Widget entries layer glob-matched overrides on top of the global policy.
 
 ```toml
+[csp]
+# Apply to openai widgetDomain and default csp domain
+domain = "widgets.example.com"
+
 [csp.connectDomains]
 domains = ["api.example.com"]
 mode    = "extend"

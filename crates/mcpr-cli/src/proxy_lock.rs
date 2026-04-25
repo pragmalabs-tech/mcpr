@@ -147,6 +147,24 @@ pub fn remove_lock(name: &str) {
     let _ = fs::remove_file(lock_path(name));
 }
 
+/// Remove the entire on-disk state directory for a proxy
+/// (`~/.mcpr/proxies/<name>/` — lock, snapshot, logs, tunnel/upstream URLs).
+///
+/// Caller must ensure the proxy process has been stopped first.
+pub fn delete_proxy_dir(name: &str) -> std::io::Result<()> {
+    let dir = proxy_dir(name);
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether the on-disk directory for a proxy exists.
+pub fn proxy_dir_exists(name: &str) -> bool {
+    proxy_dir(name).is_dir()
+}
+
 /// Save a config snapshot for a proxy (used for restart).
 pub fn snapshot_config(name: &str, content: &str) -> std::io::Result<()> {
     let dir = proxy_dir(name);
@@ -481,6 +499,38 @@ mod tests {
         let result = read_tunnel_url(name);
         let _ = fs::remove_dir_all(dir);
         assert!(result.is_none());
+    }
+
+    // ── delete_proxy_dir ─────────────────────────────────────
+
+    #[test]
+    fn delete_proxy_dir__removes_existing_dir() {
+        let name = "__test_delete_existing__";
+        write_tunnel_url(name, "http://localhost:9999").unwrap();
+        assert!(proxy_dir_exists(name));
+
+        delete_proxy_dir(name).unwrap();
+        assert!(!proxy_dir_exists(name));
+    }
+
+    #[test]
+    fn delete_proxy_dir__missing_is_ok() {
+        let name = "__test_delete_missing_xyz__";
+        assert!(!proxy_dir_exists(name));
+        delete_proxy_dir(name).unwrap();
+    }
+
+    #[test]
+    fn delete_proxy_dir__removes_all_files() {
+        let name = "__test_delete_full__";
+        let dir = proxy_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("lock"), "1\n2\n3\n/p\n").unwrap();
+        fs::write(dir.join("config.toml"), "x=1").unwrap();
+        fs::write(dir.join("proxy.log"), "log").unwrap();
+
+        delete_proxy_dir(name).unwrap();
+        assert!(!proxy_dir_exists(name));
     }
 
     #[test]

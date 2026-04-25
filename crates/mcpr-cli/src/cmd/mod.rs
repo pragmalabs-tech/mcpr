@@ -22,6 +22,7 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         ProxyCommand::Reload(args) => proxy::reload(args),
         ProxyCommand::Start(args) => proxy::start(args),
         ProxyCommand::List(args) => proxy::list(args),
+        ProxyCommand::Delete(args) => proxy::delete(args),
 
         // Observability commands
         ProxyCommand::Logs(args) => observe::logs(args),

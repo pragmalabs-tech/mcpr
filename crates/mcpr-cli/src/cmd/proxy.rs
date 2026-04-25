@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use inquire::Confirm;
+
 use crate::config::*;
 use crate::logic;
 use crate::render;
@@ -69,5 +71,26 @@ pub fn reload(args: ProxyReloadArgs) -> Result<(), String> {
 pub fn list(args: ProxyListArgs) -> Result<(), String> {
     let proxies = logic::proxy::list_proxies();
     render::proxy_list(&proxies, args.json.into());
+    Ok(())
+}
+
+pub fn delete(args: ProxyDeleteArgs) -> Result<(), String> {
+    if !args.yes {
+        let prompt = format!(
+            "Delete proxy \"{}\"? This removes its config snapshot and logs.",
+            args.name
+        );
+        let confirmed = Confirm::new(&prompt)
+            .with_default(false)
+            .prompt()
+            .map_err(|e| format!("prompt error: {e}"))?;
+        if !confirmed {
+            render::proxy_delete_cancelled(&args.name);
+            return Ok(());
+        }
+    }
+
+    logic::proxy::delete_proxy(&args.name)?;
+    render::proxy_deleted(&args.name);
     Ok(())
 }

@@ -151,15 +151,15 @@ pub fn clients(args: ProxyClientsArgs) -> Result<(), String> {
 pub fn status(args: ProxyStatusArgs) -> Result<(), String> {
     let mode = OutputMode::from(args.json);
 
-    // Show running proxies from lockfiles.
-    let proxies = proxy_lock::list_proxies();
-    let running: Vec<_> = proxies
-        .iter()
-        .filter(|(_, s)| matches!(s, proxy_lock::LockStatus::Held(_)))
-        .collect();
+    // Show every known proxy with its current state (running / stopped / stale).
+    let all_proxies = proxy_lock::list_proxies();
+    let proxy_refs: Vec<_> = match &args.name {
+        Some(filter) => all_proxies.iter().filter(|(n, _)| n == filter).collect(),
+        None => all_proxies.iter().collect(),
+    };
 
-    if !running.is_empty() && mode == OutputMode::Pretty {
-        render::status_running_proxies(&running);
+    if mode == OutputMode::Pretty {
+        render::status_proxies(&proxy_refs);
     }
 
     let (engine, _) = open_query_engine()?;
@@ -186,7 +186,7 @@ pub fn status(args: ProxyStatusArgs) -> Result<(), String> {
     render::status_overview(
         &stats_result,
         &session_rows,
-        &running,
+        &proxy_refs,
         &name,
         &args.since,
         mode,
