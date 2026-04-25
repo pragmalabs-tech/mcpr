@@ -138,18 +138,18 @@ Everything else (`mcp` upstream, `port`, `widgets`, `tunnel.*`, timeouts, body l
 |------|-------------|
 | `-c, --config PATH` | **Required.** Config file to snapshot and apply |
 
-#### `mcpr proxy delete [name]`
+#### `mcpr proxy delete <name>`
 
-Delete a proxy. Stops it first if it is running, then removes its on-disk state directory at `~/.mcpr/proxies/<name>/` (lock, config snapshot, logs, tunnel/upstream URL files). Use `--all` to delete every known proxy.
+Delete a stopped proxy — removes its on-disk state directory at `~/.mcpr/proxies/<name>/` (lock, config snapshot, logs, tunnel/upstream URL files). Prompts for confirmation. Errors if the proxy is running; stop it first with `mcpr proxy stop <name>`.
 
 ```bash
 mcpr proxy delete localhost-9000
-mcpr proxy delete --all
+mcpr proxy delete localhost-9000 -y     # skip the confirmation prompt
 ```
 
 | Flag | Description |
 |------|-------------|
-| `--all` | Delete every known proxy (stops any that are running) |
+| `-y, --yes` | Skip the confirmation prompt (useful for scripting) |
 
 ### Setup
 

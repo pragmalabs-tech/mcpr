@@ -277,22 +277,12 @@ pub fn no_proxies_to_restart() {
     eprintln!("No running proxies found to restart.");
 }
 
-pub fn proxy_deleted(name: &str, was_running: bool) {
-    if was_running {
-        eprintln!("Stopped and deleted proxy \"{}\".", name);
-    } else {
-        eprintln!("Deleted proxy \"{}\".", name);
-    }
+pub fn proxy_deleted(name: &str) {
+    eprintln!("Deleted proxy \"{}\".", name);
 }
 
-pub fn deleted_proxies(results: &[crate::logic::proxy::DeleteResult]) {
-    for r in results {
-        proxy_deleted(&r.name, r.was_running);
-    }
-}
-
-pub fn no_proxies_to_delete() {
-    eprintln!("No proxies found to delete.");
+pub fn proxy_delete_cancelled(name: &str) {
+    eprintln!("Cancelled — proxy \"{}\" was not deleted.", name);
 }
 
 // ── Relay lifecycle ──────────────────────────────────────────────────

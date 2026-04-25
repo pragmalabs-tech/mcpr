@@ -149,50 +149,27 @@ pub fn list_proxies() -> Vec<(String, proxy_lock::LockStatus)> {
     proxy_lock::list_proxies()
 }
 
-/// Result of deleting a proxy.
-#[derive(Debug)]
-pub struct DeleteResult {
-    pub name: String,
-    /// True if the proxy was running and had to be stopped before removal.
-    pub was_running: bool,
-}
-
-/// Delete a single proxy by name.  Stops it first if it is running.
-pub fn delete_proxy(name: &str) -> Result<DeleteResult, String> {
-    let was_running = match proxy_lock::check_lock(name) {
+/// Delete a single stopped proxy by name. Errors if the proxy is running —
+/// callers must stop it explicitly first.
+pub fn delete_proxy(name: &str) -> Result<(), String> {
+    match proxy_lock::check_lock(name) {
         proxy_lock::LockStatus::Held(_) => {
-            proxy_lock::stop_proxy(name);
-            true
+            return Err(format!(
+                "proxy \"{name}\" is running. Stop it first with `mcpr proxy stop {name}`."
+            ));
         }
         proxy_lock::LockStatus::Stale(_) => {
             proxy_lock::remove_lock(name);
-            false
         }
         proxy_lock::LockStatus::Free => {
             if !proxy_lock::proxy_dir_exists(name) {
                 return Err(format!("proxy \"{name}\" not found."));
             }
-            false
         }
-    };
+    }
 
     proxy_lock::delete_proxy_dir(name)
-        .map_err(|e| format!("failed to remove proxy \"{name}\" directory: {e}"))?;
-
-    Ok(DeleteResult {
-        name: name.to_string(),
-        was_running,
-    })
-}
-
-/// Delete every known proxy.  Stops any that are running first.
-pub fn delete_all_proxies() -> Result<Vec<DeleteResult>, String> {
-    let proxies = proxy_lock::list_proxies();
-    let mut deleted = Vec::with_capacity(proxies.len());
-    for (name, _) in proxies {
-        deleted.push(delete_proxy(&name)?);
-    }
-    Ok(deleted)
+        .map_err(|e| format!("failed to remove proxy \"{name}\" directory: {e}"))
 }
 
 #[cfg(test)]
@@ -212,9 +189,21 @@ mod tests {
         proxy_lock::snapshot_config(name, "[mcp]\nurl=\"x\"\n").unwrap();
         assert!(proxy_lock::proxy_dir_exists(name));
 
-        let result = delete_proxy(name).unwrap();
-        assert_eq!(result.name, name);
-        assert!(!result.was_running);
+        delete_proxy(name).unwrap();
         assert!(!proxy_lock::proxy_dir_exists(name));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_proxy__running_proxy_errors_without_removing() {
+        let name = "__test_delete_logic_running__";
+        proxy_lock::write_lock(name, 4242, "/tmp/x.toml", None).unwrap();
+        assert!(proxy_lock::proxy_dir_exists(name));
+
+        let err = delete_proxy(name).unwrap_err();
+        assert!(err.contains("is running"));
+        assert!(proxy_lock::proxy_dir_exists(name));
+
+        let _ = proxy_lock::delete_proxy_dir(name);
     }
 }
