@@ -181,28 +181,28 @@ pub fn rewrite_response(method: &str, body: &mut Value, config: &RewriteConfig) 
 /// a widget — a tool call result's `_meta`, for example — so non-widget metas
 /// are not polluted with CSP fields they don't need.
 fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &RewriteConfig) {
-    // Hosts disagree about where they read the widget domain: ChatGPT reads
-    // `openai/widgetDomain`, the MCP-UI / Apps spec reads `_meta.ui.domain`.
-    // Same playbook as CSP — when the upstream declared the field in *either*
-    // shape, emit our public domain into *both* so the widget is portable
-    // across hosts.
-    //
-    // Two guards:
-    //   * `proxy_domain` empty (local-only dev) — leave upstream alone rather
-    //     than clobbering with "".
-    //   * Neither shape declared upstream — never synthesize the key on a meta
-    //     that didn't ask for it.
-    if !config.proxy_domain.is_empty()
-        && (meta.get("openai/widgetDomain").is_some() || meta.pointer("/ui/domain").is_some())
-    {
-        write_widget_domain(meta, &config.proxy_domain);
-    }
-
     if !is_widget_meta(meta, explicit_uri) {
-        // Inside rewrite_widget_meta: the caller's match arm has already
-        // flagged mutation, so the return value is uninteresting here.
+        // Non-widget meta — not our surface. Run the deep CSP injection so any
+        // stray CSP arrays still get the proxy URL prepended, but don't write
+        // widget-domain keys: that would pollute metas that aren't widgets.
         let _ = inject_proxy_into_all_csp(meta, config);
         return;
+    }
+
+    // Hosts disagree about where they read the widget domain: ChatGPT reads
+    // `openai/widgetDomain`, the MCP-UI / Apps spec reads `_meta.ui.domain`.
+    // mcpr is a configuration layer: when the operator declared a public
+    // origin (via `csp.domain` or an active tunnel) and we're handling a
+    // widget meta, we write *both* shapes unconditionally — even if upstream
+    // declared neither. The previous gate on upstream-having-the-field made
+    // operator config silently inert against MCP servers that don't
+    // pre-declare a widget domain, which defeats the point of declaring it.
+    //
+    // The `proxy_domain.is_empty()` guard is the only one that remains: in
+    // local-only dev with no public origin available, writing "" or
+    // `localhost` is never useful.
+    if !config.proxy_domain.is_empty() {
+        write_widget_domain(meta, &config.proxy_domain);
     }
 
     let inferred = explicit_uri
@@ -221,7 +221,8 @@ fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &Re
     write_openai_csp(meta, &connect, &resource, &frame);
     write_spec_csp(meta, &connect, &resource, &frame);
 
-    // Same reasoning as above — caller already flags mutation.
+    // Caller's match arm already flags mutation, so the return value here is
+    // uninteresting.
     let _ = inject_proxy_into_all_csp(meta, config);
 }
 
@@ -600,13 +601,58 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_widget_meta__no_upstream_domain_does_not_synthesize() {
+    fn rewrite_widget_meta__synthesizes_both_shapes_when_upstream_declared_neither() {
+        // mcpr is a configuration layer: when the operator declared a public
+        // domain and we're rewriting a widget meta, both shapes are written
+        // even if upstream declared neither. Gating on upstream made the
+        // operator config silently inert for MCP servers that don't already
+        // emit `openai/widgetDomain` or `ui.domain`.
         let config = rewrite_config();
         let mut meta = json!({
             "openai/widgetCSP": { "connect_domains": [] }
         });
 
         rewrite_widget_meta(&mut meta, Some("ui://widget/x"), &config);
+
+        assert_eq!(
+            meta["openai/widgetDomain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+        assert_eq!(
+            meta["ui"]["domain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+    }
+
+    #[test]
+    fn rewrite_widget_meta__synthesizes_when_only_explicit_uri_marks_widget() {
+        // No widget-shaped fields on the meta at all — the caller (e.g. a
+        // `resources/read` handler that already resolved the URI) supplies
+        // it explicitly. Operator-declared domain still gets written.
+        let config = rewrite_config();
+        let mut meta = json!({});
+
+        rewrite_widget_meta(&mut meta, Some("ui://widget/x"), &config);
+
+        assert_eq!(
+            meta["openai/widgetDomain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+        assert_eq!(
+            meta["ui"]["domain"].as_str().unwrap(),
+            "abc.tunnel.example.com"
+        );
+    }
+
+    #[test]
+    fn rewrite_widget_meta__non_widget_meta_does_not_get_widget_domain() {
+        // Regression guard: a meta object with no widget markers and no
+        // explicit URI is not a widget surface. We must not pollute it with
+        // `openai/widgetDomain` just because the operator configured one.
+        let config = rewrite_config();
+        let mut meta = json!({ "some/unrelated": "value" });
+
+        rewrite_widget_meta(&mut meta, None, &config);
 
         assert!(meta.get("openai/widgetDomain").is_none());
         assert!(meta.pointer("/ui/domain").is_none());
