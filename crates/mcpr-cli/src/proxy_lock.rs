@@ -177,6 +177,104 @@ pub fn read_snapshot(name: &str) -> std::io::Result<String> {
     fs::read_to_string(config_snapshot_path(name))
 }
 
+// ── Reload IPC ───────────────────────────────────────────────────────
+//
+// `mcpr proxy reload` is a 3-step handshake:
+//   1. CLI writes the new config snapshot and a `reload_request` containing
+//      a fresh nonce, then sends SIGHUP.
+//   2. The running proxy reads the nonce, applies (or rejects) the snapshot,
+//      and atomically writes a `reload_result` echoing the same nonce.
+//   3. CLI polls `reload_result` for a matching nonce, then prints success
+//      or the rejection reason. Without the nonce the CLI could mistake a
+//      stale result file for confirmation of the current request.
+
+/// Outcome of a reload signal — written by the proxy, read by the CLI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReloadStatus {
+    Applied,
+    Rejected,
+}
+
+impl ReloadStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ReloadStatus::Applied => "applied",
+            ReloadStatus::Rejected => "rejected",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReloadResult {
+    pub nonce: u64,
+    pub status: ReloadStatus,
+    pub message: String,
+}
+
+fn reload_request_path(name: &str) -> PathBuf {
+    proxy_dir(name).join("reload_request")
+}
+
+fn reload_result_path(name: &str) -> PathBuf {
+    proxy_dir(name).join("reload_result")
+}
+
+/// CLI-side: announce a pending reload by writing the request nonce.
+pub fn write_reload_request(name: &str, nonce: u64) -> std::io::Result<()> {
+    let dir = proxy_dir(name);
+    fs::create_dir_all(&dir)?;
+    fs::write(reload_request_path(name), nonce.to_string())
+}
+
+/// Proxy-side: read the most recent reload request nonce. Returns an error
+/// when SIGHUP arrived without a matching request file (e.g. external `kill
+/// -HUP` rather than `mcpr proxy reload`).
+pub fn read_reload_request(name: &str) -> std::io::Result<u64> {
+    let s = fs::read_to_string(reload_request_path(name))?;
+    s.trim()
+        .parse::<u64>()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+/// Proxy-side: write the outcome of a reload atomically (write-then-rename),
+/// echoing the nonce so the CLI can ignore stale results from prior reloads.
+pub fn write_reload_result(
+    name: &str,
+    nonce: u64,
+    status: ReloadStatus,
+    message: &str,
+) -> std::io::Result<()> {
+    let dir = proxy_dir(name);
+    fs::create_dir_all(&dir)?;
+    // Newlines would corrupt the simple line-based format below.
+    let safe_msg = message.replace('\n', " ");
+    let body = format!("{}\n{}\n{}\n", nonce, status.as_str(), safe_msg);
+    let final_path = reload_result_path(name);
+    let tmp_path = dir.join("reload_result.tmp");
+    fs::write(&tmp_path, body)?;
+    fs::rename(tmp_path, final_path)
+}
+
+/// CLI-side: read the latest reload outcome. Returns `None` when the file
+/// is missing or malformed; callers should keep polling in either case.
+pub fn read_reload_result(name: &str) -> Option<ReloadResult> {
+    let s = fs::read_to_string(reload_result_path(name)).ok()?;
+    let (nonce_line, rest) = s.split_once('\n')?;
+    let (status_line, rest) = rest.split_once('\n')?;
+    let nonce: u64 = nonce_line.trim().parse().ok()?;
+    let status = match status_line.trim() {
+        "applied" => ReloadStatus::Applied,
+        "rejected" => ReloadStatus::Rejected,
+        _ => return None,
+    };
+    let message = rest.trim_end_matches('\n').to_string();
+    Some(ReloadResult {
+        nonce,
+        status,
+        message,
+    })
+}
+
 /// List all proxies that have a lock directory, with their lock status.
 pub fn list_proxies() -> Vec<(String, LockStatus)> {
     let dir = proxies_dir();
@@ -531,6 +629,110 @@ mod tests {
 
         delete_proxy_dir(name).unwrap();
         assert!(!proxy_dir_exists(name));
+    }
+
+    // ── reload IPC ───────────────────────────────────────────
+
+    #[test]
+    fn reload_request__roundtrip() {
+        let name = "__test_reload_request_roundtrip__";
+        write_reload_request(name, 12345).unwrap();
+        let got = read_reload_request(name).unwrap();
+        let _ = fs::remove_dir_all(proxy_dir(name));
+        assert_eq!(got, 12345);
+    }
+
+    #[test]
+    fn reload_request__missing_returns_err() {
+        let err = read_reload_request("__nonexistent_reload_req_xyz__");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn reload_request__malformed_returns_err() {
+        let name = "__test_reload_request_malformed__";
+        let dir = proxy_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("reload_request"), "not-a-number").unwrap();
+        let result = read_reload_request(name);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reload_result__roundtrip_applied() {
+        let name = "__test_reload_result_applied__";
+        write_reload_result(name, 999, ReloadStatus::Applied, "ok").unwrap();
+        let got = read_reload_result(name).unwrap();
+        let _ = fs::remove_dir_all(proxy_dir(name));
+        assert_eq!(
+            got,
+            ReloadResult {
+                nonce: 999,
+                status: ReloadStatus::Applied,
+                message: "ok".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn reload_result__roundtrip_rejected_with_message() {
+        let name = "__test_reload_result_rejected__";
+        let reason = "fields require restart: mcp, port";
+        write_reload_result(name, 42, ReloadStatus::Rejected, reason).unwrap();
+        let got = read_reload_result(name).unwrap();
+        let _ = fs::remove_dir_all(proxy_dir(name));
+        assert_eq!(got.nonce, 42);
+        assert_eq!(got.status, ReloadStatus::Rejected);
+        assert_eq!(got.message, reason);
+    }
+
+    #[test]
+    fn reload_result__newlines_in_message_are_squashed() {
+        let name = "__test_reload_result_newlines__";
+        write_reload_result(name, 7, ReloadStatus::Rejected, "line1\nline2").unwrap();
+        let got = read_reload_result(name).unwrap();
+        let _ = fs::remove_dir_all(proxy_dir(name));
+        assert_eq!(got.message, "line1 line2");
+    }
+
+    #[test]
+    fn reload_result__missing_returns_none() {
+        assert!(read_reload_result("__nonexistent_reload_result_xyz__").is_none());
+    }
+
+    #[test]
+    fn reload_result__malformed_returns_none() {
+        let name = "__test_reload_result_malformed__";
+        let dir = proxy_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("reload_result"), "12345\nbogus\nmsg\n").unwrap();
+        let result = read_reload_result(name);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn reload_result__truncated_returns_none() {
+        let name = "__test_reload_result_truncated__";
+        let dir = proxy_dir(name);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("reload_result"), "12345\n").unwrap();
+        let result = read_reload_result(name);
+        let _ = fs::remove_dir_all(&dir);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn reload_result__overwrite_keeps_latest() {
+        let name = "__test_reload_result_overwrite__";
+        write_reload_result(name, 1, ReloadStatus::Applied, "first").unwrap();
+        write_reload_result(name, 2, ReloadStatus::Rejected, "second").unwrap();
+        let got = read_reload_result(name).unwrap();
+        let _ = fs::remove_dir_all(proxy_dir(name));
+        assert_eq!(got.nonce, 2);
+        assert_eq!(got.status, ReloadStatus::Rejected);
+        assert_eq!(got.message, "second");
     }
 
     #[test]
