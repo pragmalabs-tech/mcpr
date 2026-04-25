@@ -70,6 +70,12 @@ pub struct RequestEvent {
     /// Extracted from the JSON-RPC params by the proxy's MCP parser.
     pub tool: Option<String>,
 
+    /// Resource URI for `resources/{read,subscribe,unsubscribe}`.
+    pub resource_uri: Option<String>,
+
+    /// Prompt name for `prompts/get`.
+    pub prompt_name: Option<String>,
+
     /// Wall-clock time from proxy receiving the request to getting the upstream response.
     /// Includes network round-trip to upstream — this is what the AI client experiences.
     /// Stored in microseconds for sub-millisecond precision.

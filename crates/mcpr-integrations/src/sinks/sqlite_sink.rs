@@ -49,6 +49,8 @@ impl EventSink for SqliteSink {
                     session_id: e.session_id.clone(),
                     method: e.mcp_method.clone().unwrap_or_else(|| e.method.clone()),
                     tool: e.tool.clone(),
+                    resource_uri: e.resource_uri.clone(),
+                    prompt_name: e.prompt_name.clone(),
                     latency_us: e.latency_us as i64,
                     status,
                     error_code: e.error_code.clone(),

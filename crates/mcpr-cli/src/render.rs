@@ -454,6 +454,10 @@ struct LogDisplayRow {
     method: String,
     #[tabled(rename = "TOOL")]
     tool: String,
+    #[tabled(rename = "URI")]
+    resource_uri: String,
+    #[tabled(rename = "PROMPT")]
+    prompt: String,
     #[tabled(rename = "LATENCY")]
     latency: String,
     #[tabled(rename = "IN")]
@@ -476,6 +480,12 @@ impl From<&LogRow> for LogDisplayRow {
             time: format_ts(row.ts),
             method: row.method.clone(),
             tool: row.tool.clone().unwrap_or_else(|| "—".to_string()),
+            resource_uri: row
+                .resource_uri
+                .as_deref()
+                .map(truncate_uri)
+                .unwrap_or_else(|| "—".to_string()),
+            prompt: row.prompt_name.clone().unwrap_or_else(|| "—".to_string()),
             latency: format_latency(row.latency_us),
             bytes_in: format_bytes_col(row.bytes_in),
             bytes_out: format_bytes_col(row.bytes_out),
@@ -483,6 +493,25 @@ impl From<&LogRow> for LogDisplayRow {
             status,
         }
     }
+}
+
+/// URIs can be 100+ chars and blow up table width. Trim the middle so the
+/// scheme prefix and the trailing path segment stay visible.
+fn truncate_uri(uri: &str) -> String {
+    const MAX: usize = 50;
+    if uri.chars().count() <= MAX {
+        return uri.to_string();
+    }
+    let head: String = uri.chars().take(24).collect();
+    let tail: String = uri
+        .chars()
+        .rev()
+        .take(23)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{head}…{tail}")
 }
 
 /// Render log rows. In pretty mode, error rows are colored red.
@@ -1372,6 +1401,26 @@ mod tests {
         assert_eq!(format_bytes_col(Some(512)), "512 B");
         assert_eq!(format_bytes_col(Some(2048)), "2.0 KB");
         assert_eq!(format_bytes_col(Some(1_500_000)), "1.4 MB");
+    }
+
+    #[test]
+    fn truncate_uri__short_unchanged() {
+        assert_eq!(truncate_uri("file:///etc/hosts"), "file:///etc/hosts");
+    }
+
+    #[test]
+    fn truncate_uri__exactly_max_unchanged() {
+        let uri: String = std::iter::repeat_n('a', 50).collect();
+        assert_eq!(truncate_uri(&uri), uri);
+    }
+
+    #[test]
+    fn truncate_uri__long_keeps_head_and_tail() {
+        let uri = "https://very.long.example.com/api/v2/resources/abc123/items/xyz789";
+        let out = truncate_uri(uri);
+        assert!(out.contains('…'));
+        assert!(out.starts_with("https://very.long.exampl"));
+        assert!(out.ends_with("/items/xyz789"));
     }
 
     #[test]

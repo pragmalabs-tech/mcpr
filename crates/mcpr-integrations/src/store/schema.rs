@@ -18,7 +18,7 @@
 
 /// Current schema version. Stored in the `meta` table and checked on startup.
 /// Bump this when adding migrations.
-pub const SCHEMA_VERSION: &str = "4";
+pub const SCHEMA_VERSION: &str = "5";
 
 /// Initial schema: requests table, sessions table, meta table, and all indexes.
 ///
@@ -219,6 +219,18 @@ CREATE INDEX IF NOT EXISTS idx_requests_slow ON requests (proxy, latency_us DESC
 UPDATE meta SET value = '4' WHERE key = 'schema_version';
 ";
 
+/// V4 → V5 migration: add `resource_uri` and `prompt_name` columns to
+/// the `requests` table. Captured by the proxy's `TargetExtractMiddleware`:
+///   resources/{read,subscribe,unsubscribe} → params.uri  → resource_uri
+///   prompts/get                            → params.name → prompt_name
+pub const V5_SCHEMA: &str = "
+ALTER TABLE requests ADD COLUMN resource_uri TEXT;
+ALTER TABLE requests ADD COLUMN prompt_name TEXT;
+
+-- Bump schema version.
+UPDATE meta SET value = '5' WHERE key = 'schema_version';
+";
+
 /// SQL to insert or update the mcpr_version meta key on every startup.
 pub const UPSERT_MCPR_VERSION: &str = "
 INSERT INTO meta (key, value) VALUES ('mcpr_version', ?1)
@@ -228,14 +240,14 @@ INSERT INTO meta (key, value) VALUES ('mcpr_version', ?1)
 // ── Prepared statement SQL ────────────────────────────────────────────
 // Used by the background writer for batch inserts/updates.
 
-/// INSERT a new request row. All parameters are positional (?1 .. ?12).
+/// INSERT a new request row. All parameters are positional (?1 .. ?14).
 pub const INSERT_REQUEST_SQL: &str = "
 INSERT INTO requests (
     request_id, ts, proxy, session_id,
-    method, tool,
+    method, tool, resource_uri, prompt_name,
     latency_us, status, error_code, error_msg,
     bytes_in, bytes_out
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12);
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14);
 ";
 
 /// INSERT a new session row. Uses INSERT OR IGNORE because a reconnecting

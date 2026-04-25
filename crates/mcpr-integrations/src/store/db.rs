@@ -80,6 +80,10 @@ pub fn run_migrations(conn: &Connection, mcpr_version: &str) -> rusqlite::Result
         conn.execute_batch(schema::V4_SCHEMA)?;
     }
 
+    if version < 5 {
+        conn.execute_batch(schema::V5_SCHEMA)?;
+    }
+
     // Always update the mcpr binary version on startup.
     conn.execute(schema::UPSERT_MCPR_VERSION, rusqlite::params![mcpr_version])?;
 
@@ -144,7 +148,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
 
         let mcpr_ver: String = conn
             .query_row(

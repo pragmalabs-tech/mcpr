@@ -32,6 +32,8 @@ pub struct LogRow {
     pub ts: i64,
     pub method: String,
     pub tool: Option<String>,
+    pub resource_uri: Option<String>,
+    pub prompt_name: Option<String>,
     pub latency_us: i64,
     pub status: String,
     pub error_code: Option<String>,
@@ -42,25 +44,27 @@ pub struct LogRow {
 }
 
 /// Shared row mapper — used by logs, logs_since, slow, slow_since to avoid
-/// duplicating the 11-column mapping closure.
+/// duplicating the column mapping closure.
 pub(crate) fn map_log_row(row: &Row<'_>) -> rusqlite::Result<LogRow> {
     Ok(LogRow {
         request_id: row.get(0)?,
         ts: row.get(1)?,
         method: row.get(2)?,
         tool: row.get(3)?,
-        latency_us: row.get(4)?,
-        status: row.get(5)?,
-        error_code: row.get(6)?,
-        error_msg: row.get(7)?,
-        session_id: row.get(8)?,
-        bytes_in: row.get(9)?,
-        bytes_out: row.get(10)?,
+        resource_uri: row.get(4)?,
+        prompt_name: row.get(5)?,
+        latency_us: row.get(6)?,
+        status: row.get(7)?,
+        error_code: row.get(8)?,
+        error_msg: row.get(9)?,
+        session_id: row.get(10)?,
+        bytes_in: row.get(11)?,
+        bytes_out: row.get(12)?,
     })
 }
 
-/// The 11 columns selected in all log/slow queries.
-pub(crate) const LOG_COLUMNS: &str = "request_id, ts, method, tool, latency_us, status, error_code, error_msg, session_id, bytes_in, bytes_out";
+/// Columns selected in all log/slow queries — must align with `map_log_row`.
+pub(crate) const LOG_COLUMNS: &str = "request_id, ts, method, tool, resource_uri, prompt_name, latency_us, status, error_code, error_msg, session_id, bytes_in, bytes_out";
 
 impl QueryEngine {
     /// Fetch recent request logs, newest first.

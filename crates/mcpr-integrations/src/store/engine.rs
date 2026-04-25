@@ -219,6 +219,8 @@ mod tests {
             session_id: Some("s1".into()),
             method: "tools/call".into(),
             tool: Some("test_tool".into()),
+            resource_uri: None,
+            prompt_name: None,
             latency_us: 50_000,
             status: RequestStatus::Ok,
             error_code: None,
