@@ -119,7 +119,65 @@ pub fn merge_pages(method: &str, pages: &[Value]) -> Option<Value> {
         }
     }
 
+    // Sort by `name` so identical item sets in different upstream orders
+    // produce the same payload. Ties (missing or duplicate names) fall back
+    // to canonical JSON so the result is fully deterministic.
+    merged_array.sort_by(|a, b| {
+        let a_name = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let b_name = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        a_name
+            .cmp(b_name)
+            .then_with(|| a.to_string().cmp(&b.to_string()))
+    });
+
     Some(serde_json::json!({ array_key: merged_array }))
+}
+
+/// Project a list payload to its content-defining fields for hashing.
+///
+/// Hashing the full stored payload causes phantom version bumps when an
+/// upstream rewords a description or adds optional metadata. This view
+/// keeps only the identifier and the argument contract per item — the
+/// fields that actually define the tool/resource/prompt API — so
+/// version numbers track real API changes.
+///
+/// Returns `None` for methods that don't have a list contract; the
+/// caller decides how to hash those (typically the raw payload).
+///
+/// | Method                       | Kept fields            |
+/// |------------------------------|------------------------|
+/// | `tools/list`                 | `name`, `inputSchema`  |
+/// | `prompts/list`               | `name`, `arguments`    |
+/// | `resources/list`             | `name`, `uri`          |
+/// | `resources/templates/list`   | `name`, `uriTemplate`  |
+pub fn canonical_hash_view(method: &str, payload: &Value) -> Option<Value> {
+    let (array_key, item_keys): (&str, &[&str]) = match method {
+        "tools/list" => ("tools", &["name", "inputSchema"]),
+        "prompts/list" => ("prompts", &["name", "arguments"]),
+        "resources/list" => ("resources", &["name", "uri"]),
+        "resources/templates/list" => ("resourceTemplates", &["name", "uriTemplate"]),
+        _ => return None,
+    };
+    let projected: Vec<Value> = payload
+        .get(array_key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|item| project_keys(item, item_keys))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(serde_json::json!({ array_key: projected }))
+}
+
+fn project_keys(item: &Value, keys: &[&str]) -> Value {
+    let mut obj = serde_json::Map::new();
+    for k in keys {
+        if let Some(v) = item.get(*k) {
+            obj.insert((*k).to_string(), v.clone());
+        }
+    }
+    Value::Object(obj)
 }
 
 /// Diff two schema payloads for a list method.
@@ -372,6 +430,158 @@ mod tests {
         let p2 = json!({"serverInfo": {"name": "v2"}});
         let result = merge_pages("initialize", &[p1, p2]);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn merge_pages__sorts_items_by_name() {
+        let page = json!({"tools": [
+            {"name": "c"}, {"name": "a"}, {"name": "b"}
+        ]});
+        let result = merge_pages("tools/list", &[page]).unwrap();
+        let names: Vec<&str> = result["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn merge_pages__same_set_in_different_orders_is_equal() {
+        // Regression: upstream returning identical tool sets in different
+        // orders previously produced different hashes and inflated the
+        // version count.
+        let p1 = json!({"tools": [{"name": "a"}, {"name": "b"}, {"name": "c"}]});
+        let p2 = json!({"tools": [{"name": "c"}, {"name": "a"}, {"name": "b"}]});
+        assert_eq!(
+            merge_pages("tools/list", &[p1]),
+            merge_pages("tools/list", &[p2]),
+        );
+    }
+
+    #[test]
+    fn merge_pages__preserves_description_for_display() {
+        let page = json!({"tools": [
+            {"name": "a", "description": "do thing", "inputSchema": {"type": "object"}}
+        ]});
+        let result = merge_pages("tools/list", &[page]).unwrap();
+        assert_eq!(result["tools"][0]["description"], "do thing");
+    }
+
+    #[test]
+    fn merge_pages__items_without_name_break_ties_by_canonical_json() {
+        let p1 = json!({"tools": [{"foo": "1"}, {"foo": "2"}]});
+        let p2 = json!({"tools": [{"foo": "2"}, {"foo": "1"}]});
+        assert_eq!(
+            merge_pages("tools/list", &[p1]),
+            merge_pages("tools/list", &[p2]),
+        );
+    }
+
+    // ── canonical_hash_view ──────────────────────────────────────────
+
+    #[test]
+    fn canonical_hash_view__tool_keeps_only_name_and_input_schema() {
+        let payload = json!({"tools": [{
+            "name": "search",
+            "description": "human text",
+            "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
+            "annotations": {"readOnlyHint": true}
+        }]});
+        let view = canonical_hash_view("tools/list", &payload).unwrap();
+        assert_eq!(
+            view,
+            json!({"tools": [{
+                "name": "search",
+                "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
+            }]}),
+        );
+    }
+
+    #[test]
+    fn canonical_hash_view__resource_keeps_only_name_and_uri() {
+        let payload = json!({"resources": [{
+            "name": "r1",
+            "uri": "file://a",
+            "description": "desc",
+            "mimeType": "text/plain"
+        }]});
+        let view = canonical_hash_view("resources/list", &payload).unwrap();
+        assert_eq!(
+            view,
+            json!({"resources": [{"name": "r1", "uri": "file://a"}]}),
+        );
+    }
+
+    #[test]
+    fn canonical_hash_view__prompt_keeps_only_name_and_arguments() {
+        let payload = json!({"prompts": [{
+            "name": "summarize",
+            "description": "summarizes text",
+            "arguments": [{"name": "topic", "required": true}]
+        }]});
+        let view = canonical_hash_view("prompts/list", &payload).unwrap();
+        assert_eq!(
+            view,
+            json!({"prompts": [{
+                "name": "summarize",
+                "arguments": [{"name": "topic", "required": true}]
+            }]}),
+        );
+    }
+
+    #[test]
+    fn canonical_hash_view__resource_template_keeps_name_and_uri_template() {
+        let payload = json!({"resourceTemplates": [{
+            "name": "doc",
+            "uriTemplate": "doc://{id}",
+            "description": "any doc",
+            "mimeType": "text/markdown"
+        }]});
+        let view = canonical_hash_view("resources/templates/list", &payload).unwrap();
+        assert_eq!(
+            view,
+            json!({"resourceTemplates": [{"name": "doc", "uriTemplate": "doc://{id}"}]}),
+        );
+    }
+
+    #[test]
+    fn canonical_hash_view__description_only_change_is_invisible() {
+        let p1 = json!({"tools": [{"name": "a", "description": "old", "inputSchema": {}}]});
+        let p2 = json!({"tools": [{"name": "a", "description": "new", "inputSchema": {}}]});
+        assert_eq!(
+            canonical_hash_view("tools/list", &p1),
+            canonical_hash_view("tools/list", &p2),
+        );
+    }
+
+    #[test]
+    fn canonical_hash_view__input_schema_change_is_visible() {
+        let p1 = json!({"tools": [{"name": "a", "inputSchema": {"type": "object"}}]});
+        let p2 = json!({"tools": [{
+            "name": "a",
+            "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
+        }]});
+        assert_ne!(
+            canonical_hash_view("tools/list", &p1),
+            canonical_hash_view("tools/list", &p2),
+        );
+    }
+
+    #[test]
+    fn canonical_hash_view__non_list_method_returns_none() {
+        let payload = json!({"serverInfo": {"name": "test", "version": "1.0"}});
+        assert_eq!(canonical_hash_view("initialize", &payload), None);
+    }
+
+    #[test]
+    fn canonical_hash_view__missing_array_key_yields_empty_array() {
+        let payload = json!({"_meta": {"requestId": "x"}});
+        assert_eq!(
+            canonical_hash_view("tools/list", &payload),
+            Some(json!({"tools": []})),
+        );
     }
 
     // ── diff_schema ──────────────────────────────────────────────────
