@@ -28,8 +28,16 @@ pub struct QueryEngine {
 
 impl QueryEngine {
     /// Open a query connection to the database at the given path.
+    ///
+    /// Runs migrations on open. The writer also migrates on `Store::open`,
+    /// but a user who upgrades the binary and runs a read command before
+    /// restarting the proxy would otherwise hit "no such column" errors
+    /// against a stale schema. Migrations are idempotent + WAL-safe, so
+    /// it's fine for the reader to bump the schema if the writer hasn't
+    /// caught up yet.
     pub fn open(db_path: &Path) -> Result<Self, rusqlite::Error> {
         let conn = db::open_connection(db_path)?;
+        db::run_migrations(&conn, env!("CARGO_PKG_VERSION"))?;
         Ok(QueryEngine { conn })
     }
 
@@ -49,8 +57,55 @@ impl QueryEngine {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::store::db;
+    use crate::store::{db, schema};
     use rusqlite::params;
+
+    /// `QueryEngine::open` must migrate a stale DB so users who upgrade the
+    /// binary and run a read command (without restarting the proxy first)
+    /// don't hit "no such column" errors.
+    #[test]
+    fn open__migrates_stale_db_to_current_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("stale.db");
+
+        // Build a V4-shaped DB: run migrations through V4 only.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(schema::V1_SCHEMA).unwrap();
+            conn.execute_batch(schema::V1_META_SEED).unwrap();
+            conn.execute_batch(schema::V2_SCHEMA).unwrap();
+            conn.execute_batch(schema::V3_SCHEMA).unwrap();
+            conn.execute_batch(schema::V4_SCHEMA).unwrap();
+        }
+
+        // Opening the query engine should bump the schema to V5.
+        let _engine = QueryEngine::open(&db_path).unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, schema::SCHEMA_VERSION);
+
+        // V5 columns must be queryable.
+        conn.query_row(
+            "SELECT resource_uri, prompt_name FROM requests LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .or_else(|e| {
+            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .unwrap();
+    }
 
     /// Create a test QueryEngine with schema applied and seed data inserted.
     pub(crate) fn seeded_engine() -> QueryEngine {

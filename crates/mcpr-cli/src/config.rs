@@ -44,7 +44,7 @@ pub enum CliAction {
         /// Absolute path to the original config file.
         config_path: String,
     },
-    /// Interactive setup wizard (needs async for cloud API calls).
+    /// Interactive setup flow (needs async for cloud API calls).
     ProxySetup {
         cloud_url: String,
         output: Option<String>,
@@ -165,7 +165,7 @@ pub enum ProxyCommand {
     Schema(ProxySchemaArgs),
 
     // ── Onboarding ──────────────────────────────────────────────────
-    /// Interactive setup wizard — authenticate, pick project, generate config
+    /// Interactive setup — authenticate, pick project, generate config
     Setup(ProxySetupArgs),
 }
 

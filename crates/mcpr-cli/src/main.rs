@@ -36,7 +36,7 @@
 //!     +-- relay.rs      #   Relay lifecycle commands
 //!     +-- observe.rs    #   Observability commands (logs, stats, sessions, …)
 //!     +-- store.rs      #   Store maintenance commands
-//!     +-- setup.rs      #   Interactive setup wizard (mcpr proxy setup)
+//!     +-- setup.rs      #   Interactive setup flow (mcpr proxy setup)
 //! ```
 //!
 //! The proxy engine (pipeline, middleware, `ProxyState`, forwarding,
@@ -465,12 +465,20 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 .status();
             match status {
                 Ok(s) if s.success() => {
-                    // Auto-restart daemon if it's running, using the new binary.
+                    // Auto-restart daemon and any running proxies using the
+                    // freshly-installed binary, so long-lived processes pick
+                    // up the new code without a manual stop/run dance.
                     #[cfg(unix)]
-                    if matches!(daemon::check_status(), daemon::DaemonStatus::Running(_)) {
-                        eprintln!("Restarting daemon with updated binary...");
+                    {
                         let exe = std::env::current_exe().unwrap_or_else(|_| "mcpr".into());
-                        let _ = std::process::Command::new(exe).arg("restart").status();
+                        if matches!(daemon::check_status(), daemon::DaemonStatus::Running(_)) {
+                            eprintln!("Restarting daemon with updated binary...");
+                            let _ = std::process::Command::new(&exe).arg("restart").status();
+                        }
+                        eprintln!("Restarting running proxies with updated binary...");
+                        let _ = std::process::Command::new(&exe)
+                            .args(["proxy", "restart", "--all"])
+                            .status();
                     }
                 }
                 Ok(s) => std::process::exit(s.code().unwrap_or(1)),

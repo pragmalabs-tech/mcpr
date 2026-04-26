@@ -1,4 +1,4 @@
-//! Interactive setup wizard for `mcpr proxy setup`.
+//! Interactive setup flow for `mcpr proxy setup`.
 //!
 //! Authenticates via email + 6-digit code, lets the user pick a project/server,
 //! creates a project-scoped token, and writes `mcpr.toml`.
@@ -115,7 +115,7 @@ fn is_jwt_expired(jwt: &str) -> bool {
 
 // ── Main flow ──────────────────────────────────────────────────────────
 
-/// Run the full setup wizard. Returns an error message on failure.
+/// Run the full setup flow. Returns an error message on failure.
 pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), String> {
     println!(
         "\n  {} Let's set up your proxy.\n",

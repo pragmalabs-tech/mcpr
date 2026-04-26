@@ -9,7 +9,7 @@
 //!
 //! - [`cloud_client`]: HTTP client for the mcpr Cloud API. Handles
 //!   authentication, project/server/endpoint CRUD, and token management.
-//!   Used by the CLI setup wizard (`mcpr proxy setup`).
+//!   Used by the CLI setup flow (`mcpr proxy setup`).
 //!
 //! - [`sinks`]: `EventSink` implementations registered on the event bus.
 //!   - `StderrSink` — prints `ProxyEvent::Request` events to stderr

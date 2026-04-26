@@ -155,14 +155,14 @@ mcpr proxy delete localhost-9000 -y     # skip the confirmation prompt
 
 #### `mcpr proxy setup`
 
-Interactive wizard that connects your proxy to mcpr Cloud. Authenticates via email, lets you pick or create a project and server, generates a project token, and writes `mcpr.toml`.
+Interactive setup that connects your proxy to mcpr Cloud. Authenticates via email, lets you pick or create a project and server, generates a project token, and writes `mcpr.toml`.
 
 ```bash
 mcpr proxy setup                         # writes ./mcpr.toml
 mcpr proxy setup -o /path/to/mcpr.toml   # write to a specific path
 ```
 
-The wizard:
+The setup flow:
 1. Sends a login code to your email
 2. Authenticates with mcpr Cloud
 3. Lets you select or create a project
@@ -171,7 +171,7 @@ The wizard:
 6. Generates a project token
 7. Writes `mcpr.toml` with `[cloud]` config filled in
 
-If `mcpr.toml` already exists, the wizard reads existing values as defaults.
+If `mcpr.toml` already exists, setup reads existing values as defaults.
 
 ### Relay Lifecycle
 
