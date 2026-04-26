@@ -141,30 +141,33 @@ pub fn merge_pages(method: &str, pages: &[Value]) -> Option<Value> {
 /// fields that actually define the tool/resource/prompt API — so
 /// version numbers track real API changes.
 ///
-/// Per-method projection:
-/// - `tools/list`              → `name`, `inputSchema`
-/// - `prompts/list`            → `name`, `arguments`
-/// - `resources/list`          → `name`, `uri`
-/// - `resources/templates/list`→ `name`, `uriTemplate`
+/// Returns `None` for methods that don't have a list contract; the
+/// caller decides how to hash those (typically the raw payload).
 ///
-/// For non-list methods (e.g., `initialize`), returns the payload as-is.
-pub fn canonical_hash_view(method: &str, payload: &Value) -> Value {
-    let Some(array_key) = method_array_key(method) else {
-        return payload.clone();
-    };
-    let keys: &[&str] = match method {
-        "tools/list" => &["name", "inputSchema"],
-        "prompts/list" => &["name", "arguments"],
-        "resources/list" => &["name", "uri"],
-        "resources/templates/list" => &["name", "uriTemplate"],
-        _ => return payload.clone(),
+/// | Method                       | Kept fields            |
+/// |------------------------------|------------------------|
+/// | `tools/list`                 | `name`, `inputSchema`  |
+/// | `prompts/list`               | `name`, `arguments`    |
+/// | `resources/list`             | `name`, `uri`          |
+/// | `resources/templates/list`   | `name`, `uriTemplate`  |
+pub fn canonical_hash_view(method: &str, payload: &Value) -> Option<Value> {
+    let (array_key, item_keys): (&str, &[&str]) = match method {
+        "tools/list" => ("tools", &["name", "inputSchema"]),
+        "prompts/list" => ("prompts", &["name", "arguments"]),
+        "resources/list" => ("resources", &["name", "uri"]),
+        "resources/templates/list" => ("resourceTemplates", &["name", "uriTemplate"]),
+        _ => return None,
     };
     let projected: Vec<Value> = payload
         .get(array_key)
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(|item| project_keys(item, keys)).collect())
+        .map(|arr| {
+            arr.iter()
+                .map(|item| project_keys(item, item_keys))
+                .collect()
+        })
         .unwrap_or_default();
-    serde_json::json!({ array_key: projected })
+    Some(serde_json::json!({ array_key: projected }))
 }
 
 fn project_keys(item: &Value, keys: &[&str]) -> Value {
@@ -486,7 +489,7 @@ mod tests {
             "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}},
             "annotations": {"readOnlyHint": true}
         }]});
-        let view = canonical_hash_view("tools/list", &payload);
+        let view = canonical_hash_view("tools/list", &payload).unwrap();
         assert_eq!(
             view,
             json!({"tools": [{
@@ -504,7 +507,7 @@ mod tests {
             "description": "desc",
             "mimeType": "text/plain"
         }]});
-        let view = canonical_hash_view("resources/list", &payload);
+        let view = canonical_hash_view("resources/list", &payload).unwrap();
         assert_eq!(
             view,
             json!({"resources": [{"name": "r1", "uri": "file://a"}]}),
@@ -518,7 +521,7 @@ mod tests {
             "description": "summarizes text",
             "arguments": [{"name": "topic", "required": true}]
         }]});
-        let view = canonical_hash_view("prompts/list", &payload);
+        let view = canonical_hash_view("prompts/list", &payload).unwrap();
         assert_eq!(
             view,
             json!({"prompts": [{
@@ -536,7 +539,7 @@ mod tests {
             "description": "any doc",
             "mimeType": "text/markdown"
         }]});
-        let view = canonical_hash_view("resources/templates/list", &payload);
+        let view = canonical_hash_view("resources/templates/list", &payload).unwrap();
         assert_eq!(
             view,
             json!({"resourceTemplates": [{"name": "doc", "uriTemplate": "doc://{id}"}]}),
@@ -567,9 +570,9 @@ mod tests {
     }
 
     #[test]
-    fn canonical_hash_view__non_list_method_returns_unchanged() {
+    fn canonical_hash_view__non_list_method_returns_none() {
         let payload = json!({"serverInfo": {"name": "test", "version": "1.0"}});
-        assert_eq!(canonical_hash_view("initialize", &payload), payload);
+        assert_eq!(canonical_hash_view("initialize", &payload), None);
     }
 
     #[test]
@@ -577,7 +580,7 @@ mod tests {
         let payload = json!({"_meta": {"requestId": "x"}});
         assert_eq!(
             canonical_hash_view("tools/list", &payload),
-            json!({"tools": []}),
+            Some(json!({"tools": []})),
         );
     }
 

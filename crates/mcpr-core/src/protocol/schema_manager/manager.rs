@@ -167,7 +167,10 @@ impl<S: SchemaStore> SchemaManager<S> {
             }
         };
 
-        let hash = hash_payload(&canonical_hash_view(method, &merged));
+        let hash = match canonical_hash_view(method, &merged) {
+            Some(view) => hash_payload(&view),
+            None => hash_payload(&merged),
+        };
 
         let needs_warm = self
             .state
