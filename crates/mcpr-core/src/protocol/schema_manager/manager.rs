@@ -16,7 +16,7 @@ use tokio::sync::Notify;
 
 use super::store::SchemaStore;
 use super::version::{SchemaVersion, SchemaVersionId, hash_payload};
-use crate::protocol::schema::{PageStatus, detect_page_status, merge_pages};
+use crate::protocol::schema::{PageStatus, canonical_hash_view, detect_page_status, merge_pages};
 
 /// Tracks in-flight `spawn_ingest` tasks so callers (shutdown handlers,
 /// tests) can wait until the async ingest queue has drained.
@@ -167,7 +167,7 @@ impl<S: SchemaStore> SchemaManager<S> {
             }
         };
 
-        let hash = hash_payload(&merged);
+        let hash = hash_payload(&canonical_hash_view(method, &merged));
 
         let needs_warm = self
             .state
@@ -522,6 +522,61 @@ mod tests {
             m.ingest("tools/list", &req, &r2).await.is_none(),
             "different _meta with identical tools must not mint a new version"
         );
+    }
+
+    #[tokio::test]
+    async fn ingest__description_only_change_does_not_bump_version() {
+        // Regression: a 14-tool server logged 309 schema versions because
+        // upstream descriptions drifted between requests. The contract
+        // (name + inputSchema) is what matters; prose changes must not
+        // mint a new version.
+        let m = manager();
+        let req = tools_list_req(None);
+        let r1 = tools_list_resp(
+            json!([{"name": "a", "description": "old", "inputSchema": {"type": "object"}}]),
+            None,
+        );
+        let r2 = tools_list_resp(
+            json!([{"name": "a", "description": "new", "inputSchema": {"type": "object"}}]),
+            None,
+        );
+
+        let v1 = m.ingest("tools/list", &req, &r1).await.unwrap();
+        assert_eq!(v1.version, 1);
+        assert!(m.ingest("tools/list", &req, &r2).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest__reordering_only_does_not_bump_version() {
+        let m = manager();
+        let req = tools_list_req(None);
+        let r1 = tools_list_resp(json!([{"name": "a"}, {"name": "b"}, {"name": "c"}]), None);
+        let r2 = tools_list_resp(json!([{"name": "c"}, {"name": "a"}, {"name": "b"}]), None);
+
+        m.ingest("tools/list", &req, &r1).await.unwrap();
+        assert!(m.ingest("tools/list", &req, &r2).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn ingest__input_schema_change_bumps_version() {
+        let m = manager();
+        let req = tools_list_req(None);
+        let r1 = tools_list_resp(
+            json!([{"name": "a", "inputSchema": {"type": "object"}}]),
+            None,
+        );
+        let r2 = tools_list_resp(
+            json!([{
+                "name": "a",
+                "inputSchema": {"type": "object", "properties": {"q": {"type": "string"}}}
+            }]),
+            None,
+        );
+
+        let v1 = m.ingest("tools/list", &req, &r1).await.unwrap();
+        let v2 = m.ingest("tools/list", &req, &r2).await.unwrap();
+        assert_eq!(v1.version, 1);
+        assert_eq!(v2.version, 2);
     }
 
     #[tokio::test]
