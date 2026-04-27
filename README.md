@@ -141,8 +141,10 @@ mcpr applies widget CSP in both shapes — the legacy OpenAI per-widget format a
 
 ```toml
 [csp]
-# Public host the proxy is reachable on — written into both the
-# OpenAI `widgetDomain` field and the MCP `ui.domain` field.
+# Public host the proxy is reachable on — written into the OpenAI
+# `widgetDomain` field. `_meta.ui.domain` is left to Claude, which
+# derives that field from the proxy URL itself and rejects values
+# supplied by anything in front of it.
 domain = "widgets.example.com"
 
 # Lands in `connect-src` — fetch / WebSocket / EventSource targets.

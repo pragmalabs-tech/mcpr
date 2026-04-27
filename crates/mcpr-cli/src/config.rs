@@ -563,10 +563,11 @@ struct FileCspConfig {
     frame_domains: Option<FileDirectivePolicy>,
 
     /// Bare public host (no scheme) for this proxy. When set, feeds the
-    /// widget-domain meta fields (`openai/widgetDomain` and `ui.domain`) and
-    /// the proxy-URL injection; when unset, the runtime falls back to the
-    /// tunnel URL or suppresses injection in local-only mode rather than
-    /// leaking `localhost` into widget config.
+    /// `openai/widgetDomain` meta field and the proxy-URL injection.
+    /// `_meta.ui.domain` is left untouched — Claude derives that field
+    /// itself and rejects any value supplied by an MCP layer. When unset,
+    /// the runtime falls back to the tunnel URL or suppresses injection in
+    /// local-only mode rather than leaking `localhost` into widget config.
     domain: Option<String>,
 
     #[serde(rename = "widget")]

@@ -27,7 +27,7 @@ Defaults: `mode = "extend"` for connect and resource, `mode = "replace"` for fra
 
 `csp.domain` is the bare host (no scheme) this proxy is served from publicly. It feeds two things:
 
-1. **The widget-domain meta fields** — `_meta.openai/widgetDomain` (ChatGPT) and `_meta.ui.domain` (MCP-UI / Apps spec, used by Claude and VS Code for CORS allowlisting). Both shapes receive the same value on every widget meta that declared the field upstream in either shape.
+1. **`_meta.openai/widgetDomain`** — written on every widget meta. ChatGPT reads this field. `_meta.ui.domain` is *not* written: Claude validates that field against a hash it derives from the proxy URL itself (`{sha256(url)[:32]}.claudemcpcontent.com`), so any value an MCP layer supplies is rejected. Leaving the field absent lets Claude compute the value it expects.
 2. **The proxy-URL injected into `connect` and `resource` CSP arrays** — widgets need a reachable origin to call back to the proxy for JSON-RPC and asset loads.
 
 ```toml
@@ -41,7 +41,7 @@ Resolution order:
 2. Else the tunnel URL (when `[tunnel].enabled = true`).
 3. Else — local-only dev — **no public origin is available**, so the proxy *skips* the CSP injection and leaves any upstream domain field untouched. `localhost` is never written into widget CSP or the domain fields; shipping it to a host would be invalid, and cluttering the local output with it helps no one.
 
-Both domain shapes are kept in sync: an upstream that declared only `openai/widgetDomain` will also have `ui.domain` written, and vice versa. Hosts ignore keys they don't understand, so emitting both is safe everywhere.
+Only `openai/widgetDomain` is written. `_meta.ui.domain` carries Claude-specific semantics — Claude derives the expected value (`{sha256(url)[:32]}.claudemcpcontent.com`) from the proxy URL itself and rejects any other value — so the proxy leaves it alone. ChatGPT, which has no equivalent check, still gets the operator-declared host through `openai/widgetDomain`.
 
 ## Directives
 
@@ -99,7 +99,7 @@ The proxy URL is deliberately **not** prepended to `frame`. Widgets don't iframe
 
 ## What the proxy emits
 
-The merged domain list lands in both shapes on every widget meta. The widget domain is mirrored into both `openai/widgetDomain` and `ui.domain` when upstream declared the field in either shape:
+The merged CSP list lands in both shapes on every widget meta. The widget domain is written into `openai/widgetDomain` only — `_meta.ui.domain` is left to Claude:
 
 ```json
 {
@@ -111,7 +111,6 @@ The merged domain list lands in both shapes on every widget meta. The widget dom
       "frame_domains": [...]
     },
     "ui": {
-      "domain": "proxy.example.com",
       "csp": {
         "connectDomains": ["https://proxy.example.com", "https://api.example.com"],
         "resourceDomains": [...],
@@ -167,7 +166,7 @@ Loads into `connectDomains` and `resourceDomains` with the given mode. `mode = "
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `csp.domain` | `string` | — | Bare public host (no scheme). Feeds the widget-domain meta fields (`openai/widgetDomain` and `ui.domain`) and CSP injection. Falls back to tunnel URL when unset; suppresses injection in local-only mode. |
+| `csp.domain` | `string` | — | Bare public host (no scheme). Feeds `openai/widgetDomain` and CSP injection. `_meta.ui.domain` is left to Claude, which derives it from the proxy URL. Falls back to tunnel URL when unset; suppresses injection in local-only mode. |
 | `[csp.connectDomains].domains` | `string[]` | `[]` | Domains allowed for `connect-src` |
 | `[csp.connectDomains].mode` | `"extend" \| "replace"` | `"extend"` | Merge mode with upstream |
 | `[csp.resourceDomains].domains` | `string[]` | `[]` | Domains allowed for scripts, styles, images, fonts, media |

@@ -50,11 +50,13 @@ subdomain = "myapp"
 # CSP — declare once, emitted to every widget meta in both shapes.
 # See docs/proxy/CSP.md for the full reference, including per-widget overrides.
 [csp]
-# Bare public host (no scheme). Feeds the widget-domain meta fields
-# (`openai/widgetDomain` and `ui.domain`) and the proxy URL injected into
-# widget CSP. When unset, falls back to the tunnel URL; in local-only mode
-# (no tunnel, no override), injection is suppressed rather than writing
-# `localhost` into widget config.
+# Bare public host (no scheme). Feeds the `openai/widgetDomain` meta
+# field and the proxy URL injected into widget CSP. `_meta.ui.domain`
+# is left untouched: Claude derives that field from the proxy URL and
+# rejects values supplied by anything in front of it. When unset, falls
+# back to the tunnel URL; in local-only mode (no tunnel, no override),
+# injection is suppressed rather than writing `localhost` into widget
+# config.
 domain = "widgets.example.com"
 
 [csp.connectDomains]
@@ -116,7 +118,7 @@ rotation = "daily"
 | `[tunnel].relay_url` | Relay server URL |
 | `[tunnel].token` | Tunnel authentication token (from mcpr.app) |
 | `[tunnel].subdomain` | Fixed subdomain for tunnel |
-| `[csp].domain` | Bare public host for the widget-domain meta fields (`openai/widgetDomain`, `ui.domain`) and CSP injection — see [CSP](CSP.md) |
+| `[csp].domain` | Bare public host for `openai/widgetDomain` and CSP injection. `_meta.ui.domain` is left to Claude, which derives it from the proxy URL — see [CSP](CSP.md) |
 | `[csp.*]` | Widget CSP declaration — see [CSP](CSP.md) |
 | `[cloud].token` | Cloud sync token from mcpr.app |
 | `[cloud].server` | Server slug for cloud routing |

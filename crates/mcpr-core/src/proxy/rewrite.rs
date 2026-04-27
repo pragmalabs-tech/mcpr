@@ -33,7 +33,9 @@ pub struct RewriteConfig {
     /// Proxy URL (scheme + host, no trailing slash) to insert into every CSP
     /// array so widgets can reach the proxy.
     pub proxy_url: String,
-    /// Bare proxy host (no scheme) used when rewriting `widgetDomain`.
+    /// Bare proxy host (no scheme) written into `openai/widgetDomain` on
+    /// widget metas. Not written into `_meta.ui.domain` — Claude derives
+    /// that field itself and rejects mismatching values.
     pub proxy_domain: String,
     /// Upstream MCP URL, used to recognise and strip upstream self-references
     /// from the CSP arrays the server returns.
@@ -189,18 +191,17 @@ fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &Re
         return;
     }
 
-    // Hosts disagree about where they read the widget domain: ChatGPT reads
-    // `openai/widgetDomain`, the MCP-UI / Apps spec reads `_meta.ui.domain`.
-    // mcpr is a configuration layer: when the operator declared a public
-    // origin (via `csp.domain` or an active tunnel) and we're handling a
-    // widget meta, we write *both* shapes unconditionally — even if upstream
-    // declared neither. The previous gate on upstream-having-the-field made
-    // operator config silently inert against MCP servers that don't
-    // pre-declare a widget domain, which defeats the point of declaring it.
+    // Operator's `csp.domain` flows into `openai/widgetDomain` only.
     //
-    // The `proxy_domain.is_empty()` guard is the only one that remains: in
-    // local-only dev with no public origin available, writing "" or
-    // `localhost` is never useful.
+    // `_meta.ui.domain` is intentionally NOT written. Claude validates that
+    // field against a hash it derives from the proxy URL itself (the format
+    // is `{sha256(url)[:32]}.claudemcpcontent.com`), so any value an MCP
+    // layer supplies is guaranteed to fail. Leaving the field absent lets
+    // Claude compute the value it expects; ChatGPT, which has no equivalent
+    // check, still gets the operator-declared host through `openai/widgetDomain`.
+    //
+    // The `proxy_domain.is_empty()` guard remains: in local-only dev with no
+    // public origin available, writing "" or `localhost` is never useful.
     if !config.proxy_domain.is_empty() {
         write_widget_domain(meta, &config.proxy_domain);
     }
@@ -310,9 +311,10 @@ fn collect_upstream(meta: &Value, directive: Directive) -> Vec<String> {
     out
 }
 
-/// Write the OpenAI-shaped CSP block, creating the parent object when needed.
-/// Write the proxy's public domain into both widget-domain shapes
-/// (`openai/widgetDomain` and `ui.domain`), creating `ui` when needed.
+/// Write the proxy's public domain into `openai/widgetDomain`.
+///
+/// `_meta.ui.domain` is intentionally not written here — see the comment in
+/// `rewrite_widget_meta` for why Claude rejects any operator-supplied value.
 fn write_widget_domain(meta: &mut Value, domain: &str) {
     let Some(obj) = meta.as_object_mut() else {
         return;
@@ -321,15 +323,6 @@ fn write_widget_domain(meta: &mut Value, domain: &str) {
         "openai/widgetDomain".to_string(),
         Value::String(domain.to_string()),
     );
-    let ui = obj
-        .entry("ui".to_string())
-        .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    if !ui.is_object() {
-        *ui = Value::Object(serde_json::Map::new());
-    }
-    ui.as_object_mut()
-        .unwrap()
-        .insert("domain".to_string(), Value::String(domain.to_string()));
 }
 
 fn write_openai_csp(meta: &mut Value, connect: &[String], resource: &[String], frame: &[String]) {
@@ -563,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_widget_meta__upstream_openai_only_emits_both_domain_shapes() {
+    fn rewrite_widget_meta__upstream_openai_overwritten_ui_domain_absent() {
         let config = rewrite_config();
         let mut meta = json!({
             "openai/widgetDomain": "old.domain.com"
@@ -575,14 +568,16 @@ mod tests {
             meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
         );
-        assert_eq!(
-            meta["ui"]["domain"].as_str().unwrap(),
-            "abc.tunnel.example.com"
-        );
+        // ui.domain is Claude's territory — Claude validates it against a
+        // hash it derives from the proxy URL. We never write it.
+        assert!(meta.pointer("/ui/domain").is_none());
     }
 
     #[test]
-    fn rewrite_widget_meta__upstream_ui_only_emits_both_domain_shapes() {
+    fn rewrite_widget_meta__upstream_ui_domain_left_untouched() {
+        // Upstream's `ui.domain` is preserved verbatim. We never overwrite it
+        // with the operator's `csp.domain` — Claude would reject any value
+        // other than its own derived `{hash}.claudemcpcontent.com`.
         let config = rewrite_config();
         let mut meta = json!({
             "ui": { "domain": "old.domain.com" }
@@ -590,10 +585,7 @@ mod tests {
 
         rewrite_widget_meta(&mut meta, Some("ui://widget/x"), &config);
 
-        assert_eq!(
-            meta["ui"]["domain"].as_str().unwrap(),
-            "abc.tunnel.example.com"
-        );
+        assert_eq!(meta["ui"]["domain"].as_str().unwrap(), "old.domain.com");
         assert_eq!(
             meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
@@ -601,12 +593,9 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_widget_meta__synthesizes_both_shapes_when_upstream_declared_neither() {
-        // mcpr is a configuration layer: when the operator declared a public
-        // domain and we're rewriting a widget meta, both shapes are written
-        // even if upstream declared neither. Gating on upstream made the
-        // operator config silently inert for MCP servers that don't already
-        // emit `openai/widgetDomain` or `ui.domain`.
+    fn rewrite_widget_meta__synthesizes_openai_only_when_upstream_declared_neither() {
+        // Operator declared a public domain. Only `openai/widgetDomain` is
+        // synthesized; `ui.domain` is left absent so Claude derives its own.
         let config = rewrite_config();
         let mut meta = json!({
             "openai/widgetCSP": { "connect_domains": [] }
@@ -618,17 +607,11 @@ mod tests {
             meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
         );
-        assert_eq!(
-            meta["ui"]["domain"].as_str().unwrap(),
-            "abc.tunnel.example.com"
-        );
+        assert!(meta.pointer("/ui/domain").is_none());
     }
 
     #[test]
-    fn rewrite_widget_meta__synthesizes_when_only_explicit_uri_marks_widget() {
-        // No widget-shaped fields on the meta at all — the caller (e.g. a
-        // `resources/read` handler that already resolved the URI) supplies
-        // it explicitly. Operator-declared domain still gets written.
+    fn rewrite_widget_meta__synthesizes_openai_only_when_explicit_uri_marks_widget() {
         let config = rewrite_config();
         let mut meta = json!({});
 
@@ -638,10 +621,7 @@ mod tests {
             meta["openai/widgetDomain"].as_str().unwrap(),
             "abc.tunnel.example.com"
         );
-        assert_eq!(
-            meta["ui"]["domain"].as_str().unwrap(),
-            "abc.tunnel.example.com"
-        );
+        assert!(meta.pointer("/ui/domain").is_none());
     }
 
     #[test]
