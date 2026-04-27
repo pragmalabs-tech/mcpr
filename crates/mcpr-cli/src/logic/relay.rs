@@ -1,6 +1,7 @@
-//! Relay lifecycle logic — stop, restart, status.
+//! Relay lifecycle logic — stop, status.
 //!
-//! Returns results; does not print.
+//! Returns results; does not print. Restart is the host process's
+//! responsibility (systemd / Docker / ...).
 
 use crate::relay_lock;
 
@@ -53,32 +54,6 @@ pub fn relay_status() -> Result<RelayStatusInfo, String> {
     }
 }
 
-/// Start the relay from its saved config snapshot.
-pub fn start_relay_from_snapshot() -> Result<(), String> {
-    relay_lock::read_snapshot().map_err(|e| format!("no config snapshot for relay: {e}"))?;
-
-    let config_path = relay_lock::config_snapshot_path().display().to_string();
-    let exe = std::env::current_exe().map_err(|e| format!("cannot find mcpr binary: {e}"))?;
-
-    let status = std::process::Command::new(exe)
-        .args(["relay", "start", &config_path])
-        .status()
-        .map_err(|e| format!("failed to spawn relay: {e}"))?;
-
-    if !status.success() {
-        return Err("relay failed to start".to_string());
-    }
-
-    Ok(())
-}
-
-/// Restart the relay. Stops if running, then starts from snapshot.
-pub fn restart_relay() -> Result<(), String> {
-    // Stop if running (ignore errors — it may not be running).
-    let _ = stop_relay();
-    start_relay_from_snapshot()
-}
-
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
@@ -111,40 +86,7 @@ mod tests {
         assert!(info.started_at > 0);
         relay_lock::remove_lock();
 
-        // 4. Stale (dead PID) → status cleans up and returns error.
-        let dir = relay_lock::config_snapshot_path()
-            .parent()
-            .unwrap()
-            .to_path_buf();
-        std::fs::create_dir_all(&dir).unwrap();
-        let ts = chrono::Utc::now().timestamp();
-        std::fs::write(
-            dir.join("lock"),
-            format!("99999999\n8080\n{ts}\n/tmp/relay.toml\n"),
-        )
-        .unwrap();
-        let result = relay_status();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("stale"));
-        assert!(relay_lock::read_lock_info().is_none());
-
-        // 5. Stale → stop returns StaleCleaned.
-        std::fs::write(
-            dir.join("lock"),
-            format!("99999999\n8080\n{ts}\n/tmp/relay.toml\n"),
-        )
-        .unwrap();
-        let result = stop_relay();
-        assert!(result.is_ok());
-        assert!(matches!(result.unwrap(), StopResult::StaleCleaned));
-        assert!(relay_lock::read_lock_info().is_none());
-    }
-
-    #[test]
-    fn start_relay_from_snapshot__fails_without_snapshot() {
-        let _ = std::fs::remove_file(relay_lock::config_snapshot_path());
-        let result = start_relay_from_snapshot();
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("no config snapshot"));
+        // Stale-lockfile paths are exercised by relay_lock's own unit tests
+        // (which reach into the real ~/.mcpr/relay dir).
     }
 }

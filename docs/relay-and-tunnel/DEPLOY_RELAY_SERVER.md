@@ -321,35 +321,22 @@ Rules: one `*` per pattern, case-sensitive, no `?` or `**`.
 
 ### Using mcpr
 
-Run in foreground — your process supervisor (systemd, Docker, terminal) owns the PID:
+Run in the foreground — your process supervisor (systemd, Docker, terminal) owns the PID:
 
 ```bash
 mcpr relay run relay.toml
 ```
 
-Run in the background (terminal use, multi-process box):
-
-```bash
-mcpr relay run --background relay.toml
-```
-
-Other lifecycle commands:
+From another terminal:
 
 ```bash
 mcpr relay status             # show PID, port, uptime
-mcpr relay stop               # send SIGTERM, clean up lockfile
-mcpr relay restart             # stop + start from saved config
+mcpr relay stop               # SIGTERM via lockfile
 ```
 
 `mcpr relay` commands do not require `mode = "relay"` in the config file — the mode is implicit.
 
-Running a relay and proxy on the same machine:
-
-```bash
-mcpr proxy run --background gateway.toml      # MCP proxy
-mcpr relay run --background relay.toml        # relay server
-mcpr proxy stop --all && mcpr relay stop      # tear down
-```
+Running a relay and proxy on the same machine: launch each in its own terminal (or under separate systemd units / containers).
 
 ### Using Docker
 
@@ -403,9 +390,9 @@ curl -s https://tunnel.yourdomain.com/_tunnel/register
 # If running via mcpr CLI
 mcpr relay status
 
-# Full test: start a client proxy with tunnel enabled
-mcpr proxy run --background mcpr.toml
-mcpr proxy list
+# Full test: start a client proxy with tunnel enabled (foreground; another terminal)
+mcpr proxy run mcpr.toml
+mcpr proxy list                # from yet another terminal
 ```
 
 ## Troubleshooting

@@ -7,48 +7,48 @@ mcpr is a sidecar primitive in the envoy / pgbouncer mold: a host process (your 
 > Running in a container? The [Docker image](DOCKER.md) execs `mcpr proxy run` directly as PID 1, so `docker stop` translates straight to a graceful SIGTERM.
 
 Two responsibilities:
-1. **Lifecycle** — run individual proxies and the relay server (foreground by default; `--background` opt-in).
+1. **Lifecycle** — run a proxy or relay in the foreground; observe and signal them via lockfile.
 2. **Query & observe** — read request logs, per-tool metrics, sessions, schema, and storage stats from SQLite. No long-lived process required.
 
 ## Quick Start
 
 ```bash
-# Run a proxy in the foreground (Ctrl-C / SIGTERM to stop)
+# Run a proxy (foreground; Ctrl-C / SIGTERM to stop)
 mcpr proxy run mcpr.toml
 
-# Or run it in the background and inspect later
-mcpr proxy run --background mcpr.toml
+# From another terminal: see what's running, send signals
 mcpr proxy list
-mcpr proxy logs
+mcpr proxy stop <name>                  # graceful drain
+mcpr proxy reload <name> -c <new.toml>  # hot CSP reload, no session drop
+mcpr proxy logs --follow
 
 # Run a relay server (foreground)
 mcpr relay run relay.toml
-
-# Stop a backgrounded proxy
-mcpr proxy stop <name>
 ```
 
 ## Commands
 
-### Removed: `mcpr start` / `mcpr stop` / `mcpr restart` / `mcpr status`
-
-The daemon supervisor was removed — mcpr no longer manages its own lifecycle. Use your host process / process supervisor (systemd, launchd, Node, Docker) to own the proxy PID. Migration:
-
-| Old | New |
-|---|---|
-| `mcpr start` then `mcpr proxy run` | `mcpr proxy run <config>` (foreground) |
-| `mcpr start` (background) | `mcpr proxy run --background <config>` |
-| `mcpr stop` | `mcpr proxy stop --all` |
-| `mcpr status` | `mcpr proxy list` / `mcpr proxy status` |
-| `mcpr restart` | `mcpr proxy restart --all` |
-
-The old commands still parse but exit 2 with a migration hint for one minor release before being deleted.
-
 ### Proxy Lifecycle
+
+#### `mcpr proxy run <config>`
+
+Run a proxy from a config file in the foreground. The launched PID is the proxy itself — your process supervisor (terminal, systemd, Docker, Node `child_process.spawn`) owns the lifecycle. SIGTERM drains gracefully (up to `runtime.drain_timeout`, default 30s).
+
+Snapshots the config to `~/.mcpr/proxies/<name>/config.toml` for later `reload`. Writes a lockfile so `mcpr proxy stop / reload / list` can find the process from another terminal. Errors if a proxy with the same name is already running — stop it first or `reload` to update config without dropping sessions.
+
+```bash
+mcpr proxy run mcpr.toml
+```
+
+| Argument | Description |
+|----------|-------------|
+| `[CONFIG]` | Config file path (default: `./mcpr.toml`) |
+
+Restart is the host supervisor's job (systemd `Restart=on-failure`, Docker `restart=always`, k8s `restartPolicy`).
 
 #### `mcpr proxy list`
 
-List all known proxies and their status (running, stale, stopped).
+List all known proxies and their status (running, stale). Stale lockfiles are GC'd lazily on each call.
 
 ```bash
 mcpr proxy list                          # table output
@@ -59,38 +59,11 @@ Output:
 ```
 NAME                     STATUS        PID    PORT  STARTED               CONFIG
 localhost-9000           running      1234    3000  2026-04-12 14:30:00   /home/you/api/mcpr.toml
-staging-server           stale        5678    3001  2026-04-10 09:15:00   /home/you/staging/mcpr.toml
-
-1 running, 2 total
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--json` | false | Output as a JSON array |
-
-#### `mcpr proxy start <name>`
-
-Start a stopped proxy by name, using its saved config snapshot. Errors if the proxy is already running or has no saved config.
-
-```bash
-mcpr proxy start localhost-9000
-```
-
-#### `mcpr proxy run`
-
-Run a proxy from a config file. Snapshots the config to `~/.mcpr/proxies/<name>/config.toml` for later `start` / `restart` / `reload`. Errors if a proxy with the same name is already running — use `restart` to replace it or `reload` to update config without dropping sessions.
-
-Foreground by default: the launched PID is the proxy itself, so the parent process (terminal, systemd, Node `child_process.spawn`, Docker) supervises it directly. SIGTERM drains gracefully (up to `runtime.drain_timeout`).
-
-```bash
-mcpr proxy run mcpr.toml                # foreground (default)
-mcpr proxy run --background mcpr.toml   # double-fork into background
-```
-
-| Argument / Flag | Description |
-|----------|-------------|
-| `[CONFIG]` | Config file path (default: `./mcpr.toml`) |
-| `--background` | Double-fork into the background. Without this, the proxy stays attached to the parent. |
 
 #### `mcpr proxy stop [name]`
 
@@ -101,26 +74,11 @@ mcpr proxy stop localhost-9000
 mcpr proxy stop --all
 ```
 
-#### `mcpr proxy restart [name]`
-
-Process-level restart: stop the existing proxy and respawn it. In-flight MCP sessions are **dropped**. Pass `--config <path>` to apply a new config during the restart — the snapshot is refreshed from the given file before respawn. Without `--config`, the existing snapshot is reused.
-
-```bash
-mcpr proxy restart localhost-9000                        # reuse saved snapshot
-mcpr proxy restart localhost-9000 -c mcpr.toml           # apply new config
-mcpr proxy restart --all                                 # restart every proxy
-```
-
-| Flag | Description |
-|------|-------------|
-| `-c, --config PATH` | Refresh the snapshot from this file before respawn |
-| `--all` | Restart every running proxy (incompatible with `--config`) |
-
 #### `mcpr proxy reload <name> -c <path>`
 
 Hot-reload a running proxy's config **without dropping sessions**. Refreshes the snapshot from `<path>` then sends SIGHUP to the proxy, which atomically swaps live-reloadable settings.
 
-`--config` is **required** — reload always applies a specific file so the source of truth is explicit. To restart instead, see `mcpr proxy restart`.
+`--config` is **required** — reload always applies a specific file so the source of truth is explicit.
 
 ```bash
 mcpr proxy reload localhost-9000 -c mcpr.toml
@@ -128,7 +86,7 @@ mcpr proxy reload localhost-9000 -c mcpr.toml
 
 Live-reloadable fields: `[csp]` rules, including widget-scoped overrides.
 
-Everything else (`mcp` upstream, `port`, `widgets`, `tunnel.*`, timeouts, body limits, `[cloud]`, `[runtime]`) requires a full `mcpr proxy restart`. If the new config changes any of those, the reload is **rejected** and the proxy keeps running on the old config — the rejection names the field(s) in `mcpr proxy logs <name>`.
+Everything else (`mcp` upstream, `port`, `widgets`, `tunnel.*`, timeouts, body limits, `[cloud]`, `[runtime]`) requires a full process restart. If the new config changes any of those, the reload is **rejected** and the proxy keeps running on the old config — the rejection names the field(s) in `mcpr proxy logs <name>`. Stop the proxy and let your supervisor respawn it with the new config.
 
 | Flag | Description |
 |------|-------------|
@@ -171,28 +129,21 @@ If `mcpr.toml` already exists, setup reads existing values as defaults.
 
 ### Relay Lifecycle
 
-The relay is a singleton tunnel server. One relay per machine.
+The relay is a singleton tunnel server — one per machine.
 
 | Command | Description |
 |---------|-------------|
-| `mcpr relay run <config>` | Run relay in foreground (default) |
-| `mcpr relay run --background <config>` | Double-fork into the background |
-| `mcpr relay start <config>` | Deprecated alias for `relay run --background` |
-| `mcpr relay stop` | Stop the relay |
-| `mcpr relay restart` | Stop + start from saved config snapshot |
-| `mcpr relay restart <config>` | Stop + start with new config |
+| `mcpr relay run <config>` | Run relay in the foreground (the only way to start it) |
+| `mcpr relay stop` | SIGTERM the relay via lockfile |
 | `mcpr relay status` | Show relay PID, port, uptime |
 
-`mcpr relay run` is foreground by default — the launched PID is the relay itself, supervised by your parent process (systemd, Docker, terminal). Pass `--background` to double-fork; the lockfile at `~/.mcpr/relay/lock` lets `mcpr relay stop` / `restart` find it later.
-
 ```bash
-mcpr relay run relay.toml               # foreground (Ctrl-C to stop)
-mcpr relay run --background relay.toml  # background
-mcpr relay status                       # check status
-mcpr relay stop                         # stop relay
+mcpr relay run relay.toml               # Ctrl-C / SIGTERM to stop
+mcpr relay status                       # check status from another terminal
+mcpr relay stop                         # send SIGTERM by lockfile
 ```
 
-Relay config does not need `mode = "relay"` when using `mcpr relay` commands.
+Restart is the host supervisor's job, same as for `mcpr proxy run`. Relay config does not need `mode = "relay"` when using `mcpr relay` commands.
 
 ### Query & Observe
 
@@ -502,7 +453,7 @@ All state lives under `~/.mcpr/`. See [ARCHITECTURE.md](ARCHITECTURE.md) for ful
 | `~/.mcpr/store.db` | Request storage (SQLite) |
 | `~/.mcpr/proxies/{name}/config.toml` | Config snapshot (immutable after creation) |
 | `~/.mcpr/proxies/{name}/lock` | Proxy PID, port, timestamp, config path |
-| `~/.mcpr/proxies/{name}/proxy.log` | Proxy stdout/stderr (only when run with `--background`) |
+| `~/.mcpr/proxies/{name}/proxy.log` | (legacy; foreground proxies log to the parent's stderr) |
 | `~/.mcpr/relay/config.toml` | Relay config snapshot |
 | `~/.mcpr/relay/lock` | Relay PID, port, timestamp |
-| `~/.mcpr/relay/relay.log` | Relay stdout/stderr (only when run with `--background`) |
+| `~/.mcpr/relay/relay.log` | (legacy; foreground relay logs to the parent's stderr) |

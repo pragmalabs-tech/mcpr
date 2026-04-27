@@ -18,9 +18,7 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
             unreachable!("`mcpr proxy setup` is handled in async dispatch");
         }
         ProxyCommand::Stop(args) => proxy::stop(args),
-        ProxyCommand::Restart(args) => proxy::restart(args),
         ProxyCommand::Reload(args) => proxy::reload(args),
-        ProxyCommand::Start(args) => proxy::start(args),
         ProxyCommand::List(args) => proxy::list(args),
         ProxyCommand::Delete(args) => proxy::delete(args),
 
@@ -42,11 +40,10 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
 
 pub fn handle_relay_command(cmd: RelayCommand) {
     let result = match cmd {
-        RelayCommand::Run(_) | RelayCommand::Start(_) => {
-            unreachable!("`mcpr relay run/start` is handled before async dispatch");
+        RelayCommand::Run(_) => {
+            unreachable!("`mcpr relay run` is handled before async dispatch");
         }
         RelayCommand::Stop => relay::stop(),
-        RelayCommand::Restart(args) => relay::restart(args),
         RelayCommand::Status => relay::status(),
     };
 

@@ -304,15 +304,15 @@ TimeoutStopSec=35
 WantedBy=multi-user.target
 ```
 
-**2. Backgrounded (terminal use, multi-proxy on one box)**
+**2. From a terminal (foreground, dev / debug)**
 
 ```bash
-mcpr proxy run --background /etc/mcpr.toml
-mcpr proxy list                      # see what's running
-mcpr proxy stop <name>               # SIGTERM + drain
+mcpr proxy run /etc/mcpr.toml          # blocks the terminal; Ctrl-C to stop
+mcpr proxy list                        # from another terminal — see what's running
+mcpr proxy stop <name>                 # SIGTERM + drain
 ```
 
-`--background` double-forks and writes a lockfile under `~/.mcpr/proxies/<name>/lock`, so `mcpr proxy list / stop / restart / reload` can find the process later. Use this when you want to launch a proxy from a shell and detach.
+The proxy writes a lockfile at `~/.mcpr/proxies/<name>/lock` so `list / stop / reload` work from another terminal even though the original launch is foreground. To run multiple proxies on one box, launch each from its own terminal (or use a process supervisor like `tmux` / `pm2` / systemd).
 
 ### Graceful shutdown
 
@@ -327,20 +327,7 @@ Give your orchestrator at least 30 s `stopGracePeriod` / `TimeoutStopSec`.
 
 ### Log rotation
 
-`~/.mcpr/proxies/<name>/proxy.log` grows without bound. If you don't pipe stderr to an aggregator, rotate with logrotate:
-
-```
-/home/mcpr/.mcpr/proxies/*/proxy.log {
-    daily
-    rotate 7
-    compress
-    missingok
-    notifempty
-    copytruncate
-}
-```
-
-`copytruncate` is important — mcpr doesn't handle SIGHUP for log reopening. In container environments, let the container runtime rotate the captured stderr.
+mcpr writes structured JSON to stderr; the host supervisor (systemd journal, Docker JSON driver, your Node process) is responsible for capture and rotation. Configure rotation there.
 
 ### Sqlite store pruning
 
@@ -372,12 +359,12 @@ The proxy re-reads the snapshot on SIGHUP and atomically swaps CSP. Changes to a
 **Full restart** — any other config change, drops in-flight sessions:
 
 ```bash
-mcpr proxy restart <name> -c /etc/mcpr.toml
+mcpr proxy stop <name>                  # SIGTERM, drains in-flight requests
+# Your supervisor (systemd Restart=on-failure / Docker / k8s / shell loop)
+# respawns mcpr proxy run with the new config.
 ```
 
-The old proxy is SIGTERMed and respawned with the new config. For foreground deployments, trigger a pod/service restart.
-
-`reload` requires `-c` — it always applies an explicit file. `restart` without `-c` reuses the last-snapshotted config at `~/.mcpr/proxies/<name>/config.toml`.
+mcpr does not respawn proxies itself — that's the host supervisor's job. `reload` requires `-c` and always applies an explicit file.
 
 ---
 

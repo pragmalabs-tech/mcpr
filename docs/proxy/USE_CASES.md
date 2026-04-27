@@ -2,7 +2,7 @@
 
 Task-oriented recipes for the `mcpr proxy` commands. For full flag reference see [CLI.md](../CLI.md). For config syntax see [PROXY_CONFIGURATION.md](PROXY_CONFIGURATION.md).
 
-Recipes use `mcpr proxy run --background` so the proxy is reachable by `start` / `stop` / `restart` / `reload` later. Drop `--background` to run in the foreground (recommended under systemd, Docker, or a Node parent process).
+`mcpr proxy run` always blocks the current terminal. Use a process supervisor (systemd, Docker, your Node app, `tmux`) to keep it alive — mcpr is the sidecar, not the supervisor.
 
 ---
 
@@ -12,35 +12,29 @@ Put an MCP server behind the proxy.
 
 ```bash
 mcpr proxy setup                          # prompts for project + auth, writes mcpr.toml
-mcpr proxy run --background mcpr.toml     # snapshot config, double-fork, start serving
+mcpr proxy run mcpr.toml                  # foreground; Ctrl-C to stop
+# from another terminal:
 mcpr proxy status                         # confirm it's up
 ```
 
-`proxy run` writes a config snapshot under `~/.mcpr/proxies/<name>/`. Later commands (`start`, `restart`, `reload`) operate on that snapshot.
+`proxy run` writes a config snapshot at `~/.mcpr/proxies/<name>/config.toml` and a lockfile so `proxy list / stop / reload` can find it from another terminal.
 
 ---
 
 ## Apply a config change
 
-Edit `mcpr.toml`, then pick the right command for the change:
+Edit `mcpr.toml`, then:
 
 ```bash
 mcpr proxy reload <name> --config mcpr.toml      # zero-downtime, sessions stay alive
-mcpr proxy restart <name> --config mcpr.toml     # if reload rejects (fields require restart)
 ```
 
-Reload sends SIGHUP and hot-swaps. It rejects when fields like `mcp.*` change — those need a fresh process. Restart kills and respawns; sessions drop.
-
----
-
-## Bring back a stopped proxy
+Reload sends SIGHUP and hot-swaps `[csp]` settings. It rejects when fields like `mcp.*` change — those need a fresh process. For those, stop the proxy and let your supervisor respawn it:
 
 ```bash
-mcpr proxy list               # see which are Stopped or Stale
-mcpr proxy start <name>       # relaunch from saved snapshot
+mcpr proxy stop <name>                            # SIGTERM, drains
+# systemd / Docker / your shell loop respawns mcpr proxy run with the new config
 ```
-
-Use this after a crash, after `proxy stop`, or after a host reboot. No config arg — `start` always uses the snapshot. To launch with a different config, run `proxy run <new-config>` instead.
 
 ---
 
@@ -95,10 +89,11 @@ mcpr proxy clients <name> --since 7d
 
 ```bash
 mcpr proxy list                       # status of all known proxies
-mcpr proxy stop --all
-mcpr proxy restart --all
+mcpr proxy stop --all                 # SIGTERM every running proxy
 mcpr proxy logs                       # no name = aggregate across all proxies
 ```
+
+To restart all of them, stop and let your supervisor respawn each. mcpr does not own restart.
 
 ---
 

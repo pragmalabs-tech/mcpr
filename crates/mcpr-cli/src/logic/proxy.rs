@@ -1,6 +1,8 @@
-//! Proxy lifecycle logic — start, stop, restart, reload.
+//! Proxy lifecycle logic — stop, reload, list, delete.
 //!
-//! Returns results; does not print.
+//! Returns results; does not print. Restart / start are the host process's
+//! responsibility (systemd `Restart=on-failure`, Docker `restart=always`,
+//! k8s `restartPolicy`) — not mcpr's.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -13,34 +15,6 @@ pub enum StopResult {
     Stopped { name: String, pid: u32 },
     /// Lock was stale and has been cleaned up.
     StaleCleaned { name: String },
-}
-
-/// Start a proxy from its saved config snapshot.
-///
-/// Caller must ensure no proxy with the same name is currently running —
-/// `mcpr proxy run` errors out on conflict. This function is the internal
-/// re-spawn used by `start` and `restart`, both of which stop any existing
-/// proxy before calling here.
-pub fn start_proxy(name: &str) -> Result<(), String> {
-    // Verify config snapshot exists before attempting re-launch.
-    proxy_lock::read_snapshot(name)
-        .map_err(|e| format!("no config snapshot for proxy \"{name}\": {e}"))?;
-
-    let config_path = proxy_lock::config_snapshot_path(name).display().to_string();
-
-    // Re-launch by running the mcpr binary with proxy run.
-    let exe = std::env::current_exe().map_err(|e| format!("cannot find mcpr binary: {e}"))?;
-
-    let status = std::process::Command::new(exe)
-        .args(["proxy", "run", &config_path])
-        .status()
-        .map_err(|e| format!("failed to spawn proxy \"{name}\": {e}"))?;
-
-    if !status.success() {
-        return Err(format!("proxy \"{name}\" failed to start"));
-    }
-
-    Ok(())
 }
 
 /// Stop a single proxy by name.
@@ -67,44 +41,6 @@ pub fn stop_proxy(name: &str) -> Result<StopResult, String> {
 /// Stop all running proxies.  Returns list of stopped names.
 pub fn stop_all_proxies() -> Vec<String> {
     proxy_lock::stop_all_proxies()
-}
-
-/// Restart a single proxy. Process kill + respawn.
-///
-/// If `config_path` is provided, the snapshot is refreshed from it before the
-/// respawn; otherwise the existing snapshot is reused.
-pub fn restart_proxy(name: &str, config_path: Option<&Path>) -> Result<(), String> {
-    // Validate and read the new config before touching the running process —
-    // a bad path should not leave the proxy down.
-    let new_snapshot = match config_path {
-        Some(path) => Some(read_config_file(path)?),
-        None => None,
-    };
-
-    proxy_lock::stop_proxy(name);
-
-    if let Some(contents) = new_snapshot {
-        proxy_lock::snapshot_config(name, &contents)
-            .map_err(|e| format!("failed to write config snapshot for \"{name}\": {e}"))?;
-    }
-
-    start_proxy(name)
-}
-
-/// Restart all running proxies. Returns count of restarted proxies.
-pub fn restart_all_proxies() -> Result<usize, String> {
-    let proxies = proxy_lock::list_proxies();
-    let mut restarted = 0;
-    for (name, status) in &proxies {
-        match status {
-            proxy_lock::LockStatus::Held(_) | proxy_lock::LockStatus::Stale(_) => {
-                restart_proxy(name, None)?;
-                restarted += 1;
-            }
-            proxy_lock::LockStatus::Free => {}
-        }
-    }
-    Ok(restarted)
 }
 
 /// Outcome of a reload signal — set by the running proxy and read back

@@ -181,14 +181,6 @@ pub fn validate_issues(issues: &[(&str, String)]) {
 
 // ── Proxy lifecycle ───────────────────────────────────────────────────
 
-pub fn proxy_started(name: &str) {
-    eprintln!("Start proxy \"{}\".", name);
-}
-
-pub fn proxy_restarted(name: &str) {
-    eprintln!("Restarted proxy \"{}\".", name);
-}
-
 pub fn proxy_reload_applied(name: &str) {
     eprintln!("Reloaded proxy \"{}\".", name);
 }
@@ -215,10 +207,6 @@ pub fn stopped_proxies(names: &[String]) {
     }
 }
 
-pub fn no_proxies_to_restart() {
-    eprintln!("No running proxies found to restart.");
-}
-
 pub fn proxy_deleted(name: &str) {
     eprintln!("Deleted proxy \"{}\".", name);
 }
@@ -239,10 +227,6 @@ pub fn relay_stopped_done() {
 
 pub fn relay_stale_cleaned() {
     eprintln!("Cleaned up stale lock for relay.");
-}
-
-pub fn relay_restarted() {
-    eprintln!("Restarted relay.");
 }
 
 pub fn relay_not_running() {
@@ -1397,11 +1381,6 @@ mod tests {
     #[test]
     fn relay_stale_cleaned__does_not_panic() {
         relay_stale_cleaned();
-    }
-
-    #[test]
-    fn relay_restarted__does_not_panic() {
-        relay_restarted();
     }
 
     #[test]

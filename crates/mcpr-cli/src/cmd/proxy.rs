@@ -8,12 +8,6 @@ use crate::config::*;
 use crate::logic;
 use crate::render;
 
-pub fn start(args: ProxyStartArgs) -> Result<(), String> {
-    logic::proxy::start_proxy(&args.name)?;
-    render::proxy_started(&args.name);
-    Ok(())
-}
-
 pub fn stop(args: ProxyStopArgs) -> Result<(), String> {
     if args.all {
         let stopped = logic::proxy::stop_all_proxies();
@@ -38,27 +32,6 @@ pub fn stop(args: ProxyStopArgs) -> Result<(), String> {
             render::proxy_stale_cleaned(&name);
         }
     }
-    Ok(())
-}
-
-pub fn restart(args: ProxyRestartArgs) -> Result<(), String> {
-    if args.all {
-        if args.config.is_some() {
-            return Err("--config cannot be combined with --all".to_string());
-        }
-        let count = logic::proxy::restart_all_proxies()?;
-        if count == 0 {
-            render::no_proxies_to_restart();
-        }
-        return Ok(());
-    }
-
-    let name = args
-        .name
-        .ok_or_else(|| "proxy name required. Use --all to restart all proxies.".to_string())?;
-
-    logic::proxy::restart_proxy(&name, args.config.as_deref().map(Path::new))?;
-    render::proxy_restarted(&name);
     Ok(())
 }
 

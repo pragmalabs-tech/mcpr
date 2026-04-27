@@ -21,16 +21,6 @@ fn lock_path() -> PathBuf {
     relay_dir().join("lock")
 }
 
-/// Path to the config snapshot for the relay.
-pub fn config_snapshot_path() -> PathBuf {
-    relay_dir().join("config.toml")
-}
-
-/// Path to the log file for the relay.
-pub fn log_path() -> PathBuf {
-    relay_dir().join("relay.log")
-}
-
 // ── Lock operations ──────────────────────────────────────────────────
 
 /// Check the lock status for the relay.
@@ -46,11 +36,6 @@ pub fn check_lock() -> LockStatus {
     } else {
         LockStatus::Stale(info)
     }
-}
-
-/// Read lock info for the relay.
-pub fn read_lock_info() -> Option<LockInfo> {
-    read_lock_file(&lock_path())
 }
 
 /// Write a lockfile for the relay after successful port bind.
@@ -70,18 +55,6 @@ pub fn remove_lock() {
     let _ = fs::remove_file(lock_path());
 }
 
-/// Save a config snapshot for the relay (used for restart).
-pub fn snapshot_config(content: &str) -> std::io::Result<()> {
-    let dir = relay_dir();
-    fs::create_dir_all(&dir)?;
-    fs::write(config_snapshot_path(), content)
-}
-
-/// Read the saved config snapshot for the relay.
-pub fn read_snapshot() -> std::io::Result<String> {
-    fs::read_to_string(config_snapshot_path())
-}
-
 /// Stop the running relay: send SIGTERM, wait, remove lock.
 /// Returns `true` if the process was stopped, `false` if it wasn't running.
 pub fn stop_relay() -> bool {
@@ -98,34 +71,6 @@ pub fn stop_relay() -> bool {
         }
         LockStatus::Free => false,
     }
-}
-
-// ── Stdio redirect ──────────────────────────────────────────────────
-
-/// Redirect stdin/stdout/stderr for the background relay process.
-#[cfg(unix)]
-pub fn redirect_stdio() -> std::io::Result<()> {
-    use nix::unistd::dup2;
-    use std::os::unix::io::AsRawFd;
-
-    let log = log_path();
-    if let Some(parent) = log.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let dev_null = fs::OpenOptions::new().read(true).open("/dev/null")?;
-    let log_file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)?;
-
-    dup2(dev_null.as_raw_fd(), 0).map_err(|e| std::io::Error::other(format!("dup2 stdin: {e}")))?;
-    dup2(log_file.as_raw_fd(), 1)
-        .map_err(|e| std::io::Error::other(format!("dup2 stdout: {e}")))?;
-    dup2(log_file.as_raw_fd(), 2)
-        .map_err(|e| std::io::Error::other(format!("dup2 stderr: {e}")))?;
-
-    Ok(())
 }
 
 // ── Lock file parser ────────────────────────────────────────────────
@@ -209,20 +154,6 @@ mod tests {
         assert!(read_lock_file(&lock).is_none());
     }
 
-    // ── snapshot_config / read_snapshot ────────────────────────────────
-
-    #[test]
-    fn snapshot_config__roundtrip() {
-        // Use a temp dir to avoid touching the real ~/.mcpr.
-        let dir = tempfile::tempdir().unwrap();
-        let snapshot = dir.path().join("config.toml");
-        let content = "port = 8080\n[relay]\ndomain = \"tunnel.test\"\n";
-        fs::write(&snapshot, content).unwrap();
-
-        let read_back = fs::read_to_string(&snapshot).unwrap();
-        assert_eq!(read_back, content);
-    }
-
     // ── path helpers ──────────────────────────────────────────────────
 
     #[test]
@@ -237,18 +168,6 @@ mod tests {
         assert!(p.ends_with("relay/lock"));
     }
 
-    #[test]
-    fn config_snapshot_path__ends_with_config_toml() {
-        let p = config_snapshot_path();
-        assert!(p.ends_with("relay/config.toml"));
-    }
-
-    #[test]
-    fn log_path__ends_with_relay_log() {
-        let p = log_path();
-        assert!(p.ends_with("relay/relay.log"));
-    }
-
     // ── Integration tests using real ~/.mcpr/relay/ paths ──────────────
     //
     // These tests MUST run sequentially since they share the same lockfile.
@@ -259,7 +178,6 @@ mod tests {
     fn real_path__lifecycle_roundtrip() {
         // 1. Start clean.
         remove_lock();
-        let _ = fs::remove_file(config_snapshot_path());
 
         // 2. check_lock returns Free when no lockfile.
         assert!(matches!(check_lock(), LockStatus::Free));
@@ -267,24 +185,15 @@ mod tests {
         // 3. stop_relay returns false when free.
         assert!(!stop_relay());
 
-        // 4. read_snapshot fails when no snapshot.
-        assert!(read_snapshot().is_err());
-
-        // 5. Write a lockfile with our PID → Held.
+        // 4. Write a lockfile with our PID → Held.
         write_lock(9998, "/tmp/test-relay.toml").unwrap();
-        let info = read_lock_info().unwrap();
-        assert_eq!(info.pid, std::process::id());
-        assert_eq!(info.port, 9998);
-        assert_eq!(info.config_path, "/tmp/test-relay.toml");
-        assert!(info.started_at > 0);
         assert!(matches!(check_lock(), LockStatus::Held(_)));
 
-        // 6. Remove → Free again.
+        // 5. Remove → Free again.
         remove_lock();
-        assert!(read_lock_info().is_none());
         assert!(matches!(check_lock(), LockStatus::Free));
 
-        // 7. Write a stale lockfile (dead PID) → Stale.
+        // 6. Write a stale lockfile (dead PID) → Stale.
         let dir = relay_dir();
         fs::create_dir_all(&dir).unwrap();
         let ts = chrono::Utc::now().timestamp();
@@ -295,19 +204,10 @@ mod tests {
         .unwrap();
         assert!(matches!(check_lock(), LockStatus::Stale(_)));
 
-        // 8. stop_relay cleans stale lock.
+        // 7. stop_relay cleans stale lock.
         let result = stop_relay();
         assert!(!result); // returns false for stale
-        assert!(read_lock_info().is_none());
-
-        // 9. snapshot_config + read_snapshot roundtrip.
-        let content = "port = 7777\n[relay]\ndomain = \"test.relay\"\n";
-        snapshot_config(content).unwrap();
-        let read_back = read_snapshot().unwrap();
-        assert_eq!(read_back, content);
-
-        // Clean up.
-        let _ = fs::remove_file(config_snapshot_path());
+        assert!(matches!(check_lock(), LockStatus::Free));
     }
 
     // ── read_lock_file edge cases (temp dir) ─────────────────────────

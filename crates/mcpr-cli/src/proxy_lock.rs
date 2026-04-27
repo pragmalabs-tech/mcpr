@@ -99,7 +99,7 @@ pub fn read_upstream_url(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Read lock info for a proxy by name (used by daemon readiness check).
+/// Read lock info for a proxy by name.
 pub fn read_lock_info(name: &str) -> Option<LockInfo> {
     read_lock_file(&lock_path(name))
 }
@@ -269,7 +269,6 @@ pub fn read_reload_result(name: &str) -> Option<ReloadResult> {
 /// List all proxies that have a lock directory, with their lock status.
 ///
 /// Stale lockfiles (process dead) are removed lazily as a side effect.
-/// Previously the daemon swept these every 10s; with the daemon gone,
 /// `list_proxies` is the only consumer that needs current state, so it
 /// owns the GC. The returned vec still includes stale entries so callers
 /// (`mcpr proxy list`) can show "just cleaned up X".
@@ -338,56 +337,7 @@ pub fn stop_all_proxies() -> Vec<String> {
     stopped
 }
 
-/// Mark all running proxies as stopped (remove lockfiles without killing).
-/// Used by `mcpr restart` to clean up proxy locks when restarting the daemon.
-pub fn mark_all_stopped() -> Vec<String> {
-    let mut marked = Vec::new();
-    for (name, status) in list_proxies() {
-        match status {
-            LockStatus::Held(info) => {
-                send_sigterm(info.pid);
-                wait_for_exit(info.pid, Duration::from_secs(10));
-                remove_lock(&name);
-                marked.push(name);
-            }
-            LockStatus::Stale(_) => {
-                remove_lock(&name);
-            }
-            LockStatus::Free => {}
-        }
-    }
-    marked
-}
-
-// ── Stdio redirect ──────────────────────────────────────────────────
-
-/// Redirect stdin/stdout/stderr for a background proxy process.
-#[cfg(unix)]
-pub fn redirect_stdio(name: &str) -> std::io::Result<()> {
-    use nix::unistd::dup2;
-    use std::os::unix::io::AsRawFd;
-
-    let log = log_path(name);
-    if let Some(parent) = log.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let dev_null = fs::OpenOptions::new().read(true).open("/dev/null")?;
-    let log_file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log)?;
-
-    dup2(dev_null.as_raw_fd(), 0).map_err(|e| std::io::Error::other(format!("dup2 stdin: {e}")))?;
-    dup2(log_file.as_raw_fd(), 1)
-        .map_err(|e| std::io::Error::other(format!("dup2 stdout: {e}")))?;
-    dup2(log_file.as_raw_fd(), 2)
-        .map_err(|e| std::io::Error::other(format!("dup2 stderr: {e}")))?;
-
-    Ok(())
-}
-
-// ── Process helpers (shared with daemon.rs) ──────────────────────────
+// ── Process helpers ────────────────────────────────────────────────
 
 /// Check if a process with the given PID is alive.
 #[cfg(unix)]
@@ -429,9 +379,6 @@ pub(crate) fn wait_for_exit(pid: u32, timeout: Duration) {
 }
 
 /// Parse a lockfile.
-///
-/// Tolerates a trailing 5th line written by older mcpr binaries (the
-/// removed `daemon_pid` field) — ignored on read.
 fn read_lock_file(path: &Path) -> Option<LockInfo> {
     let content = fs::read_to_string(path).ok()?;
     let mut lines = content.lines();

@@ -44,7 +44,7 @@ Running in front of [mcp.usestudykit.com/mcp](https://mcp.usestudykit.com/mcp) t
 
 ## Observe
 
-mcpr capture all mcp request — tool name, latency, status, error code, request/response size, session ID. All `mcpr proxy` commands read from this store and work whether or not the daemon is running. Use `mcpr proxy help` to see all observe supporting commands.
+mcpr capture all mcp request — tool name, latency, status, error code, request/response size, session ID. All `mcpr proxy` query commands read from this store directly — no long-lived process required. Use `mcpr proxy help` to see all observe supporting commands.
 
 ### Per-tool metrics
 
@@ -234,7 +234,7 @@ Data flows one way: proxy → cloud, pushed via a project token from `mcpr proxy
 
 **Tunnel/Relay**
 - [x] Built-in tunnel client and self-hosted relay server
-- [x] Standalone `mcpr relay` CLI with daemon lifecycle
+- [x] Standalone `mcpr relay run` CLI (foreground; host supervises)
 - [x] Graceful shutdown
 
 ## License

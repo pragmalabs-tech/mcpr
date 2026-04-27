@@ -28,7 +28,7 @@
 //!
 //! On graceful shutdown, the sender is dropped → `recv()` returns `None` →
 //! the writer flushes any remaining batch and exits. This guarantees no
-//! events are lost on `mcpr stop` / SIGTERM.
+//! events are lost on SIGTERM.
 
 use std::time::{Duration, Instant};
 

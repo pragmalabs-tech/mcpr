@@ -1,14 +1,15 @@
 //! # mcpr (CLI binary)
 //!
-//! Multi-process architecture:
-//! - **mcprd** (daemon/supervisor): `mcpr start` — no config needed, just manages
-//!   proxy and relay lifecycles and monitors health.
-//! - **proxy** (standalone): `mcpr proxy run <config>` — snapshots config, forks to
-//!   background, runs the MCP gateway. Self-terminates if the daemon dies.
-//! - **relay** (singleton): `mcpr relay start <config>` — tunnel relay server that
-//!   accepts WebSocket connections and assigns subdomains. One per machine.
+//! mcpr is a sidecar primitive in the envoy / pgbouncer mold. The launched PID
+//! is the proxy itself — your host process supervisor (systemd, Docker,
+//! Node `child_process.spawn`, terminal) owns the lifecycle.
 //!
-//! All state lives under `~/.mcpr/`.
+//! - **proxy**: `mcpr proxy run <config>` — runs the MCP gateway in the
+//!   foreground. SIGTERM drains gracefully.
+//! - **relay**: `mcpr relay run <config>` — tunnel relay server that accepts
+//!   WebSocket connections and assigns subdomains. One per machine.
+//!
+//! All state (lockfiles, config snapshots, sqlite store) lives under `~/.mcpr/`.
 //!
 //! ## Module Structure
 //!
@@ -17,19 +18,17 @@
 //!
 //! ```text
 //! mcpr-cli/src/
-//! +-- main.rs           # Entry point, daemon bootstrap, gateway runtime
+//! +-- main.rs           # Entry point, gateway runtime
 //! +-- state.rs          # AppState (axum host container wrapping ProxyState)
 //! +-- proxy.rs          # Axum fallback handler → mcpr_core pipeline
 //! +-- config.rs         # CLI args (clap), TOML config, subcommands
 //! +-- render.rs         # All terminal output — tables, colors, formatting
 //! +-- admin.rs          # Health/readiness admin server
-//! +-- daemon.rs         # mcprd supervisor (fork, PID file, health monitor)
 //! +-- proxy_lock.rs     # Per-proxy lockfiles under ~/.mcpr/proxies/
 //! +-- relay_lock.rs     # Singleton relay lockfile under ~/.mcpr/relay/
 //! +-- logic/            # Core business logic (no printing)
-//! |   +-- daemon.rs     #   Daemon status queries
-//! |   +-- proxy.rs      #   Proxy lifecycle (start/stop/restart)
-//! |   +-- relay.rs      #   Relay lifecycle (stop/restart/status)
+//! |   +-- proxy.rs      #   Proxy lifecycle (stop, reload, list, delete)
+//! |   +-- relay.rs      #   Relay lifecycle (stop, status)
 //! |   +-- query.rs      #   DB engine, time parsing, threshold parsing
 //! +-- cmd/              # Thin command handlers (logic → render)
 //!     +-- proxy.rs      #   Proxy lifecycle commands
@@ -50,8 +49,6 @@
 //! This binary just registers them via `EventManager`.
 
 mod admin;
-#[cfg(unix)]
-mod background;
 mod cmd;
 mod config;
 mod logic;
@@ -161,144 +158,57 @@ impl mcpr_tunnel::TunnelStatusCallback for TunnelStatusAdapter {
     }
 }
 
-/// Entry point — handles daemonization BEFORE starting tokio.
-///
-/// Tokio's IO driver uses epoll/kqueue file descriptors that don't survive
-/// fork(). So we must fork first, then start the async runtime in the child.
+/// Entry point. Pre-tokio work is limited to config snapshotting + lockfile
+/// conflict checks for `mcpr proxy run`; the proxy then runs in the foreground
+/// of the launching process (terminal, systemd, Docker, Node `child_process`).
+/// There is no daemonization — the host process owns the lifecycle.
 fn main() {
     let action = config::load();
 
-    // Print the migration stub and exit before doing any setup. The daemon
-    // subcommands were removed; embedders should use `mcpr proxy run`
-    // (foreground) or `mcpr proxy run --background` for the previous
-    // double-fork behaviour.
-    if let CliAction::DeprecatedDaemonCmd(name) = &action {
-        eprintln!(
-            "error: `mcpr {name}` was removed. mcpr is a sidecar primitive — \
-             let your host process (systemd / Node / etc.) own the lifecycle."
-        );
-        eprintln!("  foreground (recommended): mcpr proxy run <config>");
-        eprintln!("  background (legacy):      mcpr proxy run --background <config>");
-        eprintln!("  inspect:                  mcpr proxy list  /  mcpr proxy status");
-        eprintln!("  stop a backgrounded one:  mcpr proxy stop <name>");
-        std::process::exit(2);
-    }
-
-    // Decide whether to double-fork before tokio starts.
-    // Tokio's IO driver uses kqueue/epoll fds that don't survive fork().
-    let ready_fd: Option<i32> = match &action {
-        CliAction::ProxyRun {
-            mode: Mode::Gateway(cfg),
-            config_content,
-            config_path: _,
-            background,
-        } => {
-            #[cfg(unix)]
-            {
-                let proxy_name = &cfg.name;
-
-                // Conflict detection.
-                match proxy_lock::check_lock(proxy_name) {
-                    proxy_lock::LockStatus::Free => {}
-                    proxy_lock::LockStatus::Stale(_) => {
-                        proxy_lock::remove_lock(proxy_name);
-                    }
-                    proxy_lock::LockStatus::Held(info) => {
-                        eprintln!(
-                            "error: proxy \"{}\" is already running (pid {}).",
-                            proxy_name, info.pid
-                        );
-                        eprintln!(
-                            "  Use `mcpr proxy restart {} --config <path>` to apply new config,",
-                            proxy_name
-                        );
-                        eprintln!(
-                            "  or `mcpr proxy reload {} --config <path>` for a zero-downtime reload.",
-                            proxy_name
-                        );
-                        std::process::exit(1);
-                    }
-                }
-
-                // Snapshot config.
-                if let Err(e) = proxy_lock::snapshot_config(proxy_name, config_content) {
-                    eprintln!("error: failed to snapshot config: {e}");
-                    std::process::exit(1);
-                }
-
-                if *background {
-                    // Double-fork to background.
-                    let fd = background::daemonize_proxy(proxy_name, Duration::from_secs(10))
-                        .unwrap_or_else(|e| {
-                            eprintln!("error: {e}");
-                            std::process::exit(1);
-                        });
-                    Some(fd)
-                } else {
-                    // Foreground: parent process (terminal, systemd, Node) supervises directly.
-                    None
-                }
+    // Pre-tokio work for `mcpr proxy run`: write the lockfile-conflict guard
+    // and snapshot the config so reload / stop can find it.
+    if let CliAction::ProxyRun {
+        mode: Mode::Gateway(cfg),
+        config_content,
+        config_path: _,
+    } = &action
+    {
+        let proxy_name = &cfg.name;
+        match proxy_lock::check_lock(proxy_name) {
+            proxy_lock::LockStatus::Free => {}
+            proxy_lock::LockStatus::Stale(_) => {
+                proxy_lock::remove_lock(proxy_name);
             }
-            #[cfg(not(unix))]
-            {
-                if *background {
-                    eprintln!("error: --background not supported on this platform");
-                    std::process::exit(1);
-                }
-                None
-            }
-        }
-        CliAction::RelayRun {
-            background: true,
-            config_content,
-            ..
-        } => {
-            #[cfg(unix)]
-            {
-                // Check for existing relay.
-                match relay_lock::check_lock() {
-                    relay_lock::LockStatus::Free => {}
-                    relay_lock::LockStatus::Stale(_) => relay_lock::remove_lock(),
-                    relay_lock::LockStatus::Held(info) => {
-                        eprintln!("error: relay already running (pid {})", info.pid);
-                        std::process::exit(1);
-                    }
-                }
-
-                // Snapshot config.
-                if let Err(e) = relay_lock::snapshot_config(config_content) {
-                    eprintln!("error: failed to snapshot config: {e}");
-                    std::process::exit(1);
-                }
-
-                // Double-fork to background.
-                let fd = background::daemonize_relay(Duration::from_secs(10)).unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
-                Some(fd)
-            }
-            #[cfg(not(unix))]
-            {
-                eprintln!("error: --background not supported on this platform");
+            proxy_lock::LockStatus::Held(info) => {
+                eprintln!(
+                    "error: proxy \"{}\" is already running (pid {}).",
+                    proxy_name, info.pid
+                );
+                eprintln!(
+                    "  Send SIGTERM (`mcpr proxy stop {}`) to stop it first,",
+                    proxy_name
+                );
+                eprintln!(
+                    "  or `mcpr proxy reload {} --config <path>` for a zero-downtime CSP reload.",
+                    proxy_name
+                );
                 std::process::exit(1);
             }
         }
-        CliAction::RelayRun {
-            background: false, ..
-        } => None,
-        _ => None,
-    };
+        if let Err(e) = proxy_lock::snapshot_config(proxy_name, config_content) {
+            eprintln!("error: failed to snapshot config: {e}");
+            std::process::exit(1);
+        }
+    }
 
-    // Now start the tokio runtime (in the daemon child or the original process).
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .expect("Failed to create tokio runtime")
-        .block_on(async_main(action, ready_fd));
+        .block_on(async_main(action));
 }
 
-async fn async_main(action: CliAction, ready_fd: Option<i32>) {
+async fn async_main(action: CliAction) {
     // Install the global tracing subscriber once per process. Honors
     // `RUST_LOG` (e.g. `RUST_LOG=info` surfaces middleware registration
     // + tower trace spans). Defaults to `warn` when unset — operator
@@ -311,10 +221,6 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
         .try_init();
 
     match action {
-        CliAction::DeprecatedDaemonCmd(_) => {
-            // Already handled in main() before tokio init — exit was called there.
-            unreachable!("DeprecatedDaemonCmd handled before async dispatch");
-        }
         CliAction::Validate(args) => {
             let issues = config::validate_config(args.config.as_deref());
             let has_error = issues.iter().any(|(s, _)| *s == "error");
@@ -331,18 +237,9 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 .status();
             match status {
                 Ok(s) if s.success() => {
-                    // Auto-restart any backgrounded proxies so long-lived
-                    // processes pick up the new code. Foreground proxies are
-                    // owned by their parent (systemd, Node, …) — that parent
-                    // is responsible for restarting them.
-                    #[cfg(unix)]
-                    {
-                        let exe = std::env::current_exe().unwrap_or_else(|_| "mcpr".into());
-                        eprintln!("Restarting backgrounded proxies with updated binary...");
-                        let _ = std::process::Command::new(&exe)
-                            .args(["proxy", "restart", "--all"])
-                            .status();
-                    }
+                    eprintln!(
+                        "Updated. Restart any running proxies via your supervisor (systemd / Docker / Node)."
+                    );
                 }
                 Ok(s) => std::process::exit(s.code().unwrap_or(1)),
                 Err(e) => {
@@ -368,8 +265,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 std::process::exit(1);
             }
             Mode::Gateway(cfg) => {
-                // Already forked in main(). Run gateway with proxy lockfile semantics.
-                run_gateway_inner(*cfg, ready_fd, config_path).await;
+                run_gateway_inner(*cfg, config_path).await;
             }
         },
         CliAction::Store(cmd) => {
@@ -380,7 +276,7 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
             config_path,
             ..
         } => {
-            run_relay_inner(relay_config, ready_fd, config_path).await;
+            run_relay_inner(relay_config, config_path).await;
         }
         CliAction::Relay(cmd) => {
             cmd::handle_relay_command(cmd);
@@ -389,9 +285,10 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
 }
 
 /// Run a proxy gateway process. Called from `mcpr proxy run` only.
-/// The proxy always writes a lockfile and monitors the daemon's health.
-#[allow(unused_variables)]
-async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_path: String) {
+/// Always foreground — the launching process owns the PID. Writes a
+/// lockfile so `mcpr proxy stop / reload / list` can find it from another
+/// terminal; SIGTERM / SIGINT trigger graceful drain.
+async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
     // Preserve the resolved startup config for the live-reload handler so
     // SIGHUP can diff an incoming snapshot against the config actually in
     // effect. Cloned up-front because the fn body moves fields out of `cfg`.
@@ -425,17 +322,11 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         .expect("Failed to bind");
     let actual_port = listener.local_addr().unwrap().port();
 
-    // Write lockfile so status commands can find this process.
+    // Write lockfile so `mcpr proxy stop / reload / list` can find this process.
     #[cfg(unix)]
-    {
-        if let Err(e) = proxy_lock::write_lock(&proxy_name, actual_port, &config_path) {
-            eprintln!("error: failed to write lockfile: {e}");
-            std::process::exit(1);
-        }
-        // Signal readiness to the parent process.
-        if let Some(fd) = ready_fd {
-            background::signal_ready(fd);
-        }
+    if let Err(e) = proxy_lock::write_lock(&proxy_name, actual_port, &config_path) {
+        eprintln!("error: failed to write lockfile: {e}");
+        std::process::exit(1);
     }
 
     // Determine public URL
@@ -877,13 +768,9 @@ fn build_reload_rewrite_config(
     }
 }
 
-/// Run the relay server process. Called from `mcpr relay run` / `mcpr relay start`.
-#[allow(unused_variables)]
-async fn run_relay_inner(
-    cfg: mcpr_tunnel::RelayConfig,
-    ready_fd: Option<i32>,
-    config_path: String,
-) {
+/// Run the relay server process. Called from `mcpr relay run` only.
+/// Always foreground — the launching process owns the PID.
+async fn run_relay_inner(cfg: mcpr_tunnel::RelayConfig, config_path: String) {
     let (app, port) = mcpr_tunnel::build_relay_app(cfg);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
@@ -894,17 +781,10 @@ async fn run_relay_inner(
         });
     let actual_port = listener.local_addr().unwrap().port();
 
-    // Write lockfile.
     #[cfg(unix)]
     if let Err(e) = relay_lock::write_lock(actual_port, &config_path) {
         eprintln!("error: failed to write relay lockfile: {e}");
         std::process::exit(1);
-    }
-
-    // Signal readiness to parent (if daemonized).
-    #[cfg(unix)]
-    if let Some(fd) = ready_fd {
-        background::signal_ready(fd);
     }
 
     eprintln!(
