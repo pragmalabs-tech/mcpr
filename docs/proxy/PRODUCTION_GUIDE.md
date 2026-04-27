@@ -276,25 +276,13 @@ The stderr JSON format emits one event per line. Every major aggregator (Loki, E
 
 ### Deployment
 
-mcpr ships as a single binary. Two supported runtime shapes:
+mcpr ships as a single binary and runs as a sidecar to your MCP server. The launched PID is the proxy itself, so a process supervisor (systemd, launchd, Docker, your Node app) owns its lifecycle.
 
-**1. Daemonized (recommended for long-running proxies)**
+**1. Foreground (recommended — Docker, Kubernetes, systemd, embedded)**
 
 ```bash
-mcpr start                    # starts the daemon (mcprd)
 mcpr proxy run /etc/mcpr.toml
-mcpr status                   # check daemon + proxies
 ```
-
-The daemon supervises proxy processes, writes PID files under `~/.mcpr/`, and monitors health. Each `mcpr proxy run` registers a proxy with the daemon.
-
-**2. Foreground (container orchestration, systemd)**
-
-```bash
-mcpr proxy run /etc/mcpr.toml --foreground
-```
-
-No daemon. Good for Docker, Kubernetes, systemd — where the orchestrator handles supervision.
 
 Systemd unit skeleton:
 
@@ -306,14 +294,25 @@ After=network.target
 [Service]
 Type=simple
 User=mcpr
-ExecStart=/usr/local/bin/mcpr proxy run /etc/mcpr.toml --foreground
+ExecStart=/usr/local/bin/mcpr proxy run /etc/mcpr.toml
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
+TimeoutStopSec=35
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+**2. Backgrounded (terminal use, multi-proxy on one box)**
+
+```bash
+mcpr proxy run --background /etc/mcpr.toml
+mcpr proxy list                      # see what's running
+mcpr proxy stop <name>               # SIGTERM + drain
+```
+
+`--background` double-forks and writes a lockfile under `~/.mcpr/proxies/<name>/lock`, so `mcpr proxy list / stop / restart / reload` can find the process later. Use this when you want to launch a proxy from a shell and detach.
 
 ### Graceful shutdown
 

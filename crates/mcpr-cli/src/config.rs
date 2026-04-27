@@ -17,32 +17,27 @@ pub enum Mode {
 
 /// Result of parsing CLI args — either a subcommand action or the run mode.
 pub enum CliAction {
-    /// Start the daemon supervisor (no config needed).
-    Start {
-        foreground: bool,
-    },
-    /// Stop the running daemon via SIGTERM.
-    Stop,
-    /// Stop + start the daemon, re-launching previously running proxies and relay.
-    Restart {
-        restart_proxies: Vec<String>,
-        restart_relay: bool,
-    },
-    /// Show daemon status (PID, port, uptime, proxy name).
-    Status,
+    /// A deprecated `mcpr start/stop/restart/status` invocation. The handler
+    /// prints a migration stub and exits — there is no daemon any more.
+    /// The `&'static str` carries the original command name for the message.
+    DeprecatedDaemonCmd(&'static str),
     Validate(ValidateArgs),
     Version,
     /// Update mcpr to the latest version.
     Update,
     /// Read-only query against the store — no server needed.
     Proxy(ProxyCommand),
-    /// Run a proxy as a background process (fork before tokio).
+    /// Run a proxy. Foreground by default (host process owns the PID for
+    /// systemd / Node `child_process.spawn` lifecycle tracking); set
+    /// `background = true` to double-fork into the background.
     ProxyRun {
         mode: Mode,
         /// Raw TOML content for config snapshot.
         config_content: String,
         /// Absolute path to the original config file.
         config_path: String,
+        /// `true` to double-fork into the background; `false` for foreground (default).
+        background: bool,
     },
     /// Interactive setup flow (needs async for cloud API calls).
     ProxySetup {
@@ -53,15 +48,16 @@ pub enum CliAction {
     Store(StoreCommand),
     /// Relay subcommands (stop, restart, status — no config needed).
     Relay(RelayCommand),
-    /// Run the relay server (foreground or daemonized).
+    /// Run the relay server. Foreground by default; set `background = true`
+    /// to double-fork into the background.
     RelayRun {
         relay_config: RelayConfig,
         /// Raw TOML content for config snapshot.
         config_content: String,
         /// Absolute path to the original config file.
         config_path: String,
-        /// `true` for `relay run` (foreground), `false` for `relay start` (daemonize).
-        foreground: bool,
+        /// `true` to double-fork into the background; `false` for foreground (default).
+        background: bool,
     },
 }
 
@@ -91,13 +87,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the proxy (daemon by default, --foreground for attached mode)
+    /// [removed] Use `mcpr proxy run <config>` (foreground) or
+    /// `mcpr proxy run --background <config>`.
     Start(StartArgs),
-    /// Stop the running daemon
+    /// [removed] Stop a backgrounded proxy with `mcpr proxy stop <name>`.
     Stop,
-    /// Restart the daemon (stop + start)
+    /// [removed] Use `mcpr proxy restart <name>` for a backgrounded proxy.
     Restart,
-    /// Show daemon status (PID, port, uptime, proxy name)
+    /// [removed] Use `mcpr proxy list` or `mcpr proxy status`.
     Status,
     /// Validate config file and exit
     Validate(ValidateArgs),
@@ -176,6 +173,12 @@ pub enum ProxyCommand {
 pub struct ProxyRunArgs {
     /// Config file path (default: mcpr.toml)
     pub config: Option<String>,
+
+    /// Double-fork into the background and detach from the terminal.
+    /// Default is foreground so a parent process (systemd, Node, etc.)
+    /// can supervise the proxy directly.
+    #[arg(long)]
+    pub background: bool,
 }
 
 /// Arguments for `mcpr proxy stop [name]`.
@@ -490,6 +493,11 @@ pub enum RelayCommand {
 pub struct RelayRunArgs {
     /// Config file path
     pub config: Option<String>,
+
+    /// Double-fork into the background and detach from the terminal.
+    /// Default is foreground.
+    #[arg(long)]
+    pub background: bool,
 }
 
 /// Arguments for `mcpr relay restart`.
@@ -909,7 +917,9 @@ pub fn load() -> CliAction {
         Some(Commands::Proxy(ProxyArgs {
             command: ProxyCommand::Run(run_args),
         })) => {
-            // `mcpr proxy run` needs to load config and fork — handle like Start.
+            // `mcpr proxy run` loads config; foreground by default so a
+            // parent process (systemd, Node) supervises the PID directly.
+            // `--background` opts into the legacy double-fork path.
             let explicit_path = run_args.config.as_deref().or(cli.config.as_deref());
             let (file, cfg_path) = FileConfig::load(explicit_path);
             let config_content = cfg_path
@@ -945,6 +955,7 @@ pub fn load() -> CliAction {
                 mode,
                 config_content,
                 config_path: config_path_str,
+                background: run_args.background,
             }
         }
         Some(Commands::Proxy(ProxyArgs {
@@ -957,28 +968,36 @@ pub fn load() -> CliAction {
         Some(Commands::Store(args)) => CliAction::Store(args.command),
         Some(Commands::Relay(RelayArgs {
             command: RelayCommand::Run(run_args),
-        })) => load_relay_run(run_args, cli.config.as_deref(), true),
+        })) => {
+            let background = run_args.background;
+            load_relay_run(run_args, cli.config.as_deref(), background)
+        }
         Some(Commands::Relay(RelayArgs {
             command: RelayCommand::Start(run_args),
-        })) => load_relay_run(run_args, cli.config.as_deref(), false),
+        })) => {
+            // `relay start` is the legacy backgrounded form; force background.
+            // (Deprecation hint surfaces in Commit 4 alongside the daemon stubs.)
+            load_relay_run(run_args, cli.config.as_deref(), true)
+        }
         Some(Commands::Relay(args)) => CliAction::Relay(args.command),
-        Some(Commands::Stop) => CliAction::Stop,
-        Some(Commands::Status) => CliAction::Status,
-        Some(Commands::Start(args)) => CliAction::Start {
-            foreground: args.foreground,
-        },
-        Some(Commands::Restart) => CliAction::Restart {
-            restart_proxies: vec![],
-            restart_relay: false,
-        },
-        // No subcommand — default to starting the daemon.
-        None => CliAction::Start { foreground: false },
+        Some(Commands::Stop) => CliAction::DeprecatedDaemonCmd("stop"),
+        Some(Commands::Status) => CliAction::DeprecatedDaemonCmd("status"),
+        Some(Commands::Start(_)) => CliAction::DeprecatedDaemonCmd("start"),
+        Some(Commands::Restart) => CliAction::DeprecatedDaemonCmd("restart"),
+        // No subcommand — print help. Previously this defaulted to daemonizing,
+        // which no longer exists.
+        None => {
+            use clap::CommandFactory;
+            let _ = Cli::command().print_help();
+            eprintln!();
+            std::process::exit(2);
+        }
     }
 }
 
 /// Load config for `mcpr relay run` / `mcpr relay start`.
 /// The `mode = "relay"` field is not required — it is implicit from the command.
-fn load_relay_run(args: RelayRunArgs, global_config: Option<&str>, foreground: bool) -> CliAction {
+fn load_relay_run(args: RelayRunArgs, global_config: Option<&str>, background: bool) -> CliAction {
     let explicit_path = args.config.as_deref().or(global_config);
     let (file, cfg_path) = FileConfig::load(explicit_path);
     let config_content = cfg_path
@@ -1020,7 +1039,7 @@ fn load_relay_run(args: RelayRunArgs, global_config: Option<&str>, foreground: b
         relay_config,
         config_content,
         config_path: config_path_str,
-        foreground,
+        background,
     }
 }
 
@@ -1908,16 +1927,17 @@ mod tests {
 
         let args = RelayRunArgs {
             config: Some(cfg_path.display().to_string()),
+            background: false,
         };
-        let action = load_relay_run(args, None, true);
+        let action = load_relay_run(args, None, false);
         match action {
             CliAction::RelayRun {
                 relay_config,
-                foreground,
+                background,
                 config_content,
                 ..
             } => {
-                assert!(foreground);
+                assert!(!background);
                 assert_eq!(relay_config.port, 9090);
                 assert_eq!(relay_config.relay_domain, "tunnel.test");
                 assert!(!config_content.is_empty());
@@ -1934,15 +1954,16 @@ mod tests {
 
         let args = RelayRunArgs {
             config: Some(cfg_path.display().to_string()),
+            background: true,
         };
-        let action = load_relay_run(args, None, false);
+        let action = load_relay_run(args, None, true);
         match action {
             CliAction::RelayRun {
                 relay_config,
-                foreground,
+                background,
                 ..
             } => {
-                assert!(!foreground);
+                assert!(background);
                 assert_eq!(relay_config.port, 8080);
                 assert_eq!(relay_config.relay_domain, "tunnel.bg");
             }
@@ -1969,8 +1990,9 @@ subdomains = ["myapp"]
 
         let args = RelayRunArgs {
             config: Some(cfg_path.display().to_string()),
+            background: false,
         };
-        let action = load_relay_run(args, None, true);
+        let action = load_relay_run(args, None, false);
         match action {
             CliAction::RelayRun { relay_config, .. } => {
                 assert_eq!(relay_config.tokens.len(), 1);
@@ -1998,8 +2020,9 @@ auth_provider_secret = "secret123"
 
         let args = RelayRunArgs {
             config: Some(cfg_path.display().to_string()),
+            background: false,
         };
-        let action = load_relay_run(args, None, true);
+        let action = load_relay_run(args, None, false);
         match action {
             CliAction::RelayRun { relay_config, .. } => {
                 assert_eq!(
@@ -2024,8 +2047,9 @@ auth_provider_secret = "secret123"
 
         let args = RelayRunArgs {
             config: Some(cfg_path.display().to_string()),
+            background: false,
         };
-        load_relay_run(args, None, true);
+        load_relay_run(args, None, false);
     }
 
     #[test]
@@ -2037,7 +2061,8 @@ auth_provider_secret = "secret123"
 
         let args = RelayRunArgs {
             config: Some(cfg_path.display().to_string()),
+            background: false,
         };
-        load_relay_run(args, None, true);
+        load_relay_run(args, None, false);
     }
 }

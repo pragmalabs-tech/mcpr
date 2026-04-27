@@ -93,8 +93,8 @@ In your CI workflow (GitHub Actions example):
 ```yaml
 - name: Deploy preview
   run: |
-    mcpr start --foreground --mcp http://localhost:9000 \
-      --relay-url https://tunnel.yourdomain.com
+    # mcpr.toml: mcp = "http://localhost:9000", [tunnel] relay_url = "...", token + subdomain from env
+    mcpr proxy run mcpr.toml
   env:
     # Set in GitHub Secrets
     MCPR_TUNNEL_TOKEN: ${{ secrets.MCPR_CI_TOKEN }}

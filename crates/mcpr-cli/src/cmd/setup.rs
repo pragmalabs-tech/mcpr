@@ -220,7 +220,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
             .map_err(|e| format!("failed to write {config_path}: {e}"))?;
         println!("\n    {} Saved {}", "✓".green(), config_path);
         println!("\n  {}", "Run your proxy:".bold());
-        println!("    mcpr start && mcpr proxy run {config_path}");
+        println!("    mcpr proxy run {config_path}");
         println!();
         return Ok(());
     }
@@ -293,7 +293,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
 
     // ── Done ───────────────────────────────────────────────────────────
     println!("\n  {}", "Run your proxy:".bold());
-    println!("    mcpr start && mcpr proxy run {config_path}");
+    println!("    mcpr proxy run {config_path}");
 
     if let Some(ep) = &endpoint {
         println!(
