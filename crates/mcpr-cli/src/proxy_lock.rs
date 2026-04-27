@@ -17,9 +17,6 @@ pub struct LockInfo {
     pub port: u16,
     pub started_at: i64,
     pub config_path: String,
-    /// PID of the daemon that was running when this proxy started.
-    /// `None` for lockfiles written before this field was added.
-    pub daemon_pid: Option<u32>,
 }
 
 /// Current state of a proxy lock.
@@ -125,19 +122,13 @@ pub fn check_lock(name: &str) -> LockStatus {
 }
 
 /// Write a lockfile for a proxy after successful port bind.
-pub fn write_lock(
-    name: &str,
-    port: u16,
-    config_path: &str,
-    daemon_pid: Option<u32>,
-) -> std::io::Result<()> {
+pub fn write_lock(name: &str, port: u16, config_path: &str) -> std::io::Result<()> {
     let dir = proxy_dir(name);
     fs::create_dir_all(&dir)?;
 
     let pid = std::process::id();
     let started_at = chrono::Utc::now().timestamp();
-    let dpid = daemon_pid.map(|p| p.to_string()).unwrap_or_default();
-    let content = format!("{pid}\n{port}\n{started_at}\n{config_path}\n{dpid}\n");
+    let content = format!("{pid}\n{port}\n{started_at}\n{config_path}\n");
 
     fs::write(lock_path(name), content)
 }
@@ -276,6 +267,12 @@ pub fn read_reload_result(name: &str) -> Option<ReloadResult> {
 }
 
 /// List all proxies that have a lock directory, with their lock status.
+///
+/// Stale lockfiles (process dead) are removed lazily as a side effect.
+/// Previously the daemon swept these every 10s; with the daemon gone,
+/// `list_proxies` is the only consumer that needs current state, so it
+/// owns the GC. The returned vec still includes stale entries so callers
+/// (`mcpr proxy list`) can show "just cleaned up X".
 pub fn list_proxies() -> Vec<(String, LockStatus)> {
     let dir = proxies_dir();
     let entries = match fs::read_dir(&dir) {
@@ -293,21 +290,14 @@ pub fn list_proxies() -> Vec<(String, LockStatus)> {
             Err(_) => continue,
         };
         let status = check_lock(&name);
+        if matches!(status, LockStatus::Stale(_)) {
+            remove_lock(&name);
+        }
         result.push((name, status));
     }
 
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
-}
-
-/// Check if the daemon that this proxy was started under is still alive.
-/// Returns `true` if the daemon PID is present and the process is running,
-/// or if no daemon PID is recorded (backward compat).
-pub fn check_daemon_alive(daemon_pid: Option<u32>) -> bool {
-    match daemon_pid {
-        Some(pid) => is_process_alive(pid),
-        None => true, // No daemon PID recorded — assume okay.
-    }
 }
 
 /// Stop a running proxy by name: send SIGTERM and wait for exit.
@@ -439,6 +429,9 @@ pub(crate) fn wait_for_exit(pid: u32, timeout: Duration) {
 }
 
 /// Parse a lockfile.
+///
+/// Tolerates a trailing 5th line written by older mcpr binaries (the
+/// removed `daemon_pid` field) — ignored on read.
 fn read_lock_file(path: &Path) -> Option<LockInfo> {
     let content = fs::read_to_string(path).ok()?;
     let mut lines = content.lines();
@@ -447,15 +440,12 @@ fn read_lock_file(path: &Path) -> Option<LockInfo> {
     let port: u16 = lines.next()?.parse().ok()?;
     let started_at: i64 = lines.next()?.parse().ok()?;
     let config_path: String = lines.next()?.to_string();
-    // Optional 5th line: daemon PID (backward compat with old lockfiles).
-    let daemon_pid: Option<u32> = lines.next().and_then(|s| s.parse().ok());
 
     Some(LockInfo {
         pid,
         port,
         started_at,
         config_path,
-        daemon_pid,
     })
 }
 

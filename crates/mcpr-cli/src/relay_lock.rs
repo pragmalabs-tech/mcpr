@@ -144,7 +144,6 @@ fn read_lock_file(path: &Path) -> Option<LockInfo> {
         port,
         started_at,
         config_path,
-        daemon_pid: None,
     })
 }
 
@@ -170,7 +169,6 @@ mod tests {
         assert_eq!(info.port, 8080);
         assert_eq!(info.started_at, ts);
         assert_eq!(info.config_path, "/tmp/relay.toml");
-        assert_eq!(info.daemon_pid, None);
     }
 
     #[test]

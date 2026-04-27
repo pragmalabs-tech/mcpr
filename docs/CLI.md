@@ -1,56 +1,48 @@
 # CLI Reference
 
-The CLI **manages the daemon, proxy, and relay processes** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](proxy/PROXY_CONFIGURATION.md). See [ARCHITECTURE.md](ARCHITECTURE.md) for the full multi-process model.
+The CLI **runs proxies and the relay** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](proxy/PROXY_CONFIGURATION.md).
 
-> Running in a container? The [Docker image](DOCKER.md) wraps the daemon + proxy flow behind a single `docker run` command. The CLI commands below still apply inside the container via `docker exec`.
+mcpr is a sidecar primitive in the envoy / pgbouncer mold: a host process (your Node / Go / Ruby MCP server, systemd, Docker, …) spawns `mcpr proxy run <config>` as a child and supervises it directly. The PID you launch is the proxy itself, so SIGTERM drains it gracefully and crash-then-restart loops Just Work.
 
-Three responsibilities:
-1. **Lifecycle** — start/stop the daemon supervisor, individual proxies, and the relay server.
-2. **Query & observe** — read request logs, per-tool metrics, sessions, schema, and storage stats from SQLite. These commands work even when the daemon isn't running.
-3. **Relay** — run a tunnel relay server that accepts remote mcpr client connections.
+> Running in a container? The [Docker image](DOCKER.md) execs `mcpr proxy run` directly as PID 1, so `docker stop` translates straight to a graceful SIGTERM.
+
+Two responsibilities:
+1. **Lifecycle** — run individual proxies and the relay server (foreground by default; `--background` opt-in).
+2. **Query & observe** — read request logs, per-tool metrics, sessions, schema, and storage stats from SQLite. No long-lived process required.
 
 ## Quick Start
 
 ```bash
-# Start the daemon supervisor
-mcpr start
-
-# Launch a proxy
+# Run a proxy in the foreground (Ctrl-C / SIGTERM to stop)
 mcpr proxy run mcpr.toml
 
-# Launch a relay server
-mcpr relay start relay.toml
-
-# Check status
-mcpr status
-mcpr relay status
-
-# View request logs
+# Or run it in the background and inspect later
+mcpr proxy run --background mcpr.toml
+mcpr proxy list
 mcpr proxy logs
 
-# Stop everything (proxies + relay + daemon)
-mcpr stop
+# Run a relay server (foreground)
+mcpr relay run relay.toml
+
+# Stop a backgrounded proxy
+mcpr proxy stop <name>
 ```
 
 ## Commands
 
-### Daemon Lifecycle
+### Removed: `mcpr start` / `mcpr stop` / `mcpr restart` / `mcpr status`
 
-| Command | Description |
-|---------|-------------|
-| `mcpr start` | Start the daemon supervisor (no config needed) |
-| `mcpr start --foreground` | Start in foreground (for Docker, systemd, debugging) |
-| `mcpr stop` | Stop all proxies + relay + daemon (graceful SIGTERM) |
-| `mcpr restart` | Stop + start, re-launching previously running proxies and relay |
-| `mcpr status` | Show daemon PID/uptime + list all proxies |
+The daemon supervisor was removed — mcpr no longer manages its own lifecycle. Use your host process / process supervisor (systemd, launchd, Node, Docker) to own the proxy PID. Migration:
 
-`mcpr start` launches the daemon supervisor and exits. No config file is needed — the daemon is a pure supervisor that monitors proxy and relay health. Logs go to `~/.mcpr/mcprd.log`.
+| Old | New |
+|---|---|
+| `mcpr start` then `mcpr proxy run` | `mcpr proxy run <config>` (foreground) |
+| `mcpr start` (background) | `mcpr proxy run --background <config>` |
+| `mcpr stop` | `mcpr proxy stop --all` |
+| `mcpr status` | `mcpr proxy list` / `mcpr proxy status` |
+| `mcpr restart` | `mcpr proxy restart --all` |
 
-```bash
-mcpr start              # start daemon, no config needed
-mcpr proxy run app.toml # then launch proxies
-mcpr relay start relay.toml # optionally launch relay
-```
+The old commands still parse but exit 2 with a migration hint for one minor release before being deleted.
 
 ### Proxy Lifecycle
 
@@ -86,15 +78,19 @@ mcpr proxy start localhost-9000
 
 #### `mcpr proxy run`
 
-Launch a proxy in the background from a config file. Snapshots the config to `~/.mcpr/proxies/<name>/config.toml` for later `start` / `restart` / `reload`. Errors if a proxy with the same name is already running — use `restart` to replace it or `reload` to update config without dropping sessions.
+Run a proxy from a config file. Snapshots the config to `~/.mcpr/proxies/<name>/config.toml` for later `start` / `restart` / `reload`. Errors if a proxy with the same name is already running — use `restart` to replace it or `reload` to update config without dropping sessions.
+
+Foreground by default: the launched PID is the proxy itself, so the parent process (terminal, systemd, Node `child_process.spawn`, Docker) supervises it directly. SIGTERM drains gracefully (up to `runtime.drain_timeout`).
 
 ```bash
-mcpr proxy run mcpr.toml
+mcpr proxy run mcpr.toml                # foreground (default)
+mcpr proxy run --background mcpr.toml   # double-fork into background
 ```
 
-| Argument | Description |
+| Argument / Flag | Description |
 |----------|-------------|
 | `[CONFIG]` | Config file path (default: `./mcpr.toml`) |
+| `--background` | Double-fork into the background. Without this, the proxy stays attached to the parent. |
 
 #### `mcpr proxy stop [name]`
 
@@ -179,29 +175,28 @@ The relay is a singleton tunnel server. One relay per machine.
 
 | Command | Description |
 |---------|-------------|
-| `mcpr relay run <config>` | Run relay in foreground (no daemon required) |
-| `mcpr relay start <config>` | Start relay in background (requires daemon) |
+| `mcpr relay run <config>` | Run relay in foreground (default) |
+| `mcpr relay run --background <config>` | Double-fork into the background |
+| `mcpr relay start <config>` | Deprecated alias for `relay run --background` |
 | `mcpr relay stop` | Stop the relay |
 | `mcpr relay restart` | Stop + start from saved config snapshot |
 | `mcpr relay restart <config>` | Stop + start with new config |
 | `mcpr relay status` | Show relay PID, port, uptime |
 
-`mcpr relay run` runs in the foreground and does not require a running daemon. Use this for Docker, systemd, and debugging.
-
-`mcpr relay start` forks to the background and requires a running daemon. The relay participates in daemon lifecycle: `mcpr stop` stops it, `mcpr restart` re-launches it, and it self-terminates if the daemon dies.
+`mcpr relay run` is foreground by default — the launched PID is the relay itself, supervised by your parent process (systemd, Docker, terminal). Pass `--background` to double-fork; the lockfile at `~/.mcpr/relay/lock` lets `mcpr relay stop` / `restart` find it later.
 
 ```bash
-mcpr start                    # start daemon
-mcpr relay start relay.toml   # start relay in background
-mcpr relay status             # check status
-mcpr relay stop               # stop relay
+mcpr relay run relay.toml               # foreground (Ctrl-C to stop)
+mcpr relay run --background relay.toml  # background
+mcpr relay status                       # check status
+mcpr relay stop                         # stop relay
 ```
 
 Relay config does not need `mode = "relay"` when using `mcpr relay` commands.
 
 ### Query & Observe
 
-All `mcpr proxy` commands read the local SQLite store directly — they work even when the daemon isn't running. Pass the proxy name as a positional argument to scope to a specific proxy, or omit it to show data across all proxies.
+All `mcpr proxy` commands read the local SQLite store directly — no long-lived process is required. Pass the proxy name as a positional argument to scope to a specific proxy, or omit it to show data across all proxies.
 
 #### `mcpr proxy logs [name]`
 
@@ -496,7 +491,7 @@ The proxy name is used in all `mcpr proxy` commands to identify which proxy's da
 2. The config filename stem (e.g., `search.toml` → `search`)
 3. `"default"` if the config is `mcpr.toml` or unspecified
 
-Run `mcpr status` or `mcpr proxy list` to see proxy names.
+Run `mcpr proxy list` to see proxy names.
 
 ## Files
 
@@ -504,12 +499,10 @@ All state lives under `~/.mcpr/`. See [ARCHITECTURE.md](ARCHITECTURE.md) for ful
 
 | File | Purpose |
 |------|---------|
-| `~/.mcpr/mcprd.pid` | Daemon process tracking |
-| `~/.mcpr/mcprd.log` | Daemon stdout/stderr |
 | `~/.mcpr/store.db` | Request storage (SQLite) |
 | `~/.mcpr/proxies/{name}/config.toml` | Config snapshot (immutable after creation) |
-| `~/.mcpr/proxies/{name}/lock` | Proxy PID, port, timestamp, daemon PID |
-| `~/.mcpr/proxies/{name}/proxy.log` | Proxy stdout/stderr |
+| `~/.mcpr/proxies/{name}/lock` | Proxy PID, port, timestamp, config path |
+| `~/.mcpr/proxies/{name}/proxy.log` | Proxy stdout/stderr (only when run with `--background`) |
 | `~/.mcpr/relay/config.toml` | Relay config snapshot |
 | `~/.mcpr/relay/lock` | Relay PID, port, timestamp |
-| `~/.mcpr/relay/relay.log` | Relay stdout/stderr |
+| `~/.mcpr/relay/relay.log` | Relay stdout/stderr (only when run with `--background`) |

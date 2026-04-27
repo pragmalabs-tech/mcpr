@@ -295,13 +295,11 @@ curl -X POST https://auth.yourdomain.com/api/verify \
 Then test with the actual relay:
 
 ```bash
-# Start relay with auth
-mcpr start --foreground --relay --port 8081 --relay-domain tunnel.yourdomain.com \
-  --auth-provider https://auth.yourdomain.com \
-  --auth-provider-secret your-secret
+# Start relay with auth (config: relay.toml — see DEPLOY_RELAY_SERVER.md)
+mcpr relay run relay.toml
 
-# Connect client (should succeed)
-mcpr start --mcp http://localhost:9000 --relay-url https://tunnel.yourdomain.com
+# Connect client (mcpr.toml has tunnel.relay_url and tunnel.token set)
+mcpr proxy run mcpr.toml
 
 # Connect with bad token (should fail)
 # Set tunnel.token = "bad_token" in mcpr.toml

@@ -1,6 +1,6 @@
 # Docker
 
-mcpr publishes a multi-arch Linux image to GitHub Container Registry on every release. One image serves both the daemon and a proxy — if you bind-mount a config, the proxy starts automatically.
+mcpr publishes a multi-arch Linux image to GitHub Container Registry on every release. The container runs `mcpr proxy run <config>` as PID 1 — bind-mount your config and it serves traffic.
 
 ```
 ghcr.io/pragmalabs-tech/mcpr:latest       # latest release
@@ -28,19 +28,19 @@ docker run -d --name mcpr \
   ghcr.io/pragmalabs-tech/mcpr:latest
 ```
 
-The container starts the daemon, waits for it to become ready, then launches the proxy defined in your config. Traffic flows through `http://localhost:3000`.
+The container execs `mcpr proxy run` against your config — that process becomes PID 1. Traffic flows through `http://localhost:3000`.
 
 ## How the image works
 
-The entrypoint runs as PID 1 under `tini` for signal forwarding. Two startup paths:
+The entrypoint runs as PID 1 under `tini` for signal forwarding, then `exec`s the proxy. Two startup paths:
 
 | Invocation | Behavior |
 |---|---|
-| `docker run <image>` with a config at `/etc/mcpr/mcpr.toml` | Starts the daemon, waits for readiness, launches `mcpr proxy run` against that config. |
-| `docker run <image>` with no config | Starts the daemon only. Attach a proxy later via `docker exec <container> mcpr --config /path proxy run`. |
+| `docker run <image>` with a config at `/etc/mcpr/mcpr.toml` (or `MCPR_CONFIG`) | Execs `mcpr proxy run <config>` in the foreground. Container PID 1 IS the proxy. |
+| `docker run <image>` with no config | Exits 1 with a hint — set `MCPR_CONFIG` or bind-mount a config. |
 | `docker run <image> <subcommand>` (e.g. `version`, `validate -c /etc/mcpr/mcpr.toml`) | Runs `mcpr <subcommand>` directly and exits. |
 
-`mcpr proxy run` always daemonizes and requires the daemon to be up first. The entrypoint handles this so a single `docker run` command serves traffic.
+Because `mcpr proxy run` is foreground by default, `docker stop` translates to a SIGTERM straight to the proxy, which drains in-flight requests up to `runtime.drain_timeout` (default 30s) before exiting. There is no daemon any more — the container orchestrator owns the lifecycle.
 
 ## Ports
 
@@ -56,7 +56,7 @@ The admin port defaults to localhost. To expose it to Docker health probes from 
 | Path | Purpose |
 |---|---|
 | `/etc/mcpr/mcpr.toml` | Proxy config — bind-mount read-only |
-| `/var/lib/mcpr` | State directory — SQLite store, PID files, lockfiles, config snapshots, logs |
+| `/var/lib/mcpr` | State directory — SQLite store, lockfiles, config snapshots, logs |
 
 State resolves via the `HOME` environment variable, which the image sets to `/var/lib/mcpr`. mcpr writes everything under `/var/lib/mcpr/.mcpr/`. Declare a named volume or bind-mount to persist state across container restarts.
 
@@ -98,7 +98,7 @@ Kubernetes probes run against the pod IP, not `127.0.0.1`, so set `admin_bind = 
 
 ## Signals
 
-SIGTERM triggers a graceful drain. `tini` forwards the signal to the daemon, which stops all running proxies (draining in-flight requests up to `drain_timeout`, default 30 seconds) before exiting. `docker stop` and Kubernetes pod termination both work as expected.
+SIGTERM triggers a graceful drain. `tini` forwards the signal to the proxy (PID 1), which stops accepting new requests and finishes in-flight ones up to `runtime.drain_timeout` (default 30 seconds) before exiting. `docker stop` and Kubernetes pod termination both work as expected.
 
 ## Non-root
 
@@ -129,7 +129,7 @@ docker run --rm -v mcpr-state:/var/lib/mcpr \
 `docker exec` into a running container works the same way:
 
 ```bash
-docker exec mcpr mcpr status
+docker exec mcpr mcpr proxy list
 docker exec mcpr mcpr proxy logs --tail 20
 docker exec mcpr mcpr proxy status
 ```
@@ -176,4 +176,4 @@ Pin to `X.Y.Z` in production. `latest` is for evaluation.
 - **`mcpr proxy run` takes the config file as a positional argument.** Both inside and outside the container, the form is `mcpr proxy run /path/mcpr.toml`. Omit the path to default to `mcpr.toml` in the working directory.
 - **The default `admin_bind` is `127.0.0.1:9901`.** The built-in `HEALTHCHECK` works (it runs inside the container), but external probes need `admin_bind = "0.0.0.0:9901"`.
 - **State lives at `/var/lib/mcpr/.mcpr/`, not `/var/lib/mcpr/`.** The `.mcpr` subdirectory is appended by mcpr. The volume mount point is the parent, not the state directory itself.
-- **No `procps` in the image.** `docker exec ... ps` fails. Use `mcpr status` and `mcpr proxy list` for process information.
+- **No `procps` in the image.** `docker exec ... ps` fails. Use `mcpr proxy list` and `mcpr proxy status` for process information.

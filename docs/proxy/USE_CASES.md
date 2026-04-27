@@ -2,7 +2,7 @@
 
 Task-oriented recipes for the `mcpr proxy` commands. For full flag reference see [CLI.md](../CLI.md). For config syntax see [PROXY_CONFIGURATION.md](PROXY_CONFIGURATION.md).
 
-Every recipe assumes the daemon is running (`mcpr start`).
+Recipes use `mcpr proxy run --background` so the proxy is reachable by `start` / `stop` / `restart` / `reload` later. Drop `--background` to run in the foreground (recommended under systemd, Docker, or a Node parent process).
 
 ---
 
@@ -11,9 +11,9 @@ Every recipe assumes the daemon is running (`mcpr start`).
 Put an MCP server behind the proxy.
 
 ```bash
-mcpr proxy setup              # prompts for project + auth, writes mcpr.toml
-mcpr proxy run mcpr.toml      # snapshot config, daemonize, start serving
-mcpr proxy status             # confirm it's up
+mcpr proxy setup                          # prompts for project + auth, writes mcpr.toml
+mcpr proxy run --background mcpr.toml     # snapshot config, double-fork, start serving
+mcpr proxy status                         # confirm it's up
 ```
 
 `proxy run` writes a config snapshot under `~/.mcpr/proxies/<name>/`. Later commands (`start`, `restart`, `reload`) operate on that snapshot.

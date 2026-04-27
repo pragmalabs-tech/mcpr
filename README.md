@@ -203,7 +203,7 @@ Data flows one way: proxy → cloud, pushed via a project token from `mcpr proxy
 ## Reference
 
 - Configuration — [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) (upstream URL, port, tunnel, CSP, cloud sync, logging, limits)
-- CLI — [docs/CLI.md](docs/CLI.md) (daemon, proxies, relay, and SQLite queries)
+- CLI — [docs/CLI.md](docs/CLI.md) (proxies, relay, and SQLite queries)
 - Docker — [docs/DOCKER.md](docs/DOCKER.md) (volumes, health probes, compose/Kubernetes)
 
 ---

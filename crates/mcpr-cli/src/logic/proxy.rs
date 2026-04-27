@@ -271,7 +271,7 @@ mod tests {
         // Lock points at the current process so `check_lock` returns Held,
         // which lets us exercise the config-read path. Path is bogus → err.
         let name = "__test_reload_proxy_missing_cfg__";
-        proxy_lock::write_lock(name, 4242, "/tmp/x.toml", None).unwrap();
+        proxy_lock::write_lock(name, 4242, "/tmp/x.toml").unwrap();
 
         let result = reload_proxy(name, std::path::Path::new("/nonexistent/missing.toml"));
         let _ = std::fs::remove_dir_all(proxy_lock_dir(name));
@@ -390,7 +390,7 @@ mod tests {
     #[test]
     fn delete_proxy__running_proxy_errors_without_removing() {
         let name = "__test_delete_logic_running__";
-        proxy_lock::write_lock(name, 4242, "/tmp/x.toml", None).unwrap();
+        proxy_lock::write_lock(name, 4242, "/tmp/x.toml").unwrap();
         assert!(proxy_lock::proxy_dir_exists(name));
 
         let err = delete_proxy(name).unwrap_err();

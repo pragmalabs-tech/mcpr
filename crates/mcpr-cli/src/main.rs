@@ -50,10 +50,10 @@
 //! This binary just registers them via `EventManager`.
 
 mod admin;
+#[cfg(unix)]
+mod background;
 mod cmd;
 mod config;
-#[cfg(unix)]
-mod daemon;
 mod logic;
 
 mod proxy;
@@ -166,104 +166,35 @@ impl mcpr_tunnel::TunnelStatusCallback for TunnelStatusAdapter {
 /// Tokio's IO driver uses epoll/kqueue file descriptors that don't survive
 /// fork(). So we must fork first, then start the async runtime in the child.
 fn main() {
-    let mut action = config::load();
+    let action = config::load();
 
-    // Daemonize before tokio starts (if needed).
+    // Print the migration stub and exit before doing any setup. The daemon
+    // subcommands were removed; embedders should use `mcpr proxy run`
+    // (foreground) or `mcpr proxy run --background` for the previous
+    // double-fork behaviour.
+    if let CliAction::DeprecatedDaemonCmd(name) = &action {
+        eprintln!(
+            "error: `mcpr {name}` was removed. mcpr is a sidecar primitive — \
+             let your host process (systemd / Node / etc.) own the lifecycle."
+        );
+        eprintln!("  foreground (recommended): mcpr proxy run <config>");
+        eprintln!("  background (legacy):      mcpr proxy run --background <config>");
+        eprintln!("  inspect:                  mcpr proxy list  /  mcpr proxy status");
+        eprintln!("  stop a backgrounded one:  mcpr proxy stop <name>");
+        std::process::exit(2);
+    }
+
+    // Decide whether to double-fork before tokio starts.
     // Tokio's IO driver uses kqueue/epoll fds that don't survive fork().
     let ready_fd: Option<i32> = match &action {
-        CliAction::Start { foreground: true } => {
-            // Foreground mode — stop any existing daemon first.
-            #[cfg(unix)]
-            daemon::stop_daemon_if_running();
-            None
-        }
-        CliAction::Start { foreground: false } => {
-            #[cfg(unix)]
-            {
-                if daemon::ensure_not_running() {
-                    // Daemon already running — nothing to do.
-                    std::process::exit(0);
-                }
-                let fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
-                Some(fd)
-            }
-            #[cfg(not(unix))]
-            {
-                eprintln!("error: daemon mode is not supported on this platform");
-                eprintln!("  Use `mcpr start --foreground` or a service manager.");
-                std::process::exit(1);
-            }
-        }
-        CliAction::Restart { .. } => {
-            #[cfg(unix)]
-            {
-                // Collect names of currently running proxies so we can re-launch them
-                // after the daemon restarts.
-                let running_names: Vec<String> = proxy_lock::list_proxies()
-                    .into_iter()
-                    .filter(|(_, s)| matches!(s, proxy_lock::LockStatus::Held(_)))
-                    .map(|(name, _)| name)
-                    .collect();
-
-                // Check if relay was running.
-                let relay_was_running =
-                    matches!(relay_lock::check_lock(), relay_lock::LockStatus::Held(_));
-
-                // Stop all managed proxies.
-                let stopped = proxy_lock::stop_all_proxies();
-                if !stopped.is_empty() {
-                    eprintln!(
-                        "Stopped {} managed proxy(ies): {}",
-                        stopped.len(),
-                        stopped.join(", ")
-                    );
-                }
-
-                // Stop relay if running.
-                if relay_lock::stop_relay() {
-                    eprintln!("Stopped relay.");
-                }
-
-                // Pass the names to the child so it can re-launch after startup.
-                if let CliAction::Restart {
-                    restart_proxies,
-                    restart_relay,
-                    ..
-                } = &mut action
-                {
-                    *restart_proxies = running_names;
-                    *restart_relay = relay_was_running;
-                }
-
-                daemon::stop_daemon_if_running();
-                let fd = daemon::daemonize(Duration::from_secs(10)).unwrap_or_else(|e| {
-                    eprintln!("error: {e}");
-                    std::process::exit(1);
-                });
-                Some(fd)
-            }
-            #[cfg(not(unix))]
-            {
-                eprintln!("error: daemon management not supported on this platform");
-                std::process::exit(1);
-            }
-        }
         CliAction::ProxyRun {
             mode: Mode::Gateway(cfg),
             config_content,
             config_path: _,
+            background,
         } => {
             #[cfg(unix)]
             {
-                // Check that the daemon is running.
-                if !matches!(daemon::check_status(), daemon::DaemonStatus::Running(_)) {
-                    eprintln!("error: daemon not running — run `mcpr start` first");
-                    std::process::exit(1);
-                }
-
                 let proxy_name = &cfg.name;
 
                 // Conflict detection.
@@ -295,33 +226,35 @@ fn main() {
                     std::process::exit(1);
                 }
 
-                // Double-fork to background (reuse daemon pattern).
-                let fd = daemon::daemonize_proxy(proxy_name, Duration::from_secs(10))
-                    .unwrap_or_else(|e| {
-                        eprintln!("error: {e}");
-                        std::process::exit(1);
-                    });
-                Some(fd)
+                if *background {
+                    // Double-fork to background.
+                    let fd = background::daemonize_proxy(proxy_name, Duration::from_secs(10))
+                        .unwrap_or_else(|e| {
+                            eprintln!("error: {e}");
+                            std::process::exit(1);
+                        });
+                    Some(fd)
+                } else {
+                    // Foreground: parent process (terminal, systemd, Node) supervises directly.
+                    None
+                }
             }
             #[cfg(not(unix))]
             {
-                eprintln!("error: background proxy mode not supported on this platform");
-                std::process::exit(1);
+                if *background {
+                    eprintln!("error: --background not supported on this platform");
+                    std::process::exit(1);
+                }
+                None
             }
         }
         CliAction::RelayRun {
-            foreground: false,
+            background: true,
             config_content,
             ..
         } => {
             #[cfg(unix)]
             {
-                // Check that the daemon is running.
-                if !matches!(daemon::check_status(), daemon::DaemonStatus::Running(_)) {
-                    eprintln!("error: daemon not running — run `mcpr start` first");
-                    std::process::exit(1);
-                }
-
                 // Check for existing relay.
                 match relay_lock::check_lock() {
                     relay_lock::LockStatus::Free => {}
@@ -339,7 +272,7 @@ fn main() {
                 }
 
                 // Double-fork to background.
-                let fd = daemon::daemonize_relay(Duration::from_secs(10)).unwrap_or_else(|e| {
+                let fd = background::daemonize_relay(Duration::from_secs(10)).unwrap_or_else(|e| {
                     eprintln!("error: {e}");
                     std::process::exit(1);
                 });
@@ -347,12 +280,12 @@ fn main() {
             }
             #[cfg(not(unix))]
             {
-                eprintln!("error: background relay mode not supported on this platform");
+                eprintln!("error: --background not supported on this platform");
                 std::process::exit(1);
             }
         }
         CliAction::RelayRun {
-            foreground: true, ..
+            background: false, ..
         } => None,
         _ => None,
     };
@@ -378,76 +311,9 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
         .try_init();
 
     match action {
-        CliAction::Start { .. } => {
-            // Daemon supervisor — no config, no proxy. Already forked in main().
-            #[cfg(unix)]
-            daemon::run_supervisor(ready_fd).await;
-            #[cfg(not(unix))]
-            {
-                eprintln!("error: daemon mode not supported on this platform");
-                std::process::exit(1);
-            }
-        }
-        CliAction::Stop => {
-            // Stop all running proxies before stopping the daemon.
-            let stopped = proxy_lock::stop_all_proxies();
-            for name in &stopped {
-                eprintln!("Stopped proxy \"{}\".", name);
-            }
-            #[cfg(unix)]
-            daemon::stop_daemon();
-            #[cfg(not(unix))]
-            {
-                eprintln!("error: daemon management not supported on this platform");
-                std::process::exit(1);
-            }
-        }
-        CliAction::Restart {
-            restart_proxies,
-            restart_relay,
-        } => {
-            // Spawn a background task to re-launch previously running proxies
-            // and relay after the supervisor has had time to start up.
-            if !restart_proxies.is_empty() || restart_relay {
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    for name in &restart_proxies {
-                        match logic::proxy::start_proxy(name) {
-                            Ok(_) => eprintln!("Restarted proxy \"{}\".", name),
-                            Err(e) => eprintln!("Failed to restart proxy \"{}\": {}", name, e),
-                        }
-                    }
-                    if restart_relay {
-                        match logic::relay::start_relay_from_snapshot() {
-                            Ok(_) => eprintln!("Restarted relay."),
-                            Err(e) => eprintln!("Failed to restart relay: {}", e),
-                        }
-                    }
-                });
-            }
-            // Daemonize already happened in main() before tokio started.
-            #[cfg(unix)]
-            daemon::run_supervisor(ready_fd).await;
-            #[cfg(not(unix))]
-            {
-                eprintln!("error: daemon mode not supported on this platform");
-                std::process::exit(1);
-            }
-        }
-        CliAction::Status => {
-            #[cfg(unix)]
-            {
-                let status = logic::daemon::get_status();
-                let exit_code = render::daemon_status(status);
-                if exit_code != 0 {
-                    std::process::exit(exit_code);
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                eprintln!("error: daemon management not supported on this platform");
-                std::process::exit(1);
-            }
+        CliAction::DeprecatedDaemonCmd(_) => {
+            // Already handled in main() before tokio init — exit was called there.
+            unreachable!("DeprecatedDaemonCmd handled before async dispatch");
         }
         CliAction::Validate(args) => {
             let issues = config::validate_config(args.config.as_deref());
@@ -465,17 +331,14 @@ async fn async_main(action: CliAction, ready_fd: Option<i32>) {
                 .status();
             match status {
                 Ok(s) if s.success() => {
-                    // Auto-restart daemon and any running proxies using the
-                    // freshly-installed binary, so long-lived processes pick
-                    // up the new code without a manual stop/run dance.
+                    // Auto-restart any backgrounded proxies so long-lived
+                    // processes pick up the new code. Foreground proxies are
+                    // owned by their parent (systemd, Node, …) — that parent
+                    // is responsible for restarting them.
                     #[cfg(unix)]
                     {
                         let exe = std::env::current_exe().unwrap_or_else(|_| "mcpr".into());
-                        if matches!(daemon::check_status(), daemon::DaemonStatus::Running(_)) {
-                            eprintln!("Restarting daemon with updated binary...");
-                            let _ = std::process::Command::new(&exe).arg("restart").status();
-                        }
-                        eprintln!("Restarting running proxies with updated binary...");
+                        eprintln!("Restarting backgrounded proxies with updated binary...");
                         let _ = std::process::Command::new(&exe)
                             .args(["proxy", "restart", "--all"])
                             .status();
@@ -562,22 +425,16 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         .expect("Failed to bind");
     let actual_port = listener.local_addr().unwrap().port();
 
-    // Read daemon PID for the lockfile.
-    #[cfg(unix)]
-    let daemon_pid = daemon::read_pid_file().map(|i| i.pid);
-    #[cfg(not(unix))]
-    let daemon_pid: Option<u32> = None;
-
     // Write lockfile so status commands can find this process.
     #[cfg(unix)]
     {
-        if let Err(e) = proxy_lock::write_lock(&proxy_name, actual_port, &config_path, daemon_pid) {
+        if let Err(e) = proxy_lock::write_lock(&proxy_name, actual_port, &config_path) {
             eprintln!("error: failed to write lockfile: {e}");
             std::process::exit(1);
         }
         // Signal readiness to the parent process.
         if let Some(fd) = ready_fd {
-            daemon::signal_ready(fd);
+            background::signal_ready(fd);
         }
     }
 
@@ -881,23 +738,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, ready_fd: Option<i32>, config_pat
         });
     }
 
-    // Daemon watchdog: if the daemon dies, shut down this proxy.
-    if let Some(dpid) = daemon_pid {
-        let watchdog_shutdown = shutdown_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                #[cfg(unix)]
-                if !daemon::is_process_alive(dpid) {
-                    eprintln!("[mcpr] daemon died, shutting down...");
-                    IS_DRAINING.store(true, Ordering::SeqCst);
-                    let _ = watchdog_shutdown.send(true);
-                    break;
-                }
-            }
-        });
-    }
-
     // Wait for shutdown signal (SIGTERM/SIGINT).
     // TUI is not started here — it will be available via `mcpr proxy view`.
     let _ = shutdown_rx.changed().await;
@@ -1054,10 +894,6 @@ async fn run_relay_inner(
         });
     let actual_port = listener.local_addr().unwrap().port();
 
-    // Read daemon PID for watchdog.
-    #[cfg(unix)]
-    let daemon_pid = daemon::read_pid_file().map(|i| i.pid);
-
     // Write lockfile.
     #[cfg(unix)]
     if let Err(e) = relay_lock::write_lock(actual_port, &config_path) {
@@ -1068,7 +904,7 @@ async fn run_relay_inner(
     // Signal readiness to parent (if daemonized).
     #[cfg(unix)]
     if let Some(fd) = ready_fd {
-        daemon::signal_ready(fd);
+        background::signal_ready(fd);
     }
 
     eprintln!(
@@ -1115,22 +951,6 @@ async fn run_relay_inner(
             .await
             .expect("Relay server failed");
     });
-
-    // Daemon watchdog: if the daemon dies, shut down this relay.
-    #[cfg(unix)]
-    if let Some(dpid) = daemon_pid {
-        let watchdog_shutdown = shutdown_tx.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                if !daemon::is_process_alive(dpid) {
-                    eprintln!("[mcpr] daemon died, shutting down relay...");
-                    let _ = watchdog_shutdown.send(true);
-                    break;
-                }
-            }
-        });
-    }
 
     // Wait for shutdown signal.
     let _ = shutdown_rx.changed().await;

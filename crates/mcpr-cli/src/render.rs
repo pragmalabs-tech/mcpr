@@ -179,61 +179,6 @@ pub fn validate_issues(issues: &[(&str, String)]) {
     }
 }
 
-// ── Daemon status ─────────────────────────────────────────────────────
-
-/// Computed daemon status info for rendering.
-pub struct DaemonStatusInfo {
-    pub pid: u32,
-    pub hours: i64,
-    pub minutes: i64,
-    pub seconds: i64,
-    pub pid_file: std::path::PathBuf,
-    pub log_file: std::path::PathBuf,
-    pub running_proxies: Vec<(String, LockInfo)>,
-}
-
-/// Daemon is not running or has a stale PID file.
-pub enum DaemonStatusError {
-    Stale { pid: u32 },
-    NotRunning,
-}
-
-/// Render daemon status to stdout/stderr.  Returns the process exit code.
-pub fn daemon_status(result: Result<DaemonStatusInfo, DaemonStatusError>) -> i32 {
-    match result {
-        Ok(info) => {
-            println!(
-                "mcprd running (PID: {}, uptime: {}h {}m {}s)",
-                info.pid, info.hours, info.minutes, info.seconds
-            );
-            println!("  PID file: {}", info.pid_file.display());
-            println!("  Log file: {}", info.log_file.display());
-
-            if info.running_proxies.is_empty() {
-                println!("\n  0 proxies running.");
-                println!("  Use `mcpr proxy run <config>` to start a proxy.");
-            } else {
-                println!("\n  {} proxy(ies) running:", info.running_proxies.len());
-                for (name, lock) in &info.running_proxies {
-                    println!("    {} (PID: {}, port: {})", name, lock.pid, lock.port);
-                }
-                println!();
-                println!("  Use `mcpr proxy logs` to view request logs.");
-                println!("  Use `mcpr proxy status` to view metrics.");
-            }
-            0
-        }
-        Err(DaemonStatusError::Stale { pid }) => {
-            eprintln!("Daemon is not running (stale PID file for PID: {})", pid);
-            1
-        }
-        Err(DaemonStatusError::NotRunning) => {
-            eprintln!("No daemon is running.");
-            1
-        }
-    }
-}
-
 // ── Proxy lifecycle ───────────────────────────────────────────────────
 
 pub fn proxy_started(name: &str) {
@@ -1486,7 +1431,6 @@ mod tests {
                 port,
                 started_at: chrono::Utc::now().timestamp() - 120,
                 config_path: "/tmp/test.toml".to_string(),
-                daemon_pid: None,
             }),
         )
     }
@@ -1529,7 +1473,6 @@ mod tests {
             port: 1234,
             started_at: 0,
             config_path: "/x".into(),
-            daemon_pid: None,
         });
         assert_eq!(status_label(&stale), "stale");
     }

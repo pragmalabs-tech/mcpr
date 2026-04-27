@@ -321,17 +321,16 @@ Rules: one `*` per pattern, case-sensitive, no `?` or `**`.
 
 ### Using mcpr
 
-Run in foreground (useful for debugging, Docker, systemd):
+Run in foreground — your process supervisor (systemd, Docker, terminal) owns the PID:
 
 ```bash
 mcpr relay run relay.toml
 ```
 
-Run as a background process under the daemon:
+Run in the background (terminal use, multi-process box):
 
 ```bash
-mcpr start                    # start daemon
-mcpr relay start relay.toml   # start relay in background
+mcpr relay run --background relay.toml
 ```
 
 Other lifecycle commands:
@@ -347,12 +346,10 @@ mcpr relay restart             # stop + start from saved config
 Running a relay and proxy on the same machine:
 
 ```bash
-mcpr start                        # daemon
-mcpr proxy run gateway.toml       # MCP proxy
-mcpr relay start relay.toml       # relay server
+mcpr proxy run --background gateway.toml      # MCP proxy
+mcpr relay run --background relay.toml        # relay server
+mcpr proxy stop --all && mcpr relay stop      # tear down
 ```
-
-`mcpr stop` stops both. `mcpr restart` re-launches both. The relay exits automatically if the daemon dies.
 
 ### Using Docker
 
@@ -393,7 +390,7 @@ relay_url = "https://tunnel.yourdomain.com"
 Then run:
 
 ```bash
-mcpr start
+mcpr proxy run mcpr.toml
 # Should print: Tunnel: https://xxxxxx.tunnel.yourdomain.com
 ```
 
@@ -407,9 +404,8 @@ curl -s https://tunnel.yourdomain.com/_tunnel/register
 mcpr relay status
 
 # Full test: start a client proxy with tunnel enabled
-mcpr start
-mcpr proxy run mcpr.toml
-mcpr status
+mcpr proxy run --background mcpr.toml
+mcpr proxy list
 ```
 
 ## Troubleshooting
