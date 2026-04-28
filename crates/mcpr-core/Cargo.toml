@@ -8,6 +8,7 @@ description = "Core types, traits, protocol, and proxy engine for mcpr crates"
 
 [dev-dependencies]
 tempfile = "3"
+toml = "1.1"
 
 [dependencies]
 serde = { workspace = true }
@@ -23,5 +24,17 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 strum = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }
 # Lock-free reads for `ProxyState.rewrite_config` — hot path.
 arc-swap = "1"
+
+# Direct upstream forwarding (proxy2). Hyper 1.x client stack:
+# `hyper` is the protocol; `hyper-util` provides the pooled `Client`;
+# `hyper-rustls` adds HTTPS; `http-body-util` gives Empty/Full/BodyExt.
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+hyper-rustls = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }

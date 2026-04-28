@@ -4,8 +4,8 @@
 //! capture primitives, session lifecycle, and the proxy's top-level
 //! `Request` / `Result` taxonomy. The taxonomy is what the proxy accepts
 //! at intake (axum) and what it observes coming back from upstream
-//! (reqwest); MCP traffic gets parsed into JSON-RPC, everything else
-//! stays as raw HTTP.
+//! (hyper-util's pooled HTTP/2 client); MCP traffic gets parsed into
+//! JSON-RPC, everything else stays as raw HTTP.
 //!
 //! ## Module layout
 //!
@@ -22,7 +22,9 @@ pub mod mcp;
 pub mod schema;
 pub mod session;
 
+use axum::body::Bytes;
 use axum::http::header::CONTENT_TYPE;
+use http_body_util::BodyExt;
 
 /// Inbound traffic accepted by the proxy: a single MCP request, a
 /// JSON-RPC batch (array on the wire), or raw HTTP.
@@ -64,23 +66,32 @@ impl Request {
 /// Outcome of an upstream call: a single JSON-RPC result, a batch (array
 /// on the wire, paired 1:1 with `Request::McpBatch`), or a raw HTTP
 /// response.
-pub enum Result {
+pub enum Response {
     Mcp(mcp::JsonRpcResult),
     McpBatch(Vec<mcp::JsonRpcResult>),
     Http(http_request::Result),
 }
 
-impl Result {
-    /// Buffer the reqwest response once, then classify: a JSON body that
+impl Response {
+    /// Buffer the hyper response once, then classify: a JSON body that
     /// parses as JSON-RPC becomes `Mcp` (object) or `McpBatch` (array);
-    /// anything else is preserved as `Http`.
-    pub async fn from_reqwest(resp: reqwest::Response) -> std::result::Result<Self, ParseError> {
-        let status = resp.status();
-        let version = resp.version();
-        let headers = resp.headers().clone();
-        let bytes = resp.bytes().await.map_err(ParseError::ReadUpstream)?;
+    /// anything else is preserved as `Http`. Generic over the body type
+    /// so it accepts `hyper::body::Incoming` from the production
+    /// `hyper-util` pool and `Full<Bytes>` (or any `Body<Data = Bytes>`)
+    /// from tests.
+    pub async fn from_hyper<B>(resp: hyper::Response<B>) -> std::result::Result<Self, ParseError>
+    where
+        B: hyper::body::Body<Data = Bytes>,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
+        let (parts, body) = resp.into_parts();
+        let bytes = body
+            .collect()
+            .await
+            .map_err(|e| ParseError::ReadUpstream(Box::new(e)))?
+            .to_bytes();
 
-        if is_json(headers.get(CONTENT_TYPE)) {
+        if is_json(parts.headers.get(CONTENT_TYPE)) {
             match json_shape(&bytes) {
                 JsonShape::Array => {
                     if let Ok(batch) = serde_json::from_slice::<Vec<mcp::JsonRpcResult>>(&bytes) {
@@ -95,11 +106,7 @@ impl Result {
                 JsonShape::Other => {}
             }
         }
-        let mut http_resp = axum::http::Response::new(bytes);
-        *http_resp.status_mut() = status;
-        *http_resp.version_mut() = version;
-        *http_resp.headers_mut() = headers;
-        Ok(Self::Http(http_resp))
+        Ok(Self::Http(axum::http::Response::from_parts(parts, bytes)))
     }
 }
 
@@ -127,7 +134,7 @@ fn json_shape(bytes: &[u8]) -> JsonShape {
 #[derive(Debug)]
 pub enum ParseError {
     ReadBody(axum::Error),
-    ReadUpstream(reqwest::Error),
+    ReadUpstream(Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl std::fmt::Display for ParseError {
@@ -146,7 +153,7 @@ impl std::error::Error for ParseError {}
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{HeaderValue, Request as HttpReq, Response as HttpResp, StatusCode};
+    use axum::http::{HeaderValue, Request as HttpReq, StatusCode};
 
     const RPC_REQUEST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
     const RPC_BATCH_REQUEST: &str = r#"[
@@ -166,13 +173,18 @@ mod tests {
             .unwrap()
     }
 
-    fn reqwest_resp(status: u16, content_type: &str, body: &str) -> reqwest::Response {
-        let resp = HttpResp::builder()
+    fn hyper_resp(
+        status: u16,
+        content_type: &str,
+        body: &str,
+    ) -> hyper::Response<http_body_util::Full<axum::body::Bytes>> {
+        hyper::Response::builder()
             .status(status)
             .header("content-type", content_type)
-            .body(body.as_bytes().to_vec())
-            .unwrap();
-        reqwest::Response::from(resp)
+            .body(http_body_util::Full::new(
+                axum::body::Bytes::copy_from_slice(body.as_bytes()),
+            ))
+            .unwrap()
     }
 
     // ── is_json ───────────────────────────────────────────────
@@ -298,54 +310,54 @@ mod tests {
         assert_eq!(http_req.body().as_ref(), b"payload");
     }
 
-    // ── Result::from_reqwest ──────────────────────────────────
+    // ── Response::from_hyper ──────────────────────────────────
 
     #[tokio::test]
-    async fn result_from_reqwest__single_jsonrpc_returns_mcp() {
-        let resp = reqwest_resp(200, "application/json", RPC_RESULT);
-        let parsed = Result::from_reqwest(resp).await.unwrap();
+    async fn response_from_hyper__single_jsonrpc_returns_mcp() {
+        let resp = hyper_resp(200, "application/json", RPC_RESULT);
+        let parsed = Response::from_hyper(resp).await.unwrap();
         assert!(matches!(
             parsed,
-            Result::Mcp(mcp::JsonRpcResult::Response(_))
+            Response::Mcp(mcp::JsonRpcResult::Response(_))
         ));
     }
 
     #[tokio::test]
-    async fn result_from_reqwest__jsonrpc_array_returns_mcp_batch() {
-        let resp = reqwest_resp(200, "application/json", RPC_BATCH_RESULT);
-        let parsed = Result::from_reqwest(resp).await.unwrap();
-        let Result::McpBatch(items) = parsed else {
+    async fn response_from_hyper__jsonrpc_array_returns_mcp_batch() {
+        let resp = hyper_resp(200, "application/json", RPC_BATCH_RESULT);
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        let Response::McpBatch(items) = parsed else {
             panic!("expected McpBatch");
         };
         assert_eq!(items.len(), 2);
     }
 
     #[tokio::test]
-    async fn result_from_reqwest__non_json_content_type_falls_back_to_http() {
-        let resp = reqwest_resp(200, "text/html", "<html></html>");
-        let parsed = Result::from_reqwest(resp).await.unwrap();
-        assert!(matches!(parsed, Result::Http(_)));
+    async fn response_from_hyper__non_json_content_type_falls_back_to_http() {
+        let resp = hyper_resp(200, "text/html", "<html></html>");
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        assert!(matches!(parsed, Response::Http(_)));
     }
 
     #[tokio::test]
-    async fn result_from_reqwest__sse_content_type_falls_back_to_http() {
-        let resp = reqwest_resp(200, "text/event-stream", "data: hi\n\n");
-        let parsed = Result::from_reqwest(resp).await.unwrap();
-        assert!(matches!(parsed, Result::Http(_)));
+    async fn response_from_hyper__sse_content_type_falls_back_to_http() {
+        let resp = hyper_resp(200, "text/event-stream", "data: hi\n\n");
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        assert!(matches!(parsed, Response::Http(_)));
     }
 
     #[tokio::test]
-    async fn result_from_reqwest__http_preserves_status_and_headers() {
-        let resp = HttpResp::builder()
+    async fn response_from_hyper__http_preserves_status_and_headers() {
+        let resp = hyper::Response::builder()
             .status(418)
             .header("content-type", "text/plain")
             .header("x-server", "teapot")
-            .body(b"short and stout".to_vec())
+            .body(http_body_util::Full::new(axum::body::Bytes::from_static(
+                b"short and stout",
+            )))
             .unwrap();
-        let parsed = Result::from_reqwest(reqwest::Response::from(resp))
-            .await
-            .unwrap();
-        let Result::Http(http_resp) = parsed else {
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        let Response::Http(http_resp) = parsed else {
             panic!("expected Http");
         };
         assert_eq!(http_resp.status(), StatusCode::IM_A_TEAPOT);

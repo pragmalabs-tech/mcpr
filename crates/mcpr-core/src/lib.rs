@@ -18,4 +18,9 @@ pub mod config;
 pub mod event;
 pub mod protocol;
 // pub mod proxy; // disabled — references the old JsonRpcRequest shape; refactor pending
-pub mod time;
+// CSP primitives are pure types (only `serde`); re-exposed for the proxy2 rewrite
+// while the rest of `proxy` is on hold.
+#[path = "proxy/csp.rs"]
+pub mod csp;
+pub mod proxy2;
+pub mod utils;
