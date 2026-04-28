@@ -1055,35 +1055,6 @@ fn resolve_proxy_name(
         .collect()
 }
 
-/// Parse a config file into a `GatewayConfig` without terminating the process
-/// on error. Used by the live-reload path, which must keep the proxy running
-/// when the new config is malformed.
-pub fn load_gateway_from_path(path: &std::path::Path) -> Result<GatewayConfig, String> {
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-    let file: FileConfig = toml::from_str(&contents)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
-    if file.is_relay() {
-        return Err("cannot reload a gateway proxy with a relay config".to_string());
-    }
-    let runtime = RuntimeOptions {
-        drain_timeout: file.drain_timeout.unwrap_or(30),
-        log_format: file
-            .log_format
-            .as_deref()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(LogFormat::Json),
-        admin_bind: file
-            .admin_bind
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1:9901".to_string()),
-    };
-    match load_gateway(file, Some(path.to_path_buf()), runtime) {
-        Mode::Gateway(cfg) => Ok(*cfg),
-        Mode::Relay(_) => Err("expected gateway config, got relay".to_string()),
-    }
-}
-
 fn load_gateway(
     file: FileConfig,
     config_path: Option<std::path::PathBuf>,
@@ -1125,36 +1096,6 @@ fn load_gateway(
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-
-    // ── reload_unsafe_changes ───────────────────────────────────
-
-    fn gateway_config() -> GatewayConfig {
-        GatewayConfig {
-            name: "test".into(),
-            mcp: Some("http://localhost:9000".into()),
-            port: Some(3000),
-            csp: mcpr_core::csp::CspConfig::default(),
-            relay_url: Some("https://tunnel.mcpr.app".into()),
-            tunnel_token: None,
-            tunnel_subdomain: None,
-            tunnel: false,
-            max_request_body_size: None,
-            max_response_body_size: None,
-            max_concurrent_upstream: None,
-            connect_timeout: None,
-            request_timeout: None,
-            cloud_token: None,
-            cloud_server: None,
-            cloud_endpoint: None,
-            cloud_batch_size: None,
-            cloud_flush_interval_ms: None,
-            runtime: RuntimeOptions {
-                drain_timeout: 30,
-                log_format: LogFormat::Json,
-                admin_bind: "127.0.0.1:9901".into(),
-            },
-        }
-    }
 
     #[test]
     fn file_config__max_request_body_size() {

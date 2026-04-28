@@ -185,10 +185,54 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         std::process::exit(1);
     }
 
+    let public_url = if cfg.tunnel {
+        let relay_url = cfg
+            .relay_url
+            .as_deref()
+            .unwrap_or("https://tunnel.mcpr.app");
+
+        let token = match cfg.tunnel_token.as_deref() {
+            Some(t) => t,
+            None => {
+                eprintln!(
+                    "  {}: tunnel.enabled = true but no tunnel.token configured. \
+                     Register at https://mcpr.app to get one, then set tunnel.token in mcpr.toml.",
+                    colored::Colorize::red("error"),
+                );
+                std::process::exit(1);
+            }
+        };
+
+        match mcpr_tunnel::start_tunnel_client(
+            actual_port,
+            relay_url,
+            token,
+            cfg.tunnel_subdomain.as_deref(),
+            StderrTunnelStatus,
+        )
+        .await
+        {
+            Ok(url) => Some(url),
+            Err(e) => {
+                eprintln!(
+                    "  {}: failed to connect to relay: {e}",
+                    colored::Colorize::red("error"),
+                );
+                eprintln!("  hint: set tunnel.enabled = false in mcpr.toml to use proxy-only mode");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     eprintln!(
         "  {} mcpr proxy running on http://localhost:{actual_port} -> {mcp}",
         colored::Colorize::green("ready"),
     );
+    if let Some(url) = public_url.as_deref() {
+        eprintln!("  {} public URL: {url}", colored::Colorize::green("tunnel"),);
+    }
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -298,4 +342,18 @@ async fn run_relay_inner(cfg: mcpr_tunnel::RelayConfig, config_path: String) {
     relay_lock::remove_lock();
 
     eprintln!("[mcpr] Relay shutdown complete.");
+}
+
+struct StderrTunnelStatus;
+
+impl mcpr_tunnel::TunnelStatusCallback for StderrTunnelStatus {
+    fn on_connected(&self, url: &str) {
+        eprintln!("[mcpr] tunnel connected: {url}");
+    }
+    fn on_disconnected(&self) {
+        eprintln!("[mcpr] tunnel disconnected");
+    }
+    fn on_evicted(&self) {
+        eprintln!("[mcpr] tunnel evicted by relay");
+    }
 }
