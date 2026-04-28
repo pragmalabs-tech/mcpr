@@ -94,10 +94,6 @@ mod tests {
             }
             .into_swap(),
             sessions: mcpr_core::protocol::session::MemorySessionStore::new(),
-            schema_manager: Arc::new(mcpr_core::protocol::schema_manager::SchemaManager::new(
-                "test",
-                mcpr_core::protocol::schema_manager::MemorySchemaStore::new(),
-            )),
             health: mcpr_core::proxy::new_shared_health(),
             event_bus: mcpr_core::event::EventManager::new().start().bus,
         });

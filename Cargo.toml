@@ -35,6 +35,8 @@ tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["cors", "timeout", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+strum = { version = "0.28", features = ["derive"] }
+
 mcpr-core = { path = "crates/mcpr-core", version = "0.4.70" }
 mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.4.70" }
 mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.4.70" }

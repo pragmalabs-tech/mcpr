@@ -8,7 +8,6 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 
 use crate::event::EventBus;
-use crate::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
 use crate::protocol::session::MemorySessionStore;
 
 use super::RewriteConfig;
@@ -37,7 +36,6 @@ pub struct ProxyState {
 
     // ── runtime tracking ──
     pub sessions: MemorySessionStore,
-    pub schema_manager: Arc<SchemaManager<MemorySchemaStore>>,
 
     // ── per-proxy health display + tunnel callbacks ──
     pub health: SharedProxyHealth,

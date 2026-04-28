@@ -23,5 +23,4 @@
 pub mod jsonrpc;
 pub mod mcp;
 pub mod schema;
-pub mod schema_manager;
 pub mod session;

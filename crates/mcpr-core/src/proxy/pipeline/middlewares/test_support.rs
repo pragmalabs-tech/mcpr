@@ -13,7 +13,6 @@ use serde_json::Value;
 use crate::event::{EventBusHandle, EventManager, EventSink, ProxyEvent};
 use crate::protocol::jsonrpc::JsonRpcEnvelope;
 use crate::protocol::mcp::{ClientKind, ClientMethod, McpMessage, MessageKind};
-use crate::protocol::schema_manager::{MemorySchemaStore, SchemaManager};
 use crate::protocol::session::MemorySessionStore;
 use crate::proxy::forwarding::UpstreamClient;
 use crate::proxy::pipeline::stubs::SessionId;
@@ -67,10 +66,6 @@ pub(crate) fn test_proxy_state() -> Arc<ProxyState> {
         }
         .into_swap(),
         sessions: MemorySessionStore::new(),
-        schema_manager: Arc::new(SchemaManager::new(
-            "middleware-test",
-            MemorySchemaStore::new(),
-        )),
         health: new_shared_health(),
         event_bus: handle.bus.clone(),
     })
@@ -102,10 +97,6 @@ pub(crate) fn test_proxy_with_sink() -> (Arc<ProxyState>, CapturingSink, EventBu
         }
         .into_swap(),
         sessions: MemorySessionStore::new(),
-        schema_manager: Arc::new(SchemaManager::new(
-            "middleware-test",
-            MemorySchemaStore::new(),
-        )),
         health: new_shared_health(),
         event_bus: handle.bus.clone(),
     });
@@ -153,10 +144,6 @@ pub(crate) fn test_proxy_state_upstream(url: impl Into<String>) -> Arc<ProxyStat
         }
         .into_swap(),
         sessions: MemorySessionStore::new(),
-        schema_manager: Arc::new(SchemaManager::new(
-            "middleware-test",
-            MemorySchemaStore::new(),
-        )),
         health: new_shared_health(),
         event_bus: handle.bus.clone(),
     })
