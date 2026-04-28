@@ -34,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "anstream"
-version = "0.6.21"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a"
+checksum = "824a212faf96e9acacdbd09febd34438f8f711fb84e09a8916013cd7815ca28d"
 dependencies = [
  "anstyle",
  "anstyle-parse",
@@ -55,9 +55,9 @@ checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
 
 [[package]]
 name = "anstyle-parse"
-version = "0.2.7"
+version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e7644824f0aa2c7b9384579234ef10eb7efb6a0deb83f9630a49594dd9c15c2"
+checksum = "52ce7f38b242319f7cabaa6813055467063ecdc9d355bbb4ce0c68908cd8130e"
 dependencies = [
  "utf8parse",
 ]
@@ -132,9 +132,9 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 
 [[package]]
 name = "axum"
-version = "0.8.8"
+version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b52af3cb4058c895d37317bb27508dccc8e5f2d39454016b297bf4a400597b8"
+checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "base64",
@@ -159,7 +159,7 @@ dependencies = [
  "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.28.0",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -271,9 +271,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.5.60"
+version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2797f34da339ce31042b27d23607e051786132987f595b02ba4f6a6dffb7030a"
+checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -281,9 +281,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.5.60"
+version = "4.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "24a241312cea5059b13574bb9b3861cabf758b879c15190b37b6d6fd63ab6876"
+checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
 dependencies = [
  "anstream",
  "anstyle",
@@ -293,9 +293,9 @@ dependencies = [
 
 [[package]]
 name = "clap_derive"
-version = "4.5.55"
+version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a92793da1a46a5f2a02a6f4c46c6496b28c43638adea8306fcb0caa1634f24e5"
+checksum = "f2ce8604710f6733aa641a2b3731eaa1e8b3d9973d5e3565da11800813f997a9"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -1148,12 +1148,11 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 
 [[package]]
 name = "libmimalloc-sys"
-version = "0.1.44"
+version = "0.1.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "667f4fec20f29dfc6bc7357c582d91796c169ad7e2fce709468aefeb2c099870"
+checksum = "2d1eacfa31c33ec25e873c136ba5669f00f9866d0688bea7be4d3f7e43067df6"
 dependencies = [
  "cc",
- "libc",
 ]
 
 [[package]]
@@ -1298,7 +1297,7 @@ dependencies = [
  "tabled",
  "tempfile",
  "tokio",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite",
  "toml",
  "tower",
  "tower-http",
@@ -1323,7 +1322,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
- "tokio-tungstenite 0.29.0",
+ "tokio-tungstenite",
  "uuid",
 ]
 
@@ -1335,9 +1334,9 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "mimalloc"
-version = "0.1.48"
+version = "0.1.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1ee66a4b64c74f4ef288bcbb9192ad9c3feaad75193129ac8509af543894fd8"
+checksum = "b3627c4272df786b9260cabaa46aec1d59c93ede723d4c3ef646c503816b0640"
 dependencies = [
  "libmimalloc-sys",
 ]
@@ -2219,18 +2218,6 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.28.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
@@ -2241,7 +2228,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite 0.29.0",
+ "tungstenite",
  "webpki-roots 0.26.11",
 ]
 
@@ -2416,23 +2403,6 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand",
- "sha1",
- "thiserror",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
@@ -2498,12 +2468,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "utf-8"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
-
-[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2517,9 +2481,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.22.0"
+version = "1.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a68d3c8f01c0cfa54a75291d83601161799e4a89a39e0929f4b0354d88757a37"
+checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
