@@ -13,6 +13,7 @@ use crate::{
     },
 };
 
+pub mod log_stage;
 pub mod router_stage;
 pub mod types;
 
@@ -133,12 +134,22 @@ mod tests {
     }
 
     fn mcp_request() -> Request {
-        Request::Mcp(JsonRpcRequest {
-            jsonrpc: JsonRpcVersion,
-            id: RequestId::Number(1),
-            method: ClientMethod::Tools(ToolsMethod::List),
-            params: None,
-        })
+        let parts = axum::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        Request::Mcp(
+            parts,
+            JsonRpcRequest {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                method: ClientMethod::Tools(ToolsMethod::List),
+                params: None,
+            },
+        )
     }
 
     /// Spawn an upstream that always returns a JSON-RPC `Response` echoing the id.
@@ -173,7 +184,7 @@ mod tests {
         );
 
         let resp = pipeline.process(mcp_request()).await.unwrap();
-        assert!(matches!(resp, Response::Mcp(JsonRpcResult::Response(_))));
+        assert!(matches!(resp, Response::Mcp(_, JsonRpcResult::Response(_))));
     }
 
     #[tokio::test]

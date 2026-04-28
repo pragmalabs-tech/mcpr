@@ -75,12 +75,22 @@ mod tests {
     }
 
     fn test_request() -> ProxyEvent {
-        ProxyEvent::Request(Box::new(Request::Mcp(JsonRpcRequest {
-            jsonrpc: JsonRpcVersion,
-            id: RequestId::Number(1),
-            method: ClientMethod::Tools(ToolsMethod::List),
-            params: None,
-        })))
+        let parts = axum::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        ProxyEvent::Request(Box::new(Request::Mcp(
+            parts,
+            JsonRpcRequest {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                method: ClientMethod::Tools(ToolsMethod::List),
+                params: None,
+            },
+        )))
     }
 
     fn start_with(sinks: Vec<Box<dyn EventSink>>) -> EventBusHandle {

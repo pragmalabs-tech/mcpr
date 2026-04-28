@@ -47,8 +47,8 @@ impl EventSink for StderrSink {
 fn format_json(event: &ProxyEvent) -> String {
     let value = match event {
         ProxyEvent::Request(req) => match req.as_ref() {
-            Request::Mcp(rpc) => json!({"type": "request", "kind": "mcp", "rpc": rpc}),
-            Request::McpBatch(rpcs) => {
+            Request::Mcp(_, rpc) => json!({"type": "request", "kind": "mcp", "rpc": rpc}),
+            Request::McpBatch(_, rpcs) => {
                 json!({"type": "request", "kind": "mcp_batch", "rpcs": rpcs})
             }
             Request::Http(http) => json!({
@@ -60,8 +60,10 @@ fn format_json(event: &ProxyEvent) -> String {
             }),
         },
         ProxyEvent::Response(resp) => match resp.as_ref() {
-            Response::Mcp(result) => json!({"type": "response", "kind": "mcp", "result": result}),
-            Response::McpBatch(rs) => {
+            Response::Mcp(_, result) => {
+                json!({"type": "response", "kind": "mcp", "result": result})
+            }
+            Response::McpBatch(_, rs) => {
                 json!({"type": "response", "kind": "mcp_batch", "results": rs})
             }
             Response::Http(http) => json!({
@@ -99,33 +101,52 @@ mod tests {
 
     // ── Helpers ──────────────────────────────────────────────────
 
+    fn empty_request_parts() -> http::request::Parts {
+        HttpReq::builder()
+            .method("POST")
+            .uri("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0
+    }
+
+    fn empty_response_parts() -> http::response::Parts {
+        HttpResp::builder().body(()).unwrap().into_parts().0
+    }
+
     fn mcp_request(method: ClientMethod, params: Option<Map<String, Value>>) -> ProxyEvent {
-        ProxyEvent::Request(Box::new(Request::Mcp(JsonRpcRequest {
-            jsonrpc: JsonRpcVersion,
-            id: RequestId::Number(1),
-            method,
-            params,
-        })))
+        ProxyEvent::Request(Box::new(Request::Mcp(
+            empty_request_parts(),
+            JsonRpcRequest {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                method,
+                params,
+            },
+        )))
     }
 
     fn mcp_response_ok() -> ProxyEvent {
-        ProxyEvent::Response(Box::new(Response::Mcp(JsonRpcResult::Response(
-            JsonRpcResponse {
+        ProxyEvent::Response(Box::new(Response::Mcp(
+            empty_response_parts(),
+            JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
                 id: RequestId::Number(1),
                 result: Some(json!({"tools": []})),
-            },
-        ))))
+            }),
+        )))
     }
 
     fn mcp_response_error(code: i32, message: &str) -> ProxyEvent {
-        ProxyEvent::Response(Box::new(Response::Mcp(JsonRpcResult::Error(
-            JsonRpcError {
+        ProxyEvent::Response(Box::new(Response::Mcp(
+            empty_response_parts(),
+            JsonRpcResult::Error(JsonRpcError {
                 code,
                 message: message.into(),
                 data: None,
-            },
-        ))))
+            }),
+        )))
     }
 
     fn http_request(method: &str, path: &str, body: &[u8]) -> ProxyEvent {
@@ -194,7 +215,10 @@ mod tests {
                 params: None,
             },
         ];
-        let v = render(&ProxyEvent::Request(Box::new(Request::McpBatch(rpcs))));
+        let v = render(&ProxyEvent::Request(Box::new(Request::McpBatch(
+            empty_request_parts(),
+            rpcs,
+        ))));
         assert_eq!(v["kind"], "mcp_batch");
         assert_eq!(v["rpcs"].as_array().unwrap().len(), 2);
         assert_eq!(v["rpcs"][1]["id"], 2);

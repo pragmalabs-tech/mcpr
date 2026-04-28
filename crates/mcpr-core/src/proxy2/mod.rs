@@ -11,10 +11,17 @@ use axum::{
     response::{IntoResponse, Response as AxumResponse},
     routing::any,
 };
+use http::{Method, header::CONTENT_TYPE};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::proxy2::{
     proxy_config::ProxyConfig,
-    stage::{StagePipeline, router_stage::RouterStage},
+    stage::{
+        StagePipeline,
+        log_stage::{RequestLogStage, ResponseLogStage},
+        router_stage::RouterStage,
+        types::{RequestStage, ResponseStage},
+    },
     state::InnerProxyState,
 };
 use crate::{
@@ -26,17 +33,28 @@ use crate::{
 /// pre/post stages yet — every request flows: axum → `Request::from_axum`
 /// → `StagePipeline::process` → axum response.
 pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<Router> {
+    let cors = CorsLayer::new()
+        // Allow `GET` and `POST` methods
+        .allow_methods([Method::GET, Method::POST])
+        // Allow all origins (for development)
+        .allow_origin(Any)
+        .allow_headers([CONTENT_TYPE]);
+
     let router_stage = RouterStage::new(cfg)?;
+    let request_stages: Vec<Box<dyn RequestStage>> = vec![Box::new(RequestLogStage)];
+    let response_stages: Vec<Box<dyn ResponseStage>> = vec![Box::new(ResponseLogStage)];
+
     let pipeline = Arc::new(StagePipeline::new(
-        vec![],
-        vec![],
+        request_stages,
+        response_stages,
         router_stage,
         Arc::new(InnerProxyState::new(event_bus)),
     ));
 
     Ok(Router::new()
         .fallback(any(handle_request))
-        .with_state(pipeline))
+        .with_state(pipeline)
+        .layer(cors))
 }
 
 async fn handle_request(
@@ -61,11 +79,34 @@ async fn handle_request(
 
 fn to_axum_response(resp: Response) -> AxumResponse {
     match resp {
-        Response::Mcp(result) => axum::Json(result).into_response(),
-        Response::McpBatch(results) => axum::Json(results).into_response(),
+        Response::Mcp(parts, result) => mcp_axum_response(parts, axum::Json(result)),
+        Response::McpBatch(parts, results) => mcp_axum_response(parts, axum::Json(results)),
         Response::Http(http) => {
             let (parts, bytes) = http.into_parts();
             AxumResponse::from_parts(parts, axum::body::Body::from(bytes))
         }
     }
+}
+
+/// Build an axum response that re-uses the upstream `parts` (status + headers)
+/// but replaces the body with our re-serialized JSON. We strip headers the
+/// HTTP layer recalculates (`content-length`) and force `content-type` so the
+/// body byte count and media type match what we actually wrote.
+fn mcp_axum_response<B: IntoResponse>(
+    mut parts: axum::http::response::Parts,
+    body: B,
+) -> AxumResponse {
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.remove(axum::http::header::TRANSFER_ENCODING);
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let mut resp = body.into_response();
+    *resp.status_mut() = parts.status;
+    let resp_headers = resp.headers_mut();
+    for (name, value) in parts.headers.iter() {
+        resp_headers.insert(name, value.clone());
+    }
+    resp
 }

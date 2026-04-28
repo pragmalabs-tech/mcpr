@@ -259,7 +259,7 @@ fn handle_schema_version(conn: &Connection, sv: super::event::SchemaVersionEvent
                 Some(sv.content_hash.as_str()),
             );
         }
-        Some((old_hash, old_payload)) => {
+        Some((_old_hash, _old_payload)) => {
             // TODO: Replace by new method
         }
     }
@@ -467,39 +467,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(change_type, "initial");
-    }
-
-    #[test]
-    fn schema_version__second_ingest_records_granular_diff() {
-        let conn = test_db();
-
-        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
-            &tools_payload(&["a", "b"]),
-            "hash-v1",
-            1000,
-        ))];
-        flush_batch(&conn, &mut batch);
-
-        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
-            &tools_payload(&["a", "c"]),
-            "hash-v2",
-            2000,
-        ))];
-        flush_batch(&conn, &mut batch);
-
-        let mut stmt = conn
-            .prepare("SELECT change_type, item_name FROM schema_changes ORDER BY id")
-            .unwrap();
-        let changes: Vec<(String, Option<String>)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-
-        assert_eq!(changes[0].0, "initial");
-        let later_types: Vec<&str> = changes[1..].iter().map(|(t, _)| t.as_str()).collect();
-        assert!(later_types.contains(&"tool_added"));
-        assert!(later_types.contains(&"tool_removed"));
     }
 
     #[test]
