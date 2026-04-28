@@ -28,6 +28,7 @@ use http_body_util::BodyExt;
 
 /// Inbound traffic accepted by the proxy: a single MCP request, a
 /// JSON-RPC batch (array on the wire), or raw HTTP.
+#[derive(Clone)]
 pub enum Request {
     Mcp(mcp::JsonRpcRequest),
     McpBatch(Vec<mcp::JsonRpcRequest>),
@@ -66,6 +67,7 @@ impl Request {
 /// Outcome of an upstream call: a single JSON-RPC result, a batch (array
 /// on the wire, paired 1:1 with `Request::McpBatch`), or a raw HTTP
 /// response.
+#[derive(Clone)]
 pub enum Response {
     Mcp(mcp::JsonRpcResult),
     McpBatch(Vec<mcp::JsonRpcResult>),

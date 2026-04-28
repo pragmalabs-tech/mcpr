@@ -29,15 +29,17 @@ pub mod types;
 pub use bus::{EventBus, EventBusHandle};
 pub use manager::EventManager;
 pub use sink::{EventSink, NoopSink};
-pub use types::{
-    HeartbeatEvent, ProxyEvent, RequestEvent, SchemaVersionCreatedEvent, SessionEndEvent,
-    SessionStartEvent,
-};
+pub use types::ProxyEvent;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    use crate::protocol::Request;
+    use crate::protocol::mcp::{
+        ClientMethod, JsonRpcRequest, JsonRpcVersion, RequestId, ToolsMethod,
+    };
 
     struct MemorySink {
         events: Arc<Mutex<Vec<ProxyEvent>>>,
@@ -72,29 +74,13 @@ mod tests {
         }
     }
 
-    fn test_request(note: &str) -> ProxyEvent {
-        ProxyEvent::Request(Box::new(RequestEvent {
-            id: uuid::Uuid::new_v4().to_string(),
-            ts: chrono::Utc::now().timestamp_millis(),
-            proxy: "test".into(),
-            session_id: None,
-            method: "POST".into(),
-            path: "/mcp".into(),
-            mcp_method: Some("tools/call".into()),
-            tool: Some("search".into()),
-            resource_uri: None,
-            prompt_name: None,
-            status: 200,
-            latency_us: 42_000,
-            upstream_us: Some(40_000),
-            request_size: Some(100),
-            response_size: Some(200),
-            error_code: None,
-            error_msg: None,
-            client_name: None,
-            client_version: None,
-            note: note.into(),
-        }))
+    fn test_request() -> ProxyEvent {
+        ProxyEvent::Request(Box::new(Request::Mcp(JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(1),
+            method: ClientMethod::Tools(ToolsMethod::List),
+            params: None,
+        })))
     }
 
     fn start_with(sinks: Vec<Box<dyn EventSink>>) -> EventBusHandle {
@@ -110,8 +96,8 @@ mod tests {
         let (sink, events, _) = MemorySink::new();
         let handle = start_with(vec![Box::new(sink)]);
 
-        handle.bus.emit(test_request("a"));
-        handle.bus.emit(test_request("b"));
+        handle.bus.emit(test_request());
+        handle.bus.emit(test_request());
 
         handle.shutdown().await;
 
@@ -125,7 +111,7 @@ mod tests {
         let (sink2, events2, _) = MemorySink::new();
         let handle = start_with(vec![Box::new(sink1), Box::new(sink2)]);
 
-        handle.bus.emit(test_request("a"));
+        handle.bus.emit(test_request());
 
         handle.shutdown().await;
 
@@ -138,7 +124,7 @@ mod tests {
         let (sink, _, flush_count) = MemorySink::new();
         let handle = start_with(vec![Box::new(sink)]);
 
-        handle.bus.emit(test_request("a"));
+        handle.bus.emit(test_request());
         handle.shutdown().await;
 
         assert_eq!(*flush_count.lock().unwrap(), 1);
@@ -150,7 +136,7 @@ mod tests {
         let handle = start_with(vec![Box::new(sink)]);
 
         for _ in 0..100 {
-            handle.bus.emit(test_request("a"));
+            handle.bus.emit(test_request());
         }
 
         handle.shutdown().await;
@@ -160,7 +146,7 @@ mod tests {
     #[tokio::test]
     async fn works_with_no_sinks() {
         let handle = EventManager::new().start();
-        handle.bus.emit(test_request("a"));
+        handle.bus.emit(test_request());
         handle.shutdown().await;
     }
 }
