@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
-pub use mcpr_core::proxy::Mode as CspMode;
-pub use mcpr_core::proxy::{CspConfig, DirectivePolicy, WidgetScoped};
+pub use mcpr_core::csp::Mode as CspMode;
+pub use mcpr_core::csp::{CspConfig, DirectivePolicy, WidgetScoped};
 use mcpr_tunnel::RelayConfig;
 
 const CONFIG_FILE: &str = "mcpr.toml";
@@ -733,7 +733,6 @@ pub struct GatewayConfig {
     pub name: String,
     pub mcp: Option<String>,
     pub port: Option<u16>,
-    /// Resolved CSP config, ready to hand to `RewriteConfig`.
     pub csp: CspConfig,
     pub relay_url: Option<String>,
     pub tunnel_token: Option<String>,
@@ -751,80 +750,6 @@ pub struct GatewayConfig {
     pub cloud_batch_size: Option<usize>,
     pub cloud_flush_interval_ms: Option<u64>,
     pub runtime: RuntimeOptions,
-}
-
-impl GatewayConfig {
-    /// Resolve tunnel identity from config.
-    /// Token is required (caller must check before calling). Subdomain is optional.
-    /// Returns (token, desired_subdomain).
-    pub fn resolve_tunnel_identity(
-        tunnel_subdomain: Option<String>,
-        tunnel_token: Option<String>,
-    ) -> (String, Option<String>) {
-        let token =
-            tunnel_token.expect("tunnel token must be set before calling resolve_tunnel_identity");
-        (token, tunnel_subdomain)
-    }
-
-    /// Names of non-csp fields that differ between `self` and `other`.
-    /// Used by the SIGHUP reload path to reject changes that require a full restart.
-    /// `csp` is intentionally omitted — it is the only field a live reload may swap.
-    /// `name` is omitted too: a proxy's identity is fixed at boot.
-    pub fn reload_unsafe_changes(&self, other: &GatewayConfig) -> Vec<&'static str> {
-        let mut changed = Vec::new();
-        if self.mcp != other.mcp {
-            changed.push("mcp");
-        }
-        if self.port != other.port {
-            changed.push("port");
-        }
-        if self.relay_url != other.relay_url {
-            changed.push("relay_url");
-        }
-        if self.tunnel_token != other.tunnel_token {
-            changed.push("tunnel.token");
-        }
-        if self.tunnel_subdomain != other.tunnel_subdomain {
-            changed.push("tunnel.subdomain");
-        }
-        if self.tunnel != other.tunnel {
-            changed.push("tunnel.enabled");
-        }
-        if self.max_request_body_size != other.max_request_body_size {
-            changed.push("max_request_body_size");
-        }
-        if self.max_response_body_size != other.max_response_body_size {
-            changed.push("max_response_body_size");
-        }
-        if self.max_concurrent_upstream != other.max_concurrent_upstream {
-            changed.push("max_concurrent_upstream");
-        }
-        if self.connect_timeout != other.connect_timeout {
-            changed.push("connect_timeout");
-        }
-        if self.request_timeout != other.request_timeout {
-            changed.push("request_timeout");
-        }
-        if self.cloud_token != other.cloud_token {
-            changed.push("cloud.token");
-        }
-        if self.cloud_server != other.cloud_server {
-            changed.push("cloud.server");
-        }
-        if self.cloud_endpoint != other.cloud_endpoint {
-            changed.push("cloud.endpoint");
-        }
-        if self.cloud_batch_size != other.cloud_batch_size {
-            changed.push("cloud.batch_size");
-        }
-        if self.cloud_flush_interval_ms != other.cloud_flush_interval_ms {
-            changed.push("cloud.flush_interval_ms");
-        }
-        if self.runtime != other.runtime {
-            changed.push("runtime");
-        }
-        changed
-    }
 }
 
 // ── Load + dispatch ─────────────────────────────────────────────────────
@@ -1208,7 +1133,7 @@ mod tests {
             name: "test".into(),
             mcp: Some("http://localhost:9000".into()),
             port: Some(3000),
-            csp: mcpr_core::proxy::csp::CspConfig::default(),
+            csp: mcpr_core::csp::CspConfig::default(),
             relay_url: Some("https://tunnel.mcpr.app".into()),
             tunnel_token: None,
             tunnel_subdomain: None,
@@ -1229,104 +1154,6 @@ mod tests {
                 admin_bind: "127.0.0.1:9901".into(),
             },
         }
-    }
-
-    #[test]
-    fn reload_unsafe_changes__identical_is_empty() {
-        let a = gateway_config();
-        let b = gateway_config();
-        assert!(a.reload_unsafe_changes(&b).is_empty());
-    }
-
-    #[test]
-    fn reload_unsafe_changes__csp_difference_is_safe() {
-        let a = gateway_config();
-        let mut b = gateway_config();
-        b.csp.widgets.push(mcpr_core::proxy::csp::WidgetScoped {
-            match_pattern: "ui://widget/test".into(),
-            ..Default::default()
-        });
-        assert!(a.reload_unsafe_changes(&b).is_empty());
-    }
-
-    #[test]
-    fn reload_unsafe_changes__name_difference_is_safe() {
-        let a = gateway_config();
-        let mut b = gateway_config();
-        b.name = "renamed".into();
-        assert!(a.reload_unsafe_changes(&b).is_empty());
-    }
-
-    #[test]
-    fn reload_unsafe_changes__mcp_flagged() {
-        let a = gateway_config();
-        let mut b = gateway_config();
-        b.mcp = Some("http://localhost:9999".into());
-        assert_eq!(a.reload_unsafe_changes(&b), vec!["mcp"]);
-    }
-
-    #[test]
-    fn reload_unsafe_changes__port_flagged() {
-        let a = gateway_config();
-        let mut b = gateway_config();
-        b.port = Some(4000);
-        assert_eq!(a.reload_unsafe_changes(&b), vec!["port"]);
-    }
-
-    #[test]
-    fn reload_unsafe_changes__tunnel_fields_flagged() {
-        let a = gateway_config();
-        let mut b = gateway_config();
-        b.tunnel = true;
-        b.tunnel_token = Some("t".into());
-        b.tunnel_subdomain = Some("s".into());
-        assert_eq!(
-            a.reload_unsafe_changes(&b),
-            vec!["tunnel.token", "tunnel.subdomain", "tunnel.enabled"]
-        );
-    }
-
-    #[test]
-    fn reload_unsafe_changes__runtime_flagged() {
-        let a = gateway_config();
-        let mut b = gateway_config();
-        b.runtime.drain_timeout = 60;
-        assert_eq!(a.reload_unsafe_changes(&b), vec!["runtime"]);
-    }
-
-    #[test]
-    fn reload_unsafe_changes__multiple_fields_listed() {
-        let a = gateway_config();
-        let mut b = gateway_config();
-        b.mcp = Some("http://other:9000".into());
-        b.port = Some(4000);
-        let changed = a.reload_unsafe_changes(&b);
-        assert!(changed.contains(&"mcp"));
-        assert!(changed.contains(&"port"));
-    }
-
-    #[test]
-    fn resolve_tunnel_identity__subdomain_and_token_independent() {
-        let (token, sub) = GatewayConfig::resolve_tunnel_identity(
-            Some("myapp".into()),
-            Some("mcpr_secret_token_123".into()),
-        );
-        assert_eq!(token, "mcpr_secret_token_123");
-        assert_eq!(sub.as_deref(), Some("myapp"));
-    }
-
-    #[test]
-    fn resolve_tunnel_identity__no_subdomain_uses_token() {
-        let (token, sub) =
-            GatewayConfig::resolve_tunnel_identity(None, Some("my-saved-token".into()));
-        assert_eq!(token, "my-saved-token");
-        assert_eq!(sub, None);
-    }
-
-    #[test]
-    #[should_panic(expected = "tunnel token must be set")]
-    fn resolve_tunnel_identity__no_token_panics() {
-        GatewayConfig::resolve_tunnel_identity(Some("myapp".into()), None);
     }
 
     #[test]

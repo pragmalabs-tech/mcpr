@@ -34,8 +34,6 @@ use std::time::{Duration, Instant};
 
 use rusqlite::Connection;
 
-use mcpr_core::protocol::schema as proto_schema;
-
 use super::event::{RequestStatus, StoreEvent};
 use super::schema;
 
@@ -262,20 +260,7 @@ fn handle_schema_version(conn: &Connection, sv: super::event::SchemaVersionEvent
             );
         }
         Some((old_hash, old_payload)) => {
-            let old_val: serde_json::Value = serde_json::from_str(&old_payload).unwrap_or_default();
-            let new_val: serde_json::Value = serde_json::from_str(&sv.payload).unwrap_or_default();
-            let diffs = proto_schema::diff_schema(&sv.method, &old_val, &new_val);
-
-            for diff in &diffs {
-                insert_change_row(
-                    conn,
-                    &sv,
-                    diff.change_type.as_str(),
-                    diff.item_name.as_deref(),
-                    Some(old_hash.as_str()),
-                    Some(sv.content_hash.as_str()),
-                );
-            }
+            // TODO: Replace by new method
         }
     }
 

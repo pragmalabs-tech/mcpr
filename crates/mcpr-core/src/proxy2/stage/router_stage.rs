@@ -130,3 +130,203 @@ fn box_full(bytes: Bytes) -> BoxBody<Bytes, hyper::Error> {
         .map_err(|never: Infallible| match never {})
         .boxed()
 }
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use crate::{
+        csp::CspConfig,
+        protocol::mcp::{
+            ClientMethod, JsonRpcRequest, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
+        },
+        proxy2::state::InnerProxyState,
+    };
+    use axum::{
+        Router, body::Bytes as AxumBytes, http::HeaderMap, response::IntoResponse, routing::post,
+    };
+    use serde_json::{Value, json};
+    use std::sync::{Arc, Mutex};
+
+    // ── Helpers ───────────────────────────────────────────────
+
+    fn config_for(url: &str) -> Arc<ProxyConfig> {
+        Arc::new(ProxyConfig {
+            name: "test".into(),
+            mcp: url.to_string(),
+            port: None,
+            csp: CspConfig::default(),
+            max_request_body_size: None,
+            max_response_body_size: None,
+            max_concurrent_upstream: None,
+            connect_timeout: None,
+            request_timeout: None,
+        })
+    }
+
+    fn state() -> ProxyState {
+        Arc::new(InnerProxyState {})
+    }
+
+    fn mcp_request(id: i64) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(id),
+            method: ClientMethod::Tools(ToolsMethod::List),
+            params: None,
+        }
+    }
+
+    /// Spawn an axum router on a random local port and return its base URL.
+    /// The server task is dropped when the test completes — fine for tests.
+    async fn spawn_upstream(router: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// Echo handler — returns a JSON-RPC `Response` with the request's id
+    /// and `result: {"echoed": true}`.
+    async fn echo_jsonrpc(body: AxumBytes) -> axum::Json<Value> {
+        let req: Value = serde_json::from_slice(&body).unwrap();
+        let id = req.get("id").cloned().unwrap_or(Value::Null);
+        axum::Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {"echoed": true},
+        }))
+    }
+
+    // ── MCP requests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn process__mcp_request_forwards_to_upstream_and_returns_response() {
+        let url = spawn_upstream(Router::new().route("/", post(echo_jsonrpc))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let resp = stage
+            .process(Request::Mcp(mcp_request(42)), state())
+            .await
+            .unwrap();
+
+        let Response::Mcp(JsonRpcResult::Response(r)) = resp else {
+            panic!("expected Response::Mcp(JsonRpcResult::Response)");
+        };
+        assert_eq!(r.id, RequestId::Number(42));
+        assert_eq!(r.result.unwrap(), json!({"echoed": true}));
+    }
+
+    #[tokio::test]
+    async fn process__mcp_batch_returns_results_in_request_order() {
+        let url = spawn_upstream(Router::new().route("/", post(echo_jsonrpc))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let batch = Request::McpBatch(vec![mcp_request(1), mcp_request(2), mcp_request(3)]);
+        let resp = stage.process(batch, state()).await.unwrap();
+
+        let Response::McpBatch(items) = resp else {
+            panic!("expected Response::McpBatch");
+        };
+        assert_eq!(items.len(), 3);
+        for (i, item) in items.iter().enumerate() {
+            let JsonRpcResult::Response(r) = item else {
+                panic!("expected JsonRpcResult::Response at index {i}");
+            };
+            assert_eq!(r.id, RequestId::Number((i + 1) as i64));
+        }
+    }
+
+    #[tokio::test]
+    async fn process__mcp_request_propagates_jsonrpc_error_response() {
+        async fn err_handler() -> axum::Json<Value> {
+            axum::Json(json!({"code": -32603, "message": "boom"}))
+        }
+        let url = spawn_upstream(Router::new().route("/", post(err_handler))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let resp = stage
+            .process(Request::Mcp(mcp_request(1)), state())
+            .await
+            .unwrap();
+
+        let Response::Mcp(JsonRpcResult::Error(e)) = resp else {
+            panic!("expected JsonRpcResult::Error");
+        };
+        assert_eq!(e.code, -32603);
+        assert_eq!(e.message, "boom");
+    }
+
+    #[tokio::test]
+    async fn process__mcp_request_errors_when_upstream_returns_non_jsonrpc_body() {
+        async fn html_handler() -> impl IntoResponse {
+            (
+                [(axum::http::header::CONTENT_TYPE, "text/html")],
+                "<html></html>",
+            )
+        }
+        let url = spawn_upstream(Router::new().route("/", post(html_handler))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let err = match stage.process(Request::Mcp(mcp_request(1)), state()).await {
+            Ok(_) => panic!("expected error from non-JSON-RPC upstream body"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("non-JSON-RPC"));
+    }
+
+    // ── HTTP requests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn process__http_request_returns_http_response() {
+        let url =
+            spawn_upstream(Router::new().route("/", post(|| async { "hello upstream" }))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let req = Request::Http(
+            axum::http::Request::post("/")
+                .header("content-type", "text/plain")
+                .body(Bytes::from_static(b"client body"))
+                .unwrap(),
+        );
+        let resp = stage.process(req, state()).await.unwrap();
+
+        let Response::Http(http) = resp else {
+            panic!("expected Response::Http");
+        };
+        assert_eq!(http.status(), 200);
+        assert_eq!(http.body().as_ref(), b"hello upstream");
+    }
+
+    #[tokio::test]
+    async fn process__http_request_forwards_authorization_header() {
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sink = captured.clone();
+        let app = Router::new().route(
+            "/",
+            post(move |headers: HeaderMap| {
+                let sink = sink.clone();
+                async move {
+                    *sink.lock().unwrap() = headers
+                        .get("authorization")
+                        .map(|v| v.to_str().unwrap().to_string());
+                    "ok"
+                }
+            }),
+        );
+        let url = spawn_upstream(app).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let req = Request::Http(
+            axum::http::Request::post("/")
+                .header("authorization", "Bearer xyz")
+                .body(Bytes::new())
+                .unwrap(),
+        );
+        let _ = stage.process(req, state()).await.unwrap();
+
+        assert_eq!(captured.lock().unwrap().as_deref(), Some("Bearer xyz"));
+    }
+}

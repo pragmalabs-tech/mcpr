@@ -7,7 +7,6 @@
 
 use std::path::Path;
 
-use mcpr_core::proxy::health::SharedProxyHealth;
 use mcpr_integrations::store::query::{
     clients::ClientRow,
     logs::LogRow,
@@ -99,7 +98,7 @@ pub fn format_bytes_col(bytes: Option<i64>) -> String {
 
 /// Format latency (in μs) for human-readable display.
 pub fn format_latency(us: i64) -> String {
-    mcpr_core::time::format_latency_us(us)
+    mcpr_core::utils::time::format_latency_us(us)
 }
 
 /// Print a serializable struct as a single JSON line.
@@ -107,46 +106,6 @@ pub fn print_json(value: &impl serde::Serialize) {
     if let Ok(json) = serde_json::to_string(value) {
         println!("{json}");
     }
-}
-
-// ── Startup banner ────────────────────────────────────────────────────
-
-/// Populate the proxy state with startup info and print a startup banner to stderr.
-pub fn log_startup(
-    health: &SharedProxyHealth,
-    port: u16,
-    public_url: &str,
-    mcp_upstream: &str,
-    cloud_server: Option<&str>,
-) {
-    let mut h = mcpr_core::proxy::lock_health(health);
-    h.proxy_url = format!("http://localhost:{port}");
-    h.tunnel_url = public_url.to_string();
-    h.mcp_upstream = mcp_upstream.to_string();
-    drop(h);
-
-    let localhost = format!("http://localhost:{port}");
-    let has_tunnel = public_url != localhost;
-
-    eprintln!();
-    eprintln!("  {} mcpr proxy running", colored::Colorize::green("ready"),);
-    eprintln!("  proxy:    {localhost}");
-    if has_tunnel {
-        eprintln!("  tunnel:   {public_url}");
-    }
-    eprintln!("  upstream: {mcp_upstream}");
-
-    // Studio link — prefer tunnel URL if available.
-    let studio_target = if has_tunnel { public_url } else { &localhost };
-    let encoded = encode_uri_component(studio_target);
-    eprintln!("  studio:   https://cloud.mcpr.app/studio?proxy={encoded}");
-
-    // Dashboard link — requires cloud server slug.
-    if let Some(server) = cloud_server {
-        eprintln!("  dashboard: https://cloud.mcpr.app/servers/{server}");
-    }
-
-    eprintln!();
 }
 
 // ── Version / Validate ────────────────────────────────────────────────

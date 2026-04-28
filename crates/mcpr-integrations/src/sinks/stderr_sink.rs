@@ -5,7 +5,7 @@
 use std::io::Write;
 
 use mcpr_core::event::{EventSink, ProxyEvent};
-use mcpr_core::time::format_latency_us;
+use mcpr_core::utils::time::format_latency_us;
 
 // ── Log format ──────────────────────────────────────────────────────────
 
@@ -142,7 +142,6 @@ mod tests {
             client_name: None,
             client_version: None,
             note: "test".into(),
-            stage_timings: None,
         }))
     }
 
