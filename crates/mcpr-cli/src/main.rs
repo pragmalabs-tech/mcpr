@@ -28,6 +28,8 @@ mod render;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use config::{CliAction, GatewayConfig, Mode};
+use mcpr_core::event::EventManager;
+use mcpr_integrations::StderrSink;
 
 fn main() {
     let action = config::load();
@@ -149,6 +151,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         }
     };
 
+    // Read the configuration
     let proxy_cfg = Arc::new(mcpr_core::proxy2::proxy_config::ProxyConfig {
         name: cfg.name.clone(),
         mcp: mcp.clone(),
@@ -161,7 +164,13 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         request_timeout: cfg.request_timeout,
     });
 
-    let app = match mcpr_core::proxy2::build_app(proxy_cfg) {
+    // Setup Event Bus
+    let mut event_manager = EventManager::new();
+    event_manager.register(Box::new(StderrSink));
+    let event_bus_handler = event_manager.start();
+    let event_bus = event_bus_handler.bus.clone();
+
+    let app = match mcpr_core::proxy2::build_app(proxy_cfg, event_bus) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("error: failed to build proxy app: {e}");

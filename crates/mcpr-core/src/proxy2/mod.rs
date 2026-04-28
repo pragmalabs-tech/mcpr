@@ -12,23 +12,26 @@ use axum::{
     routing::any,
 };
 
-use crate::protocol::{Request, Response};
 use crate::proxy2::{
     proxy_config::ProxyConfig,
     stage::{StagePipeline, router_stage::RouterStage},
     state::InnerProxyState,
 };
+use crate::{
+    event::EventBus,
+    protocol::{Request, Response},
+};
 
 /// Build an axum app that runs a single proxy from `cfg`. Pipeline has no
 /// pre/post stages yet — every request flows: axum → `Request::from_axum`
 /// → `StagePipeline::process` → axum response.
-pub fn build_app(cfg: Arc<ProxyConfig>) -> anyhow::Result<Router> {
+pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<Router> {
     let router_stage = RouterStage::new(cfg)?;
     let pipeline = Arc::new(StagePipeline::new(
         vec![],
         vec![],
         router_stage,
-        Arc::new(InnerProxyState {}),
+        Arc::new(InnerProxyState::new(event_bus)),
     ));
 
     Ok(Router::new()

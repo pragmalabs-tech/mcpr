@@ -31,7 +31,7 @@ pub struct EventBus {
 /// and to clone [`EventBus`] handles for emitters.
 pub struct EventBusHandle {
     pub bus: EventBus,
-    task: tokio::task::JoinHandle<()>,
+    task: std::thread::JoinHandle<()>,
     shutdown: mpsc::Sender<()>,
 }
 
@@ -39,7 +39,16 @@ impl EventBusHandle {
     /// Graceful shutdown: signals the background task and waits for it to drain.
     pub async fn shutdown(self) {
         let _ = self.shutdown.send(()).await;
-        let _ = self.task.await;
+
+        // 2. Wait for the OS thread to exit.
+        // Since .join() blocks the entire OS thread, we wrap it in
+        // spawn_blocking so we don't freeze the Tokio executor.
+        let _ = tokio::task::spawn_blocking(move || {
+            self.task.join().expect("The EventBus OS thread panicked!");
+        })
+        .await;
+
+        println!("EventBus has shut down gracefully.");
     }
 }
 
@@ -49,16 +58,26 @@ impl EventBus {
     pub fn emit(&self, event: ProxyEvent) {
         let _ = self.tx.try_send(event);
     }
+
+    /// Test helper — bus with no receiver. Emitted events are silently dropped.
+    #[cfg(test)]
+    pub fn for_tests() -> Self {
+        let (tx, _rx) = mpsc::channel(CHANNEL_CAPACITY);
+        Self { tx }
+    }
 }
 
-/// Spawn the background dispatch task and return a live [`EventBusHandle`].
+/// Spawn the os thread and handle dispatch task and return a live [`EventBusHandle`].
 /// Callers should go through [`EventManager`](super::EventManager) rather
 /// than calling this directly.
 pub(super) fn spawn(sinks: Vec<Box<dyn EventSink>>) -> EventBusHandle {
     let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>(1);
 
-    let task = tokio::spawn(bus_task(rx, shutdown_rx, sinks));
+    let task = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime in Bus Manager");
+        rt.block_on(bus_task(rx, shutdown_rx, sinks));
+    });
 
     EventBusHandle {
         bus: EventBus { tx },

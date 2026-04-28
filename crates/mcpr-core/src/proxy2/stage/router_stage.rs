@@ -165,7 +165,7 @@ mod tests {
     }
 
     fn state() -> ProxyState {
-        Arc::new(InnerProxyState {})
+        InnerProxyState::for_tests()
     }
 
     fn mcp_request(id: i64) -> JsonRpcRequest {
