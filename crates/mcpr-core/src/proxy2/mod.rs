@@ -33,13 +33,7 @@ use crate::{
 /// pre/post stages yet — every request flows: axum → `Request::from_axum`
 /// → `StagePipeline::process` → axum response.
 pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<Router> {
-    let cors = CorsLayer::new()
-        // Allow `GET` and `POST` methods
-        .allow_methods([Method::GET, Method::POST])
-        // Allow all origins (for development)
-        .allow_origin(Any)
-        .allow_headers([CONTENT_TYPE]);
-
+    let cors = CorsLayer::permissive();
     let router_stage = RouterStage::new(cfg)?;
     let request_stages: Vec<Box<dyn RequestStage>> = vec![Box::new(RequestLogStage)];
     let response_stages: Vec<Box<dyn ResponseStage>> = vec![Box::new(ResponseLogStage)];
