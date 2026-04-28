@@ -77,7 +77,7 @@ use axum::extract::DefaultBodyLimit;
 use tower_http::cors::{Any, CorsLayer};
 
 use config::{CliAction, GatewayConfig, Mode};
-use mcpr_core::protocol::session::MemorySessionStore;
+use mcpr_core::protocol::session::SessionStore;
 use mcpr_core::proxy::ProxyState;
 use mcpr_core::proxy::RewriteConfig;
 use mcpr_core::proxy::health::{self as proxy_health, SharedProxyHealth};
@@ -486,7 +486,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
             .unwrap_or(DEFAULT_MAX_RESPONSE_BODY_SIZE),
         max_concurrent_upstream: max_concurrent,
         rewrite_config: rewrite_config.into_swap(),
-        sessions: MemorySessionStore::new(),
+        sessions: SessionStore::new(),
         health: proxy_health_ref.clone(),
         event_bus: event_bus_handle.bus.clone(),
     });
