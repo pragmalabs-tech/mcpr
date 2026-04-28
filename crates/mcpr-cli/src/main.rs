@@ -137,9 +137,99 @@ async fn async_main(action: CliAction) {
     }
 }
 
-/// Gateway runtime — to be rewired onto `mcpr_core::proxy2`.
-async fn run_gateway_inner(_cfg: GatewayConfig, _config_path: String) {
-    todo!("wire mcpr_core::proxy2 into the gateway runtime")
+// Run a proxy to handle requests by using axum
+async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
+    use std::sync::Arc;
+
+    let mcp = match cfg.mcp {
+        Some(u) => u,
+        None => {
+            eprintln!("error: `mcp` is required in mcpr.toml");
+            std::process::exit(1);
+        }
+    };
+
+    let proxy_cfg = Arc::new(mcpr_core::proxy2::proxy_config::ProxyConfig {
+        name: cfg.name.clone(),
+        mcp: mcp.clone(),
+        port: cfg.port,
+        csp: cfg.csp,
+        max_request_body_size: cfg.max_request_body_size,
+        max_response_body_size: cfg.max_response_body_size,
+        max_concurrent_upstream: cfg.max_concurrent_upstream,
+        connect_timeout: cfg.connect_timeout,
+        request_timeout: cfg.request_timeout,
+    });
+
+    let app = match mcpr_core::proxy2::build_app(proxy_cfg) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: failed to build proxy app: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let bind_port = cfg.port.unwrap_or(3000);
+    let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{bind_port}")).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: failed to bind on port {bind_port}: {e}");
+            std::process::exit(1);
+        }
+    };
+    let actual_port = listener.local_addr().unwrap().port();
+
+    #[cfg(unix)]
+    if let Err(e) = proxy_lock::write_lock(&cfg.name, actual_port, &config_path) {
+        eprintln!("error: failed to write lockfile: {e}");
+        std::process::exit(1);
+    }
+
+    eprintln!(
+        "  {} mcpr proxy running on http://localhost:{actual_port} -> {mcp}",
+        colored::Colorize::green("ready"),
+    );
+
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let shutdown_for_server = shutdown_tx.subscribe();
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                let mut rx = shutdown_for_server;
+                let _ = rx.changed().await;
+            })
+            .await
+            .expect("Server failed");
+    });
+
+    let shutdown_trigger = shutdown_tx.clone();
+    tokio::spawn(async move {
+        let ctrl_c = tokio::signal::ctrl_c();
+
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM");
+            tokio::select! {
+                _ = ctrl_c => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            ctrl_c.await.expect("Failed to listen for ctrl-c");
+        }
+
+        eprintln!("[mcpr] Received shutdown signal, draining...");
+        let _ = shutdown_trigger.send(true);
+    });
+
+    let _ = shutdown_rx.changed().await;
+
+    proxy_lock::remove_lock(&cfg.name);
+    eprintln!("[mcpr] Shutdown complete.");
 }
 
 /// Run the relay server process. Called from `mcpr relay run` only.

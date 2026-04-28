@@ -92,11 +92,13 @@ fn build_client(upstream: &UpstreamConfig) -> anyhow::Result<ProxyClient> {
         .enable_http2()
         .wrap_connector(http);
 
+    // No `http2_only` — most MCP upstreams are HTTP/1.1; cleartext H2
+    // (h2c) requires server opt-in, and HTTPS negotiates H2 via ALPN.
+    // The H2 keep-alive settings only fire when the connection is H2.
     Ok(Client::builder(TokioExecutor::new())
         .timer(TokioTimer::new())
         .pool_idle_timeout(Duration::from_secs(90))
         .pool_max_idle_per_host(upstream.max_concurrent)
-        .http2_only(true)
         .http2_keep_alive_interval(Duration::from_secs(30))
         .http2_keep_alive_timeout(Duration::from_secs(10))
         .http2_keep_alive_while_idle(true)

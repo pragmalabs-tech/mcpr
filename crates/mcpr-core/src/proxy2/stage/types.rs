@@ -10,11 +10,11 @@ use crate::{
 };
 
 #[async_trait]
-pub trait RequestStage {
+pub trait RequestStage: Send + Sync {
     async fn process(&self, request: Request, state: ProxyState) -> anyhow::Result<Request>;
 }
 
 #[async_trait]
-pub trait ResponseStage {
+pub trait ResponseStage: Send + Sync {
     async fn process(&self, res: Response, state: ProxyState) -> anyhow::Result<Response>;
 }
