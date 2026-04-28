@@ -1,21 +1,20 @@
-/// Stage will handle a piece logic of Proxy Stage
-/// It can
-///     1. Edit Current request
-///     2. Do noning and foward
-///     3. Return immediate
-///
+//! Stage traits — pre/post hooks around the router. Each stage can
+//! mutate the value, leave it untouched, or fail the pipeline by
+//! returning an error.
+
 use async_trait::async_trait;
 
-pub enum StageAction {
-    Continue(crate::protocol::Request),
-    Return(crate::protocol::Response),
+use crate::{
+    protocol::{Request, Response},
+    proxy2::state::ProxyState,
+};
+
+#[async_trait]
+pub trait RequestStage {
+    async fn process(&self, request: Request, state: ProxyState) -> anyhow::Result<Request>;
 }
 
 #[async_trait]
-pub trait ProxyStage {
-    async fn process(
-        &self,
-        request: crate::protocol::Request,
-        state: &crate::proxy2::state::ProxyState,
-    ) -> StageAction;
+pub trait ResponseStage {
+    async fn process(&self, res: Response, state: ProxyState) -> anyhow::Result<Response>;
 }
