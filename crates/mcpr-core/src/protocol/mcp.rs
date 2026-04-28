@@ -1,25 +1,113 @@
-//! MCP message taxonomy (spec v2025-11-25).
-//!
-//! See `PIPELINE.md` §Types. Method identity
-//! is a cheap enum — one string match per message. Grouping by feature
-//! area (`Tools`, `Resources`, …) matches the spec table and lets
-//! middlewares pattern-match at the granularity they need.
-//!
-//! Every method enum has an `Unknown(String)` tail variant so non-spec
-//! methods forward unchanged instead of failing classification.
+// MCP JSON-RPC types.
+// Spec: https://modelcontextprotocol.io/specification/2025-11-25/schema
 
-use super::jsonrpc::JsonRpcEnvelope;
+use std::str::FromStr;
 
-/// Shallow envelope paired with its classification. Used inside
-/// `McpRequest` (client direction) and `Response::McpBuffered` (server
-/// direction).
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::value::RawValue;
+use serde_json::{Map, Value};
+use strum::{EnumString, IntoStaticStr};
+
+/// JSON-RPC request id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    Number(i64),
+    String(String),
+}
+
+/// `"2.0"` literal — rejects anything else on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct JsonRpcVersion;
+
+impl Serialize for JsonRpcVersion {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("2.0")
+    }
+}
+
+impl<'de> Deserialize<'de> for JsonRpcVersion {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        if s == "2.0" {
+            Ok(JsonRpcVersion)
+        } else {
+            Err(serde::de::Error::custom("expected jsonrpc \"2.0\""))
+        }
+    }
+}
+
+/// JSON-RPC error. `data` is kept raw — middlewares skip parsing it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcError {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<Box<RawValue>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcRequest {
+    pub jsonrpc: JsonRpcVersion,
+    pub id: RequestId,
+    pub method: ClientMethod,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<Map<String, Value>>,
+}
+
+impl JsonRpcRequest {
+    /// Tool name from `tools/call` params.
+    pub fn get_tool(&self) -> Option<&str> {
+        if !matches!(self.method, ClientMethod::Tools(ToolsMethod::Call)) {
+            return None;
+        }
+        self.params.as_ref()?.get("name")?.as_str()
+    }
+
+    /// Resource URI from `resources/read|subscribe|unsubscribe` params.
+    pub fn get_resource_uri(&self) -> Option<&str> {
+        if !matches!(
+            self.method,
+            ClientMethod::Resources(
+                ResourcesMethod::Read | ResourcesMethod::Subscribe | ResourcesMethod::Unsubscribe
+            )
+        ) {
+            return None;
+        }
+        self.params.as_ref()?.get("uri")?.as_str()
+    }
+
+    /// Prompt name from `prompts/get` params.
+    pub fn get_prompt(&self) -> Option<&str> {
+        if !matches!(self.method, ClientMethod::Prompts(PromptsMethod::Get)) {
+            return None;
+        }
+        self.params.as_ref()?.get("name")?.as_str()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: JsonRpcVersion,
+    pub id: RequestId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JsonRpcResult {
+    Response(JsonRpcResponse),
+    Error(JsonRpcError),
+}
+
+/// Envelope + direction/method classification.
 #[derive(Debug, Clone)]
 pub struct McpMessage {
-    pub envelope: JsonRpcEnvelope,
+    pub envelope: JsonRpcRequest,
     pub kind: MessageKind,
 }
 
-/// Direction discriminator for an `McpMessage`.
+/// Direction tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageKind {
     Client(ClientKind),
@@ -28,8 +116,7 @@ pub enum MessageKind {
 
 // ── Client → Server ──────────────────────────────────────────
 
-/// Kind of message the client is sending. Computed at intake from
-/// `method` + `id` + `result`/`error` presence.
+/// Classified at intake from `method` + `id` + `result`/`error` presence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientKind {
     Request(ClientMethod),
@@ -51,67 +138,86 @@ pub enum ClientMethod {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, IntoStaticStr)]
 pub enum LifecycleMethod {
+    #[strum(serialize = "initialize")]
     Initialize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, IntoStaticStr)]
 pub enum ToolsMethod {
+    #[strum(serialize = "tools/list")]
     List,
+    #[strum(serialize = "tools/call")]
     Call,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, IntoStaticStr)]
 pub enum ResourcesMethod {
+    #[strum(serialize = "resources/list")]
     List,
+    #[strum(serialize = "resources/templates/list")]
     TemplatesList,
+    #[strum(serialize = "resources/read")]
     Read,
+    #[strum(serialize = "resources/subscribe")]
     Subscribe,
+    #[strum(serialize = "resources/unsubscribe")]
     Unsubscribe,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, IntoStaticStr)]
 pub enum PromptsMethod {
+    #[strum(serialize = "prompts/list")]
     List,
+    #[strum(serialize = "prompts/get")]
     Get,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, IntoStaticStr)]
 pub enum CompletionMethod {
+    #[strum(serialize = "completion/complete")]
     Complete,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, IntoStaticStr)]
 pub enum LoggingMethod {
+    #[strum(serialize = "logging/setLevel")]
     SetLevel,
 }
 
-/// Task lifecycle methods. Used by both directions (client asks the
-/// server about tasks; server can also request task state from the
-/// client).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Task lifecycle. Used in both directions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, EnumString, IntoStaticStr)]
 pub enum TasksMethod {
+    #[strum(serialize = "tasks/list")]
     List,
+    #[strum(serialize = "tasks/get")]
     Get,
+    #[strum(serialize = "tasks/result")]
     Result,
+    #[strum(serialize = "tasks/cancel")]
     Cancel,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumString)]
 pub enum ClientNotifMethod {
+    #[strum(serialize = "notifications/initialized")]
     Initialized,
+    #[strum(serialize = "notifications/cancelled")]
     Cancelled,
+    #[strum(serialize = "notifications/progress")]
     Progress,
+    #[strum(serialize = "notifications/roots/list_changed")]
     RootsListChanged,
+    #[strum(serialize = "notifications/tasks/status")]
     TaskStatus,
+    #[strum(default)]
     Unknown(String),
 }
 
 // ── Server → Client ──────────────────────────────────────────
 
-/// Kind of message the server is sending. Appears in response bodies
-/// (streamable-HTTP chunks or legacy SSE frames).
+/// Appears in response bodies (HTTP chunks or SSE frames).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerKind {
     Request(ServerMethod),
@@ -120,78 +226,90 @@ pub enum ServerKind {
     Error,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumString)]
 pub enum ServerMethod {
+    #[strum(serialize = "ping")]
     Ping,
+    #[strum(serialize = "sampling/createMessage")]
     Sampling,
+    #[strum(serialize = "elicitation/create")]
     Elicitation,
+    #[strum(serialize = "roots/list")]
     Roots,
+    #[strum(disabled)]
     Tasks(TasksMethod),
+    #[strum(disabled)]
     Unknown(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, EnumString)]
 pub enum ServerNotifMethod {
+    #[strum(serialize = "notifications/cancelled")]
     Cancelled,
+    #[strum(serialize = "notifications/progress")]
     Progress,
+    #[strum(serialize = "notifications/message")]
     LogMessage,
+    #[strum(serialize = "notifications/resources/list_changed")]
     ResourcesListChanged,
+    #[strum(serialize = "notifications/resources/updated")]
     ResourceUpdated,
+    #[strum(serialize = "notifications/tools/list_changed")]
     ToolsListChanged,
+    #[strum(serialize = "notifications/prompts/list_changed")]
     PromptsListChanged,
+    #[strum(serialize = "notifications/elicitation/complete")]
     ElicitationComplete,
+    #[strum(serialize = "notifications/tasks/status")]
     TaskStatus,
+    #[strum(default)]
     Unknown(String),
 }
 
 // ── Method parsing ────────────────────────────────────────────
+// Outer enums hold inner newtype variants — strum can't dispatch into
+// them, so `parse` cascades and falls back to `Unknown(_)`.
 
 impl ClientMethod {
     pub fn parse(method: &str) -> Self {
-        match method {
-            "ping" => Self::Ping,
-            "initialize" => Self::Lifecycle(LifecycleMethod::Initialize),
-            "tools/list" => Self::Tools(ToolsMethod::List),
-            "tools/call" => Self::Tools(ToolsMethod::Call),
-            "resources/list" => Self::Resources(ResourcesMethod::List),
-            "resources/templates/list" => Self::Resources(ResourcesMethod::TemplatesList),
-            "resources/read" => Self::Resources(ResourcesMethod::Read),
-            "resources/subscribe" => Self::Resources(ResourcesMethod::Subscribe),
-            "resources/unsubscribe" => Self::Resources(ResourcesMethod::Unsubscribe),
-            "prompts/list" => Self::Prompts(PromptsMethod::List),
-            "prompts/get" => Self::Prompts(PromptsMethod::Get),
-            "completion/complete" => Self::Completion(CompletionMethod::Complete),
-            "logging/setLevel" => Self::Logging(LoggingMethod::SetLevel),
-            "tasks/list" => Self::Tasks(TasksMethod::List),
-            "tasks/get" => Self::Tasks(TasksMethod::Get),
-            "tasks/result" => Self::Tasks(TasksMethod::Result),
-            "tasks/cancel" => Self::Tasks(TasksMethod::Cancel),
-            other => Self::Unknown(other.to_owned()),
+        if method == "ping" {
+            return Self::Ping;
         }
+        if let Ok(m) = LifecycleMethod::from_str(method) {
+            return Self::Lifecycle(m);
+        }
+        if let Ok(m) = ToolsMethod::from_str(method) {
+            return Self::Tools(m);
+        }
+        if let Ok(m) = ResourcesMethod::from_str(method) {
+            return Self::Resources(m);
+        }
+        if let Ok(m) = PromptsMethod::from_str(method) {
+            return Self::Prompts(m);
+        }
+        if let Ok(m) = CompletionMethod::from_str(method) {
+            return Self::Completion(m);
+        }
+        if let Ok(m) = LoggingMethod::from_str(method) {
+            return Self::Logging(m);
+        }
+        if let Ok(m) = TasksMethod::from_str(method) {
+            return Self::Tasks(m);
+        }
+        Self::Unknown(method.to_owned())
     }
 
-    /// Inverse of [`ClientMethod::parse`]. Returns `None` for
-    /// `Self::Unknown(_)` — unknown methods don't have a canonical
-    /// spec string.
+    /// Inverse of `parse`. `None` for `Unknown(_)`.
     pub fn as_str(&self) -> Option<&'static str> {
         Some(match self {
             Self::Ping => "ping",
-            Self::Lifecycle(LifecycleMethod::Initialize) => "initialize",
-            Self::Tools(ToolsMethod::List) => "tools/list",
-            Self::Tools(ToolsMethod::Call) => "tools/call",
-            Self::Resources(ResourcesMethod::List) => "resources/list",
-            Self::Resources(ResourcesMethod::TemplatesList) => "resources/templates/list",
-            Self::Resources(ResourcesMethod::Read) => "resources/read",
-            Self::Resources(ResourcesMethod::Subscribe) => "resources/subscribe",
-            Self::Resources(ResourcesMethod::Unsubscribe) => "resources/unsubscribe",
-            Self::Prompts(PromptsMethod::List) => "prompts/list",
-            Self::Prompts(PromptsMethod::Get) => "prompts/get",
-            Self::Completion(CompletionMethod::Complete) => "completion/complete",
-            Self::Logging(LoggingMethod::SetLevel) => "logging/setLevel",
-            Self::Tasks(TasksMethod::List) => "tasks/list",
-            Self::Tasks(TasksMethod::Get) => "tasks/get",
-            Self::Tasks(TasksMethod::Result) => "tasks/result",
-            Self::Tasks(TasksMethod::Cancel) => "tasks/cancel",
+            Self::Lifecycle(m) => m.into(),
+            Self::Tools(m) => m.into(),
+            Self::Resources(m) => m.into(),
+            Self::Prompts(m) => m.into(),
+            Self::Completion(m) => m.into(),
+            Self::Logging(m) => m.into(),
+            Self::Tasks(m) => m.into(),
             Self::Unknown(_) => return None,
         })
     }
@@ -199,94 +317,74 @@ impl ClientMethod {
 
 impl ClientNotifMethod {
     pub fn parse(method: &str) -> Self {
-        match method {
-            "notifications/initialized" => Self::Initialized,
-            "notifications/cancelled" => Self::Cancelled,
-            "notifications/progress" => Self::Progress,
-            "notifications/roots/list_changed" => Self::RootsListChanged,
-            "notifications/tasks/status" => Self::TaskStatus,
-            other => Self::Unknown(other.to_owned()),
-        }
+        // Infallible — `Unknown(String)` is the strum default.
+        Self::from_str(method).unwrap_or_else(|_| Self::Unknown(method.to_owned()))
     }
 }
 
 impl ServerMethod {
     pub fn parse(method: &str) -> Self {
-        match method {
-            "ping" => Self::Ping,
-            "sampling/createMessage" => Self::Sampling,
-            "elicitation/create" => Self::Elicitation,
-            "roots/list" => Self::Roots,
-            "tasks/list" => Self::Tasks(TasksMethod::List),
-            "tasks/get" => Self::Tasks(TasksMethod::Get),
-            "tasks/result" => Self::Tasks(TasksMethod::Result),
-            "tasks/cancel" => Self::Tasks(TasksMethod::Cancel),
-            other => Self::Unknown(other.to_owned()),
+        if let Ok(m) = <Self as FromStr>::from_str(method) {
+            return m;
         }
+        if let Ok(m) = TasksMethod::from_str(method) {
+            return Self::Tasks(m);
+        }
+        Self::Unknown(method.to_owned())
+    }
+
+    /// Inverse of `parse`. `None` for `Unknown(_)`.
+    pub fn as_str(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Ping => "ping",
+            Self::Sampling => "sampling/createMessage",
+            Self::Elicitation => "elicitation/create",
+            Self::Roots => "roots/list",
+            Self::Tasks(m) => m.into(),
+            Self::Unknown(_) => return None,
+        })
     }
 }
 
 impl ServerNotifMethod {
     pub fn parse(method: &str) -> Self {
-        match method {
-            "notifications/cancelled" => Self::Cancelled,
-            "notifications/progress" => Self::Progress,
-            "notifications/message" => Self::LogMessage,
-            "notifications/resources/list_changed" => Self::ResourcesListChanged,
-            "notifications/resources/updated" => Self::ResourceUpdated,
-            "notifications/tools/list_changed" => Self::ToolsListChanged,
-            "notifications/prompts/list_changed" => Self::PromptsListChanged,
-            "notifications/elicitation/complete" => Self::ElicitationComplete,
-            "notifications/tasks/status" => Self::TaskStatus,
-            other => Self::Unknown(other.to_owned()),
+        // Infallible — `Unknown(String)` is the strum default.
+        Self::from_str(method).unwrap_or_else(|_| Self::Unknown(method.to_owned()))
+    }
+}
+
+// ── Serde for method enums ────────────────────────────────────
+// Wire form is the method string, not serde's default tagged shape.
+
+impl Serialize for ClientMethod {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Unknown(name) => s.serialize_str(name),
+            other => s.serialize_str(other.as_str().expect("non-Unknown")),
         }
     }
 }
 
-// ── Classification ────────────────────────────────────────────
+impl<'de> Deserialize<'de> for ClientMethod {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Self::parse(&s))
+    }
+}
 
-/// Classify a client→server envelope. Assumes the envelope came from
-/// [`JsonRpcEnvelope::parse`], which already rejected malformed shapes.
-pub fn classify_client(env: &JsonRpcEnvelope) -> ClientKind {
-    match (
-        env.method.as_deref(),
-        env.id.is_some(),
-        env.result.is_some(),
-        env.error.is_some(),
-    ) {
-        (Some(m), true, false, false) => ClientKind::Request(ClientMethod::parse(m)),
-        (Some(m), false, false, false) => ClientKind::Notification(ClientNotifMethod::parse(m)),
-        (None, true, true, false) => ClientKind::Result,
-        (None, true, false, true) => ClientKind::Error,
-        _ => {
-            debug_assert!(
-                false,
-                "classify_client: envelope shape should have been rejected by parse",
-            );
-            ClientKind::Error
+impl Serialize for ServerMethod {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Unknown(name) => s.serialize_str(name),
+            other => s.serialize_str(other.as_str().expect("non-Unknown")),
         }
     }
 }
 
-/// Classify a server→client envelope.
-pub fn classify_server(env: &JsonRpcEnvelope) -> ServerKind {
-    match (
-        env.method.as_deref(),
-        env.id.is_some(),
-        env.result.is_some(),
-        env.error.is_some(),
-    ) {
-        (Some(m), true, false, false) => ServerKind::Request(ServerMethod::parse(m)),
-        (Some(m), false, false, false) => ServerKind::Notification(ServerNotifMethod::parse(m)),
-        (None, true, true, false) => ServerKind::Result,
-        (None, true, false, true) => ServerKind::Error,
-        _ => {
-            debug_assert!(
-                false,
-                "classify_server: envelope shape should have been rejected by parse",
-            );
-            ServerKind::Error
-        }
+impl<'de> Deserialize<'de> for ServerMethod {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(Self::parse(&s))
     }
 }
 
@@ -294,238 +392,472 @@ pub fn classify_server(env: &JsonRpcEnvelope) -> ServerKind {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
-    fn parsed(bytes: &[u8]) -> JsonRpcEnvelope {
-        JsonRpcEnvelope::parse(bytes).unwrap()
-    }
-
-    // ── ClientMethod::parse coverage ─────────────────────────
+    // ── JsonRpcVersion ────────────────────────────────────────
 
     #[test]
-    fn client_method__spec_coverage() {
-        let cases: &[(&str, ClientMethod)] = &[
-            ("ping", ClientMethod::Ping),
-            (
-                "initialize",
-                ClientMethod::Lifecycle(LifecycleMethod::Initialize),
-            ),
-            ("tools/list", ClientMethod::Tools(ToolsMethod::List)),
-            ("tools/call", ClientMethod::Tools(ToolsMethod::Call)),
-            (
-                "resources/list",
-                ClientMethod::Resources(ResourcesMethod::List),
-            ),
-            (
-                "resources/templates/list",
-                ClientMethod::Resources(ResourcesMethod::TemplatesList),
-            ),
-            (
-                "resources/read",
-                ClientMethod::Resources(ResourcesMethod::Read),
-            ),
-            (
-                "resources/subscribe",
-                ClientMethod::Resources(ResourcesMethod::Subscribe),
-            ),
-            (
-                "resources/unsubscribe",
-                ClientMethod::Resources(ResourcesMethod::Unsubscribe),
-            ),
-            ("prompts/list", ClientMethod::Prompts(PromptsMethod::List)),
-            ("prompts/get", ClientMethod::Prompts(PromptsMethod::Get)),
-            (
-                "completion/complete",
-                ClientMethod::Completion(CompletionMethod::Complete),
-            ),
-            (
-                "logging/setLevel",
-                ClientMethod::Logging(LoggingMethod::SetLevel),
-            ),
-            ("tasks/list", ClientMethod::Tasks(TasksMethod::List)),
-            ("tasks/get", ClientMethod::Tasks(TasksMethod::Get)),
-            ("tasks/result", ClientMethod::Tasks(TasksMethod::Result)),
-            ("tasks/cancel", ClientMethod::Tasks(TasksMethod::Cancel)),
-        ];
-        for (m, expected) in cases {
-            assert_eq!(ClientMethod::parse(m), *expected, "method = {m}");
-        }
+    fn jsonrpc_version__serializes_as_2_0() {
+        assert_eq!(serde_json::to_string(&JsonRpcVersion).unwrap(), "\"2.0\"");
     }
 
     #[test]
-    fn client_method__unknown_preserves_string() {
+    fn jsonrpc_version__accepts_2_0() {
+        let v: JsonRpcVersion = serde_json::from_str("\"2.0\"").unwrap();
+        assert_eq!(v, JsonRpcVersion);
+    }
+
+    #[test]
+    fn jsonrpc_version__rejects_other_strings() {
+        assert!(serde_json::from_str::<JsonRpcVersion>("\"1.0\"").is_err());
+        assert!(serde_json::from_str::<JsonRpcVersion>("\"2\"").is_err());
+        assert!(serde_json::from_str::<JsonRpcVersion>("\"\"").is_err());
+    }
+
+    #[test]
+    fn jsonrpc_version__rejects_non_string() {
+        assert!(serde_json::from_str::<JsonRpcVersion>("2.0").is_err());
+        assert!(serde_json::from_str::<JsonRpcVersion>("null").is_err());
+    }
+
+    // ── RequestId ─────────────────────────────────────────────
+
+    #[test]
+    fn request_id__number_serializes_as_bare_number() {
+        assert_eq!(serde_json::to_string(&RequestId::Number(42)).unwrap(), "42");
+    }
+
+    #[test]
+    fn request_id__string_serializes_as_bare_string() {
         assert_eq!(
-            ClientMethod::parse("tools/future-method"),
-            ClientMethod::Unknown("tools/future-method".into()),
+            serde_json::to_string(&RequestId::String("req-1".into())).unwrap(),
+            "\"req-1\""
         );
     }
 
-    // ── ClientNotifMethod::parse coverage ────────────────────
-
     #[test]
-    fn client_notif_method__spec_coverage() {
-        let cases: &[(&str, ClientNotifMethod)] = &[
-            ("notifications/initialized", ClientNotifMethod::Initialized),
-            ("notifications/cancelled", ClientNotifMethod::Cancelled),
-            ("notifications/progress", ClientNotifMethod::Progress),
-            (
-                "notifications/roots/list_changed",
-                ClientNotifMethod::RootsListChanged,
-            ),
-            ("notifications/tasks/status", ClientNotifMethod::TaskStatus),
-        ];
-        for (m, expected) in cases {
-            assert_eq!(ClientNotifMethod::parse(m), *expected, "method = {m}");
-        }
+    fn request_id__deserializes_bare_number() {
+        let id: RequestId = serde_json::from_str("42").unwrap();
+        assert_eq!(id, RequestId::Number(42));
     }
 
     #[test]
-    fn client_notif_method__unknown_preserves_string() {
+    fn request_id__deserializes_bare_string() {
+        let id: RequestId = serde_json::from_str("\"req-1\"").unwrap();
+        assert_eq!(id, RequestId::String("req-1".into()));
+    }
+
+    // ── ClientMethod parse / as_str ───────────────────────────
+
+    #[test]
+    fn client_method__parse_ping() {
+        assert_eq!(ClientMethod::parse("ping"), ClientMethod::Ping);
+    }
+
+    #[test]
+    fn client_method__parse_initialize() {
         assert_eq!(
-            ClientNotifMethod::parse("notifications/something"),
-            ClientNotifMethod::Unknown("notifications/something".into()),
+            ClientMethod::parse("initialize"),
+            ClientMethod::Lifecycle(LifecycleMethod::Initialize)
         );
     }
 
-    // ── ServerMethod::parse coverage ─────────────────────────
-
     #[test]
-    fn server_method__spec_coverage() {
-        let cases: &[(&str, ServerMethod)] = &[
-            ("ping", ServerMethod::Ping),
-            ("sampling/createMessage", ServerMethod::Sampling),
-            ("elicitation/create", ServerMethod::Elicitation),
-            ("roots/list", ServerMethod::Roots),
-            ("tasks/list", ServerMethod::Tasks(TasksMethod::List)),
-            ("tasks/get", ServerMethod::Tasks(TasksMethod::Get)),
-            ("tasks/result", ServerMethod::Tasks(TasksMethod::Result)),
-            ("tasks/cancel", ServerMethod::Tasks(TasksMethod::Cancel)),
-        ];
-        for (m, expected) in cases {
-            assert_eq!(ServerMethod::parse(m), *expected, "method = {m}");
-        }
+    fn client_method__parse_tools_call() {
+        assert_eq!(
+            ClientMethod::parse("tools/call"),
+            ClientMethod::Tools(ToolsMethod::Call)
+        );
     }
 
     #[test]
-    fn server_method__unknown_preserves_string() {
+    fn client_method__parse_resources_templates_list() {
+        assert_eq!(
+            ClientMethod::parse("resources/templates/list"),
+            ClientMethod::Resources(ResourcesMethod::TemplatesList)
+        );
+    }
+
+    #[test]
+    fn client_method__parse_prompts_get() {
+        assert_eq!(
+            ClientMethod::parse("prompts/get"),
+            ClientMethod::Prompts(PromptsMethod::Get)
+        );
+    }
+
+    #[test]
+    fn client_method__parse_completion_complete() {
+        assert_eq!(
+            ClientMethod::parse("completion/complete"),
+            ClientMethod::Completion(CompletionMethod::Complete)
+        );
+    }
+
+    #[test]
+    fn client_method__parse_logging_set_level() {
+        assert_eq!(
+            ClientMethod::parse("logging/setLevel"),
+            ClientMethod::Logging(LoggingMethod::SetLevel)
+        );
+    }
+
+    #[test]
+    fn client_method__parse_tasks_get() {
+        assert_eq!(
+            ClientMethod::parse("tasks/get"),
+            ClientMethod::Tasks(TasksMethod::Get)
+        );
+    }
+
+    #[test]
+    fn client_method__parse_unknown_preserves_string() {
+        assert_eq!(
+            ClientMethod::parse("custom/method"),
+            ClientMethod::Unknown("custom/method".into())
+        );
+    }
+
+    #[test]
+    fn client_method__as_str_unknown_returns_none() {
+        assert_eq!(ClientMethod::Unknown("x".into()).as_str(), None);
+    }
+
+    #[test]
+    fn client_method__roundtrip_each_family() {
+        for s in [
+            "ping",
+            "initialize",
+            "tools/list",
+            "tools/call",
+            "resources/list",
+            "resources/templates/list",
+            "resources/read",
+            "resources/subscribe",
+            "resources/unsubscribe",
+            "prompts/list",
+            "prompts/get",
+            "completion/complete",
+            "logging/setLevel",
+            "tasks/list",
+            "tasks/get",
+            "tasks/result",
+            "tasks/cancel",
+        ] {
+            assert_eq!(ClientMethod::parse(s).as_str(), Some(s), "method {s}");
+        }
+    }
+
+    // ── ServerMethod parse / as_str ───────────────────────────
+
+    #[test]
+    fn server_method__parse_unit_variants() {
+        assert_eq!(ServerMethod::parse("ping"), ServerMethod::Ping);
+        assert_eq!(
+            ServerMethod::parse("sampling/createMessage"),
+            ServerMethod::Sampling
+        );
+        assert_eq!(
+            ServerMethod::parse("elicitation/create"),
+            ServerMethod::Elicitation
+        );
+        assert_eq!(ServerMethod::parse("roots/list"), ServerMethod::Roots);
+    }
+
+    #[test]
+    fn server_method__parse_tasks_newtype() {
+        assert_eq!(
+            ServerMethod::parse("tasks/cancel"),
+            ServerMethod::Tasks(TasksMethod::Cancel)
+        );
+    }
+
+    #[test]
+    fn server_method__parse_unknown_preserves_string() {
         assert_eq!(
             ServerMethod::parse("custom/method"),
-            ServerMethod::Unknown("custom/method".into()),
+            ServerMethod::Unknown("custom/method".into())
         );
     }
 
-    // ── ServerNotifMethod::parse coverage ────────────────────
+    #[test]
+    fn server_method__as_str_unknown_returns_none() {
+        assert_eq!(ServerMethod::Unknown("x".into()).as_str(), None);
+    }
 
     #[test]
-    fn server_notif_method__spec_coverage() {
-        let cases: &[(&str, ServerNotifMethod)] = &[
-            ("notifications/cancelled", ServerNotifMethod::Cancelled),
-            ("notifications/progress", ServerNotifMethod::Progress),
-            ("notifications/message", ServerNotifMethod::LogMessage),
-            (
-                "notifications/resources/list_changed",
-                ServerNotifMethod::ResourcesListChanged,
-            ),
-            (
-                "notifications/resources/updated",
-                ServerNotifMethod::ResourceUpdated,
-            ),
-            (
-                "notifications/tools/list_changed",
-                ServerNotifMethod::ToolsListChanged,
-            ),
-            (
-                "notifications/prompts/list_changed",
-                ServerNotifMethod::PromptsListChanged,
-            ),
-            (
-                "notifications/elicitation/complete",
-                ServerNotifMethod::ElicitationComplete,
-            ),
-            ("notifications/tasks/status", ServerNotifMethod::TaskStatus),
-        ];
-        for (m, expected) in cases {
-            assert_eq!(ServerNotifMethod::parse(m), *expected, "method = {m}");
+    fn server_method__roundtrip_each_family() {
+        for s in [
+            "ping",
+            "sampling/createMessage",
+            "elicitation/create",
+            "roots/list",
+            "tasks/list",
+            "tasks/cancel",
+        ] {
+            assert_eq!(ServerMethod::parse(s).as_str(), Some(s), "method {s}");
         }
     }
 
+    // ── ClientMethod / ServerMethod serde ─────────────────────
+
     #[test]
-    fn server_notif_method__unknown_preserves_string() {
+    fn client_method__serializes_as_string() {
+        let m = ClientMethod::Tools(ToolsMethod::Call);
+        assert_eq!(serde_json::to_string(&m).unwrap(), "\"tools/call\"");
+    }
+
+    #[test]
+    fn client_method__serialize_unknown_preserves_string() {
+        let m = ClientMethod::Unknown("x/y".into());
+        assert_eq!(serde_json::to_string(&m).unwrap(), "\"x/y\"");
+    }
+
+    #[test]
+    fn client_method__deserialize_known() {
+        let m: ClientMethod = serde_json::from_str("\"tools/list\"").unwrap();
+        assert_eq!(m, ClientMethod::Tools(ToolsMethod::List));
+    }
+
+    #[test]
+    fn client_method__deserialize_unknown() {
+        let m: ClientMethod = serde_json::from_str("\"custom/method\"").unwrap();
+        assert_eq!(m, ClientMethod::Unknown("custom/method".into()));
+    }
+
+    #[test]
+    fn server_method__serializes_as_string() {
+        let m = ServerMethod::Sampling;
         assert_eq!(
-            ServerNotifMethod::parse("notifications/future"),
-            ServerNotifMethod::Unknown("notifications/future".into()),
-        );
-    }
-
-    // ── classify_client ──────────────────────────────────────
-
-    #[test]
-    fn classify_client__request() {
-        let e = parsed(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
-        assert_eq!(
-            classify_client(&e),
-            ClientKind::Request(ClientMethod::Tools(ToolsMethod::List)),
-        );
-    }
-
-    #[test]
-    fn classify_client__notification() {
-        let e = parsed(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
-        assert_eq!(
-            classify_client(&e),
-            ClientKind::Notification(ClientNotifMethod::Initialized),
-        );
-    }
-
-    #[test]
-    fn classify_client__result() {
-        let e = parsed(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
-        assert_eq!(classify_client(&e), ClientKind::Result);
-    }
-
-    #[test]
-    fn classify_client__error() {
-        let e = parsed(br#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"x"}}"#);
-        assert_eq!(classify_client(&e), ClientKind::Error);
-    }
-
-    #[test]
-    fn classify_client__unknown_method() {
-        let e = parsed(br#"{"jsonrpc":"2.0","id":1,"method":"custom/method"}"#);
-        assert_eq!(
-            classify_client(&e),
-            ClientKind::Request(ClientMethod::Unknown("custom/method".into())),
-        );
-    }
-
-    // ── classify_server ──────────────────────────────────────
-
-    #[test]
-    fn classify_server__request() {
-        let e = parsed(br#"{"jsonrpc":"2.0","id":1,"method":"sampling/createMessage"}"#);
-        assert_eq!(
-            classify_server(&e),
-            ServerKind::Request(ServerMethod::Sampling),
+            serde_json::to_string(&m).unwrap(),
+            "\"sampling/createMessage\""
         );
     }
 
     #[test]
-    fn classify_server__notification() {
-        let e = parsed(br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#);
+    fn server_method__serialize_tasks_newtype() {
+        let m = ServerMethod::Tasks(TasksMethod::Cancel);
+        assert_eq!(serde_json::to_string(&m).unwrap(), "\"tasks/cancel\"");
+    }
+
+    #[test]
+    fn server_method__deserialize_unknown() {
+        let m: ServerMethod = serde_json::from_str("\"foo\"").unwrap();
+        assert_eq!(m, ServerMethod::Unknown("foo".into()));
+    }
+
+    // ── Notification methods ──────────────────────────────────
+
+    #[test]
+    fn client_notif__parse_known() {
         assert_eq!(
-            classify_server(&e),
-            ServerKind::Notification(ServerNotifMethod::ToolsListChanged),
+            ClientNotifMethod::parse("notifications/initialized"),
+            ClientNotifMethod::Initialized
         );
     }
 
     #[test]
-    fn classify_server__result() {
-        let e = parsed(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#);
-        assert_eq!(classify_server(&e), ServerKind::Result);
+    fn client_notif__parse_unknown_falls_back() {
+        assert_eq!(
+            ClientNotifMethod::parse("notifications/custom"),
+            ClientNotifMethod::Unknown("notifications/custom".into())
+        );
     }
 
     #[test]
-    fn classify_server__error() {
-        let e = parsed(br#"{"jsonrpc":"2.0","id":1,"error":{"code":-1,"message":"x"}}"#);
-        assert_eq!(classify_server(&e), ServerKind::Error);
+    fn server_notif__parse_known() {
+        assert_eq!(
+            ServerNotifMethod::parse("notifications/tools/list_changed"),
+            ServerNotifMethod::ToolsListChanged
+        );
+    }
+
+    #[test]
+    fn server_notif__parse_unknown_falls_back() {
+        assert_eq!(
+            ServerNotifMethod::parse("custom"),
+            ServerNotifMethod::Unknown("custom".into())
+        );
+    }
+
+    // ── JsonRpcRequest serde ──────────────────────────────────
+
+    #[test]
+    fn jsonrpc_request__roundtrip() {
+        let mut params = Map::new();
+        params.insert("name".into(), json!("get_weather"));
+        let req = JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(1),
+            method: ClientMethod::Tools(ToolsMethod::Call),
+            params: Some(params),
+        };
+        let back: JsonRpcRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(back.id, req.id);
+        assert_eq!(back.method, req.method);
+        assert_eq!(back.params, req.params);
+    }
+
+    #[test]
+    fn jsonrpc_request__method_serialized_as_plain_string() {
+        let req = JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(1),
+            method: ClientMethod::Ping,
+            params: None,
+        };
+        let v: Value = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(v["jsonrpc"], json!("2.0"));
+        assert_eq!(v["method"], json!("ping"));
+    }
+
+    #[test]
+    fn jsonrpc_request__params_skipped_when_none() {
+        let req = JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(1),
+            method: ClientMethod::Ping,
+            params: None,
+        };
+        assert!(!serde_json::to_string(&req).unwrap().contains("params"));
+    }
+
+    #[test]
+    fn jsonrpc_request__rejects_wrong_version() {
+        let bad = json!({"jsonrpc": "1.0", "id": 1, "method": "ping"});
+        assert!(serde_json::from_value::<JsonRpcRequest>(bad).is_err());
+    }
+
+    // ── JsonRpcResult untagged dispatch ───────────────────────
+
+    #[test]
+    fn jsonrpc_result__parses_response_shape() {
+        let v = json!({"jsonrpc": "2.0", "id": 1, "result": {"ok": true}});
+        let r: JsonRpcResult = serde_json::from_value(v).unwrap();
+        assert!(matches!(r, JsonRpcResult::Response(_)));
+    }
+
+    #[test]
+    fn jsonrpc_result__parses_error_shape() {
+        let v = json!({"code": -32000, "message": "boom"});
+        let r: JsonRpcResult = serde_json::from_value(v).unwrap();
+        assert!(matches!(r, JsonRpcResult::Error(_)));
+    }
+
+    // ── get_tool / get_resource_uri / get_prompt ──────────────
+
+    fn req(method: ClientMethod, params: Option<Map<String, Value>>) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(1),
+            method,
+            params,
+        }
+    }
+
+    fn one_param(k: &str, v: Value) -> Option<Map<String, Value>> {
+        let mut m = Map::new();
+        m.insert(k.into(), v);
+        Some(m)
+    }
+
+    #[test]
+    fn get_tool__returns_name_for_tools_call() {
+        let r = req(
+            ClientMethod::Tools(ToolsMethod::Call),
+            one_param("name", json!("get_weather")),
+        );
+        assert_eq!(r.get_tool(), Some("get_weather"));
+    }
+
+    #[test]
+    fn get_tool__none_for_tools_list() {
+        let r = req(
+            ClientMethod::Tools(ToolsMethod::List),
+            one_param("name", json!("get_weather")),
+        );
+        assert_eq!(r.get_tool(), None);
+    }
+
+    #[test]
+    fn get_tool__none_when_params_missing() {
+        let r = req(ClientMethod::Tools(ToolsMethod::Call), None);
+        assert_eq!(r.get_tool(), None);
+    }
+
+    #[test]
+    fn get_tool__none_when_name_not_string() {
+        let r = req(
+            ClientMethod::Tools(ToolsMethod::Call),
+            one_param("name", json!(42)),
+        );
+        assert_eq!(r.get_tool(), None);
+    }
+
+    #[test]
+    fn get_resource_uri__read() {
+        let r = req(
+            ClientMethod::Resources(ResourcesMethod::Read),
+            one_param("uri", json!("file:///x")),
+        );
+        assert_eq!(r.get_resource_uri(), Some("file:///x"));
+    }
+
+    #[test]
+    fn get_resource_uri__subscribe() {
+        let r = req(
+            ClientMethod::Resources(ResourcesMethod::Subscribe),
+            one_param("uri", json!("file:///x")),
+        );
+        assert_eq!(r.get_resource_uri(), Some("file:///x"));
+    }
+
+    #[test]
+    fn get_resource_uri__unsubscribe() {
+        let r = req(
+            ClientMethod::Resources(ResourcesMethod::Unsubscribe),
+            one_param("uri", json!("file:///x")),
+        );
+        assert_eq!(r.get_resource_uri(), Some("file:///x"));
+    }
+
+    #[test]
+    fn get_resource_uri__none_for_resources_list() {
+        let r = req(
+            ClientMethod::Resources(ResourcesMethod::List),
+            one_param("uri", json!("file:///x")),
+        );
+        assert_eq!(r.get_resource_uri(), None);
+    }
+
+    #[test]
+    fn get_resource_uri__none_when_params_missing() {
+        let r = req(ClientMethod::Resources(ResourcesMethod::Read), None);
+        assert_eq!(r.get_resource_uri(), None);
+    }
+
+    #[test]
+    fn get_prompt__returns_name_for_prompts_get() {
+        let r = req(
+            ClientMethod::Prompts(PromptsMethod::Get),
+            one_param("name", json!("greet")),
+        );
+        assert_eq!(r.get_prompt(), Some("greet"));
+    }
+
+    #[test]
+    fn get_prompt__none_for_prompts_list() {
+        let r = req(
+            ClientMethod::Prompts(PromptsMethod::List),
+            one_param("name", json!("greet")),
+        );
+        assert_eq!(r.get_prompt(), None);
+    }
+
+    #[test]
+    fn get_prompt__none_when_params_missing() {
+        let r = req(ClientMethod::Prompts(PromptsMethod::Get), None);
+        assert_eq!(r.get_prompt(), None);
     }
 }

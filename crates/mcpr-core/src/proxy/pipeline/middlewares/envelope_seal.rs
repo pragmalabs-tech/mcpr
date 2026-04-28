@@ -69,12 +69,12 @@ mod tests {
     use axum::http::{HeaderMap, StatusCode};
     use serde_json::Value;
 
-    use crate::protocol::jsonrpc::JsonRpcEnvelope;
+    use crate::protocol::jsonrpc::JsonRpcRequest;
     use crate::protocol::mcp::{McpMessage, MessageKind, ServerKind};
     use crate::proxy::pipeline::middlewares::test_support::{test_context, test_proxy_state};
 
     fn buffered(envelope: Envelope, body: &str) -> Response {
-        let env = JsonRpcEnvelope::parse(body.as_bytes()).unwrap();
+        let env = JsonRpcRequest::parse(body.as_bytes()).unwrap();
         let message = McpMessage {
             envelope: env,
             kind: MessageKind::Server(ServerKind::Result),
@@ -173,7 +173,7 @@ mod tests {
     async fn on_response__preserves_status_and_custom_headers() {
         let proxy = test_proxy_state();
         let mut cx = test_context(proxy);
-        let env = JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#).unwrap();
+        let env = JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","id":1,"result":{}}"#).unwrap();
         let message = McpMessage {
             envelope: env,
             kind: MessageKind::Server(ServerKind::Result),

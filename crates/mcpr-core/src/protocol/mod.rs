@@ -9,10 +9,8 @@
 //!
 //! ```text
 //! protocol/
-//! +-- jsonrpc.rs         JSON-RPC 2.0 envelope, id, error, lazy typed views
 //! +-- mcp.rs             MCP 2025-11-25 message taxonomy + classify_client/server
 //! +-- schema.rs          Pagination merge/diff + is_schema_method
-//! +-- schema_manager/    Per-upstream versioned schema snapshots
 //! +-- session.rs         Session lifecycle, SessionStore trait, MemorySessionStore
 //! ```
 //!
@@ -20,7 +18,6 @@
 //!
 //! Minimal: `serde`, `serde_json`, `chrono`, `dashmap`. No HTTP framework deps.
 
-pub mod jsonrpc;
 pub mod mcp;
 pub mod schema;
 pub mod session;

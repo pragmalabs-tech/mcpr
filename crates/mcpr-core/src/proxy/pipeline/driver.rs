@@ -168,7 +168,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::protocol::jsonrpc::JsonRpcEnvelope;
     use crate::protocol::mcp::{ClientKind, ClientMethod, McpMessage, MessageKind, ToolsMethod};
     use crate::proxy::pipeline::middleware::{Flow, RequestMiddleware, ResponseMiddleware};
     use crate::proxy::pipeline::middlewares::test_support::{test_context, test_proxy_state};
@@ -261,7 +260,7 @@ mod tests {
 
     fn stub_mcp_request() -> Request {
         let env =
-            JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).unwrap();
+            JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).unwrap();
         Request::Mcp(McpRequest {
             transport: McpTransport::StreamableHttpPost,
             envelope: env,
@@ -273,7 +272,7 @@ mod tests {
 
     fn stub_buffered_response() -> Response {
         let env =
-            JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#).unwrap();
+            JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#).unwrap();
         let message = McpMessage {
             envelope: env,
             kind: MessageKind::Server(crate::protocol::mcp::ServerKind::Result),
@@ -524,7 +523,7 @@ mod tests {
                 response: Mutex::new(Some(Response::McpBuffered {
                     envelope: Envelope::Json,
                     message: McpMessage {
-                        envelope: JsonRpcEnvelope::parse(
+                        envelope: JsonRpcRequest::parse(
                             br#"{"jsonrpc":"2.0","id":42,"result":{"tools":[]}}"#,
                         )
                         .unwrap(),

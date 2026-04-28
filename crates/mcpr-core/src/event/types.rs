@@ -76,14 +76,11 @@ pub struct RequestEvent {
 
     /// Classification note: "rewritten", "passthrough", "error", "sse", etc.
     pub note: String,
-
-    /// Per-stage wall-clock breakdown. Populated only when
-    /// `MCPR_STAGE_TIMING` is enabled — otherwise omitted. Each entry
-    /// is a named stage and its elapsed time in microseconds; entries
-    /// appear in execution order. Duplicate names are possible (the
-    /// aggregator sums them).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stage_timings: Option<Vec<crate::proxy::pipeline::values::StageTiming>>,
+    // Disabled with `proxy` module — refactor pending.
+    // /// Per-stage wall-clock breakdown. Populated only when
+    // /// `MCPR_STAGE_TIMING` is enabled — otherwise omitted.
+    // #[serde(default, skip_serializing_if = "Option::is_none")]
+    // pub stage_timings: Option<Vec<crate::proxy::pipeline::values::StageTiming>>,
 }
 
 /// MCP session established via `initialize` handshake.

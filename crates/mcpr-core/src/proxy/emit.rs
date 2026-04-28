@@ -198,7 +198,6 @@ mod tests {
     use axum::body::Body;
     use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 
-    use crate::protocol::jsonrpc::JsonRpcEnvelope;
     use crate::protocol::mcp::{
         ClientMethod, LifecycleMethod, McpMessage, MessageKind, ServerKind, ToolsMethod,
     };
@@ -206,7 +205,7 @@ mod tests {
     use crate::proxy::pipeline::values::{Envelope, Response};
 
     fn buffered_ok(body: &str) -> Response {
-        let envelope = JsonRpcEnvelope::parse(body.as_bytes()).unwrap();
+        let envelope = JsonRpcRequest::parse(body.as_bytes()).unwrap();
         let message = McpMessage {
             envelope,
             kind: MessageKind::Server(ServerKind::Result),
@@ -220,7 +219,7 @@ mod tests {
     }
 
     fn buffered_with_session(body: &str, session_id: &str) -> Response {
-        let envelope = JsonRpcEnvelope::parse(body.as_bytes()).unwrap();
+        let envelope = JsonRpcRequest::parse(body.as_bytes()).unwrap();
         let message = McpMessage {
             envelope,
             kind: MessageKind::Server(ServerKind::Result),

@@ -21,7 +21,7 @@ use axum::http::{HeaderMap, Method, Uri, header};
 
 use super::pipeline::stubs::SessionId;
 use super::pipeline::values::{McpRequest, McpTransport, RawRequest, Request};
-use crate::protocol::jsonrpc::JsonRpcEnvelope;
+use crate::protocol::jsonrpc::JsonRpcRequest;
 use crate::protocol::mcp::{ClientKind, ClientNotifMethod, classify_client};
 
 pub fn from_axum_parts(method: Method, headers: HeaderMap, uri: Uri, body: Bytes) -> Request {
@@ -29,7 +29,7 @@ pub fn from_axum_parts(method: Method, headers: HeaderMap, uri: Uri, body: Bytes
 
     // MCP POST — JSON-RPC body parse succeeds.
     if method == Method::POST
-        && let Ok(envelope) = JsonRpcEnvelope::parse(&body)
+        && let Ok(envelope) = JsonRpcRequest::parse(&body)
     {
         let kind = classify_client(&envelope);
         let session_hint = session_hint_from_headers(&headers);
@@ -45,7 +45,7 @@ pub fn from_axum_parts(method: Method, headers: HeaderMap, uri: Uri, body: Bytes
     // Legacy SSE GET — `Accept: text/event-stream` opens a server-push
     // stream. Envelope is synthetic; downstream matches on transport.
     if method == Method::GET && wants_sse(&headers) {
-        let envelope = JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"ping"}"#)
+        let envelope = JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","method":"ping"}"#)
             .expect("static synthetic envelope parses");
         let kind = ClientKind::Notification(ClientNotifMethod::Unknown("ping".into()));
         let session_hint = session_hint_from_headers(&headers);
@@ -62,7 +62,7 @@ pub fn from_axum_parts(method: Method, headers: HeaderMap, uri: Uri, body: Bytes
     if method == Method::DELETE
         && let Some(sid_value) = headers.get("mcp-session-id").cloned()
     {
-        let envelope = JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"delete"}"#)
+        let envelope = JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","method":"delete"}"#)
             .expect("static synthetic envelope parses");
         let kind = ClientKind::Notification(ClientNotifMethod::Unknown("delete".into()));
         let session_hint = sid_value

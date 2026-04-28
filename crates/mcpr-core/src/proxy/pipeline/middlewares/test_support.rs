@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use serde_json::Value;
 
 use crate::event::{EventBusHandle, EventManager, EventSink, ProxyEvent};
-use crate::protocol::jsonrpc::JsonRpcEnvelope;
+use crate::protocol::jsonrpc::JsonRpcRequest;
 use crate::protocol::mcp::{ClientKind, ClientMethod, McpMessage, MessageKind};
 use crate::protocol::session::MemorySessionStore;
 use crate::proxy::forwarding::UpstreamClient;
@@ -158,7 +158,7 @@ pub(crate) fn mcp_request(method: &str, params: Value, session: Option<&str>) ->
             params = params
         )
     };
-    let envelope = JsonRpcEnvelope::parse(body.as_bytes()).unwrap();
+    let envelope = JsonRpcRequest::parse(body.as_bytes()).unwrap();
     let kind = ClientKind::Request(ClientMethod::parse(method));
     Request::Mcp(McpRequest {
         transport: McpTransport::StreamableHttpPost,
@@ -171,7 +171,7 @@ pub(crate) fn mcp_request(method: &str, params: Value, session: Option<&str>) ->
 
 pub(crate) fn mcp_notification(method: &str, session: Option<&str>) -> Request {
     let body = format!(r#"{{"jsonrpc":"2.0","method":"{method}"}}"#);
-    let envelope = JsonRpcEnvelope::parse(body.as_bytes()).unwrap();
+    let envelope = JsonRpcRequest::parse(body.as_bytes()).unwrap();
     let kind = match envelope.method.as_deref() {
         Some(m) => ClientKind::Notification(crate::protocol::mcp::ClientNotifMethod::parse(m)),
         None => unreachable!("notification parsed without method"),
@@ -186,7 +186,7 @@ pub(crate) fn mcp_notification(method: &str, session: Option<&str>) -> Request {
 }
 
 pub(crate) fn mcp_buffered_response(body: &str, status: StatusCode) -> Response {
-    let envelope = JsonRpcEnvelope::parse(body.as_bytes()).unwrap();
+    let envelope = JsonRpcRequest::parse(body.as_bytes()).unwrap();
     let kind = MessageKind::Server(crate::protocol::mcp::classify_server(&envelope));
     let message = McpMessage { envelope, kind };
     Response::McpBuffered {
@@ -203,7 +203,7 @@ pub(crate) fn mcp_buffered_response_with_header(
     header_name: &'static str,
     header_value: &str,
 ) -> Response {
-    let envelope = JsonRpcEnvelope::parse(body.as_bytes()).unwrap();
+    let envelope = JsonRpcRequest::parse(body.as_bytes()).unwrap();
     let kind = MessageKind::Server(crate::protocol::mcp::classify_server(&envelope));
     let message = McpMessage { envelope, kind };
     let mut headers = HeaderMap::new();
@@ -226,7 +226,7 @@ pub(crate) fn set_request_method(cx: &mut Context, m: ClientMethod) {
 /// synthetic envelope so `SessionDeleteMiddleware` pattern-matches on
 /// `Request::Mcp` + `cx.intake.http_method == DELETE`.
 pub(crate) fn mcp_delete_request(session: Option<&str>) -> Request {
-    let envelope = JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"delete"}"#).unwrap();
+    let envelope = JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","method":"delete"}"#).unwrap();
     let kind = ClientKind::Notification(crate::protocol::mcp::ClientNotifMethod::Unknown(
         "delete".into(),
     ));

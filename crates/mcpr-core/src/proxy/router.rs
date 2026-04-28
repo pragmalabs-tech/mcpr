@@ -162,11 +162,11 @@ mod tests {
         let proxy = test_proxy_state();
         let cx = test_context(proxy);
         // `mcp_request` hard-codes id=1, so build a notification inline.
-        use crate::protocol::jsonrpc::JsonRpcEnvelope;
+        use crate::protocol::jsonrpc::JsonRpcRequest;
         use crate::protocol::mcp::ClientNotifMethod;
         use crate::proxy::pipeline::values::{McpRequest, McpTransport};
         let envelope =
-            JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
                 .unwrap();
         let req = Request::Mcp(McpRequest {
             transport: McpTransport::StreamableHttpPost,
@@ -185,12 +185,12 @@ mod tests {
 
     #[tokio::test]
     async fn route__sse_legacy_intake_is_sse_legacy_route() {
-        use crate::protocol::jsonrpc::JsonRpcEnvelope;
+        use crate::protocol::jsonrpc::JsonRpcRequest;
         use crate::protocol::mcp::ClientNotifMethod;
         use crate::proxy::pipeline::values::{McpRequest, McpTransport};
         let proxy = test_proxy_state();
         let cx = test_context(proxy);
-        let envelope = JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"ping"}"#).unwrap();
+        let envelope = JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","method":"ping"}"#).unwrap();
         let req = Request::Mcp(McpRequest {
             transport: McpTransport::SseLegacyGet,
             envelope,

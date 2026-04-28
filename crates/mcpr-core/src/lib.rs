@@ -17,5 +17,5 @@
 pub mod config;
 pub mod event;
 pub mod protocol;
-pub mod proxy;
+// pub mod proxy; // disabled — references the old JsonRpcRequest shape; refactor pending
 pub mod time;

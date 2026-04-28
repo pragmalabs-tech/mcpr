@@ -18,7 +18,7 @@ use super::pipeline::values::{
     BufferPolicy, Context, Envelope, McpRequest, RawRequest, Request, Response, Route, Working,
 };
 use super::sse::{extract_json_from_sse, split_upstream};
-use crate::protocol::jsonrpc::JsonRpcEnvelope;
+use crate::protocol::jsonrpc::JsonRpcRequest;
 use crate::protocol::mcp::{McpMessage, MessageKind, classify_server};
 
 pub struct ProxyTransport;
@@ -134,7 +134,7 @@ async fn buffer_and_parse(
 
     let envelope = {
         let _g = StageGuard::start("transport_json_parse", &mut working.timings);
-        match JsonRpcEnvelope::parse(&json_bytes) {
+        match JsonRpcRequest::parse(&json_bytes) {
             Ok(e) => e,
             Err(_) => {
                 return Response::Raw {
@@ -281,7 +281,7 @@ mod tests {
     }
 
     fn mcp_request(method: &str, body: &str, session: Option<&str>) -> McpRequest {
-        let envelope = JsonRpcEnvelope::parse(body.as_bytes()).unwrap();
+        let envelope = JsonRpcRequest::parse(body.as_bytes()).unwrap();
         let mut headers = HeaderMap::new();
         if let Some(sid) = session {
             headers.insert("mcp-session-id", HeaderValue::from_str(sid).unwrap());
@@ -499,7 +499,7 @@ mod tests {
         let mut cx = test_context(proxy);
         let req = McpRequest {
             transport: McpTransport::SseLegacyGet,
-            envelope: JsonRpcEnvelope::parse(br#"{"jsonrpc":"2.0","method":"ping"}"#).unwrap(),
+            envelope: JsonRpcRequest::parse(br#"{"jsonrpc":"2.0","method":"ping"}"#).unwrap(),
             kind: crate::protocol::mcp::ClientKind::Notification(
                 crate::protocol::mcp::ClientNotifMethod::Unknown("ping".into()),
             ),

@@ -19,7 +19,6 @@ use crate::proxy::ProxyState;
 use crate::proxy::forwarding::build_response;
 use crate::proxy::sse::wrap_as_sse;
 
-use crate::protocol::jsonrpc::JsonRpcEnvelope;
 use crate::protocol::mcp::{ClientKind, ClientMethod, McpMessage};
 
 use super::stubs::{OAuthKind, SessionId, TagSet, UrlMap};
@@ -42,7 +41,7 @@ pub enum Request {
 #[derive(Debug)]
 pub struct McpRequest {
     pub transport: McpTransport,
-    pub envelope: JsonRpcEnvelope,
+    pub envelope: JsonRpcRequest,
     pub kind: ClientKind,
     pub headers: HeaderMap,
     pub session_hint: Option<SessionId>,
