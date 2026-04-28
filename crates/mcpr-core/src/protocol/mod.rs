@@ -9,8 +9,8 @@
 //!
 //! ```text
 //! protocol/
-//! +-- mcp.rs             MCP 2025-11-25 message taxonomy + classify_client/server
-//! +-- schema.rs          Pagination merge/diff + is_schema_method
+//! +-- mcp.rs             JSON-RPC envelope + MCP 2025-11-25 method taxonomy
+//! +-- schema.rs          Discovery type definitions + canonical hash view
 //! +-- session.rs         Session lifecycle, SessionStore trait, MemorySessionStore
 //! ```
 //!
