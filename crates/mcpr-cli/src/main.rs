@@ -169,7 +169,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         }
     };
 
-    let bind_port = cfg.port.unwrap_or(3000);
+    let bind_port = cfg.port.unwrap_or(3004);
     let listener = match tokio::net::TcpListener::bind(format!("0.0.0.0:{bind_port}")).await {
         Ok(l) => l,
         Err(e) => {
