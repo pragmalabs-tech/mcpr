@@ -1,7 +1,7 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use dashmap::DashMap;
 
 use crate::protocol::mcp::RequestId;
 
@@ -37,11 +37,11 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
-    pub fn new(id: SessionId) -> Self {
+    pub fn new(id: SessionId, state: SessionState) -> Self {
         let now = Utc::now();
         Self {
             id,
-            state: SessionState::Created,
+            state,
             client_info: None,
             created_at: now,
             last_active: now,
@@ -51,25 +51,36 @@ impl SessionInfo {
     }
 }
 
-/// In-memory session store backed by DashMap for lock-free concurrent access.
+/// In-memory session store. Both indexes live behind one `Mutex` so every
+/// operation is atomic across `sessions` and `request_ids`.
 #[derive(Clone)]
-pub struct SessionStore {
-    sessions: Arc<DashMap<SessionId, SessionInfo>>,
-    request_ids: Arc<DashMap<RequestId, SessionId>>,
+pub struct ActiveSessionStore {
+    inner: Arc<Mutex<Inner>>,
 }
 
-impl SessionStore {
+struct Inner {
+    sessions: HashMap<SessionId, SessionInfo>,
+    request_ids: HashMap<RequestId, SessionId>,
+}
+
+impl ActiveSessionStore {
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(DashMap::new()),
-            request_ids: Arc::new(DashMap::new()),
+            inner: Arc::new(Mutex::new(Inner {
+                sessions: HashMap::new(),
+                request_ids: HashMap::new(),
+            })),
         }
     }
 
     /// Insert a fresh session. Overwrites any existing entry with the same id.
     pub async fn new_session(&self, id: &str) -> SessionInfo {
-        let info = SessionInfo::new(id.to_string());
-        self.sessions.insert(id.to_string(), info.clone());
+        let info = SessionInfo::new(id.to_string(), SessionState::Created);
+        self.inner
+            .lock()
+            .unwrap()
+            .sessions
+            .insert(id.to_string(), info.clone());
         info
     }
 
@@ -77,43 +88,46 @@ impl SessionStore {
     /// bumps `request_count` / `last_active`, and records the reverse index.
     /// No-op if the session doesn't exist.
     pub async fn attach_request(&self, request_id: RequestId, session_id: &str) {
-        let Some(mut entry) = self.sessions.get_mut(session_id) else {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(entry) = inner.sessions.get_mut(session_id) else {
             return;
         };
         entry.last_active = Utc::now();
         entry.request_count += 1;
         entry.request_ids.push(request_id.clone());
-        drop(entry);
-        self.request_ids.insert(request_id, session_id.to_string());
+        inner.request_ids.insert(request_id, session_id.to_string());
     }
 
     /// Remove a session and clear any reverse-index entries that pointed at it.
     pub async fn end_session(&self, id: &str) {
-        if let Some((_, info)) = self.sessions.remove(id) {
-            for req_id in info.request_ids {
-                self.request_ids.remove(&req_id);
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(info) = inner.sessions.remove(id) {
+            for req_id in &info.request_ids {
+                inner.request_ids.remove(req_id);
             }
         }
     }
 
     /// All sessions, sorted by `last_active` (most recent first).
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
-        let mut all: Vec<SessionInfo> = self.sessions.iter().map(|r| r.value().clone()).collect();
+        let inner = self.inner.lock().unwrap();
+        let mut all: Vec<SessionInfo> = inner.sessions.values().cloned().collect();
         all.sort_by(|a, b| b.last_active.cmp(&a.last_active));
         all
     }
 
     pub async fn get_session(&self, id: &str) -> Option<SessionInfo> {
-        self.sessions.get(id).map(|r| r.clone())
+        self.inner.lock().unwrap().sessions.get(id).cloned()
     }
 
     pub async fn get_session_by_request(&self, request_id: &RequestId) -> Option<SessionInfo> {
-        let sid = self.request_ids.get(request_id)?.clone();
-        self.sessions.get(&sid).map(|r| r.clone())
+        let inner = self.inner.lock().unwrap();
+        let sid = inner.request_ids.get(request_id)?;
+        inner.sessions.get(sid).cloned()
     }
 }
 
-impl Default for SessionStore {
+impl Default for ActiveSessionStore {
     fn default() -> Self {
         Self::new()
     }
@@ -148,9 +162,9 @@ mod tests {
 
     #[test]
     fn session_info_new__defaults() {
-        let info = SessionInfo::new("s1".to_string());
+        let info = SessionInfo::new("s1".to_string(), SessionState::Initialized);
         assert_eq!(info.id, "s1");
-        assert_eq!(info.state, SessionState::Created);
+        assert_eq!(info.state, SessionState::Initialized);
         assert!(info.client_info.is_none());
         assert_eq!(info.request_count, 0);
         assert!(info.request_ids.is_empty());
@@ -161,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_session__inserts_and_returns() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         let info = store.new_session("abc").await;
         assert_eq!(info.id, "abc");
         assert_eq!(store.get_session("abc").await.unwrap().id, "abc");
@@ -169,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_session__overwrites_existing() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.new_session("abc").await;
         store.attach_request(req_num(1), "abc").await;
         store.new_session("abc").await;
@@ -182,7 +196,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_request__appends_and_bumps_count() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.new_session("s1").await;
         store.attach_request(req_num(1), "s1").await;
         store.attach_request(req_num(2), "s1").await;
@@ -193,7 +207,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_request__writes_reverse_index() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.new_session("s1").await;
         store.attach_request(req_num(7), "s1").await;
         let found = store.get_session_by_request(&req_num(7)).await.unwrap();
@@ -202,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_request__missing_session_is_noop() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.attach_request(req_num(1), "missing").await;
         assert!(store.get_session("missing").await.is_none());
         assert!(store.get_session_by_request(&req_num(1)).await.is_none());
@@ -210,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn attach_request__updates_last_active() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         let created = store.new_session("s1").await;
         sleep(Duration::from_millis(2));
         store.attach_request(req_num(1), "s1").await;
@@ -222,7 +236,7 @@ mod tests {
 
     #[tokio::test]
     async fn end_session__removes_session_and_reverse_entries() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.new_session("s1").await;
         store.attach_request(req_num(1), "s1").await;
         store.attach_request(req_num(2), "s1").await;
@@ -236,7 +250,7 @@ mod tests {
 
     #[tokio::test]
     async fn end_session__leaves_other_sessions_intact() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.new_session("s1").await;
         store.new_session("s2").await;
         store.attach_request(req_num(1), "s1").await;
@@ -253,7 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn end_session__missing_id_is_noop() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.end_session("nope").await;
         assert!(store.list_sessions().await.is_empty());
     }
@@ -262,13 +276,13 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions__empty() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         assert!(store.list_sessions().await.is_empty());
     }
 
     #[tokio::test]
     async fn list_sessions__sorted_by_last_active_desc() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.new_session("oldest").await;
         sleep(Duration::from_millis(2));
         store.new_session("middle").await;
@@ -286,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_sessions__attach_request_promotes_session() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.new_session("a").await;
         sleep(Duration::from_millis(2));
         store.new_session("b").await;
@@ -306,7 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_session__missing_is_none() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         assert!(store.get_session("nope").await.is_none());
     }
 
@@ -314,13 +328,13 @@ mod tests {
 
     #[tokio::test]
     async fn get_session_by_request__missing_is_none() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         assert!(store.get_session_by_request(&req_num(99)).await.is_none());
     }
 
     #[tokio::test]
     async fn get_session_by_request__string_request_id() {
-        let store = SessionStore::new();
+        let store = ActiveSessionStore::new();
         store.new_session("s1").await;
         let rid = RequestId::String("req-abc".into());
         store.attach_request(rid.clone(), "s1").await;

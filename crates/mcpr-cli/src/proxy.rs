@@ -93,7 +93,7 @@ mod tests {
                 csp: mcpr_core::proxy::CspConfig::default(),
             }
             .into_swap(),
-            sessions: mcpr_core::protocol::session::SessionStore::new(),
+            sessions: mcpr_core::protocol::session::ActiveSessionStore::new(),
             health: mcpr_core::proxy::new_shared_health(),
             event_bus: mcpr_core::event::EventManager::new().start().bus,
         });
