@@ -50,13 +50,6 @@ pub enum CliAction {
     },
 }
 
-// ── Log format ──────────────────────────────────────────────────────────
-
-/// Log output format for stderr. Defined by `mcpr-integrations::sinks`
-/// alongside `StderrSink`; re-exported here so CLI code keeps referring to
-/// it as `config::LogFormat`.
-pub use mcpr_integrations::sinks::LogFormat;
-
 // ── CLI args ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
@@ -445,7 +438,6 @@ pub struct ValidateArgs {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     pub drain_timeout: u64,
-    pub log_format: LogFormat,
     pub admin_bind: String,
 }
 
@@ -781,11 +773,6 @@ pub fn load() -> CliAction {
 
             let runtime = RuntimeOptions {
                 drain_timeout: file.drain_timeout.unwrap_or(30),
-                log_format: file
-                    .log_format
-                    .as_deref()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(LogFormat::Json),
                 admin_bind: file
                     .admin_bind
                     .clone()
@@ -977,16 +964,6 @@ pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
                 if w.match_pattern.is_empty() {
                     issues.push(("error", format!("csp.widget[{idx}].match is required")));
                 }
-            }
-
-            // Validate log format
-            if let Some(ref fmt) = config.log_format
-                && fmt.parse::<LogFormat>().is_err()
-            {
-                issues.push((
-                    "error",
-                    format!("invalid log_format: {fmt} (expected: json, pretty)"),
-                ));
             }
 
             if issues.is_empty() {
@@ -1531,7 +1508,6 @@ mod tests {
         let file: FileConfig = toml::from_str(toml_str).unwrap();
         let runtime = RuntimeOptions {
             drain_timeout: 30,
-            log_format: LogFormat::Json,
             admin_bind: "127.0.0.1:9901".to_string(),
         };
         let mode = load_relay(file, runtime);
@@ -1558,7 +1534,6 @@ mod tests {
         let file: FileConfig = toml::from_str(toml_str).unwrap();
         let runtime = RuntimeOptions {
             drain_timeout: 30,
-            log_format: LogFormat::Json,
             admin_bind: "127.0.0.1:9901".to_string(),
         };
         load_relay(file, runtime);
@@ -1575,7 +1550,6 @@ mod tests {
         let file: FileConfig = toml::from_str(toml_str).unwrap();
         let runtime = RuntimeOptions {
             drain_timeout: 30,
-            log_format: LogFormat::Json,
             admin_bind: "127.0.0.1:9901".to_string(),
         };
         load_relay(file, runtime);

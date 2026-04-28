@@ -64,6 +64,4 @@ pub mod cloud_client;
 pub mod sinks;
 pub mod store;
 
-pub use sinks::{
-    CloudSink, CloudSinkConfig, LogFormat, SqliteSink, StderrSink, SyncCallback, SyncStatus,
-};
+pub use sinks::StderrSink;

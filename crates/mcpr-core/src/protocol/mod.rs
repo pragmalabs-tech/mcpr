@@ -24,20 +24,26 @@ pub mod session;
 
 use axum::body::Bytes;
 use axum::http::header::CONTENT_TYPE;
+use axum::http::request::Parts as RequestParts;
+use axum::http::response::Parts as ResponseParts;
 use http_body_util::BodyExt;
 
 /// Inbound traffic accepted by the proxy: a single MCP request, a
-/// JSON-RPC batch (array on the wire), or raw HTTP.
+/// JSON-RPC batch (array on the wire), or raw HTTP. The MCP variants
+/// carry the inbound HTTP `Parts` so headers (`mcp-session-id`, auth,
+/// cookies, …) can be forwarded to the upstream.
+#[derive(Clone)]
 pub enum Request {
-    Mcp(mcp::JsonRpcRequest),
-    McpBatch(Vec<mcp::JsonRpcRequest>),
+    Mcp(RequestParts, mcp::JsonRpcRequest),
+    McpBatch(RequestParts, Vec<mcp::JsonRpcRequest>),
     Http(http_request::HttpRequest),
 }
 
 impl Request {
     /// Buffer the axum body once, then classify: a JSON body that parses
     /// as JSON-RPC becomes `Mcp` (object) or `McpBatch` (array); anything
-    /// else is preserved as `Http`.
+    /// else is preserved as `Http`. The MCP variants keep the inbound
+    /// `Parts` so downstream stages can forward request headers.
     pub async fn from_axum(req: axum::extract::Request) -> std::result::Result<Self, ParseError> {
         let (parts, body) = req.into_parts();
         let bytes = axum::body::to_bytes(body, usize::MAX)
@@ -48,12 +54,12 @@ impl Request {
             match json_shape(&bytes) {
                 JsonShape::Array => {
                     if let Ok(batch) = serde_json::from_slice::<Vec<mcp::JsonRpcRequest>>(&bytes) {
-                        return Ok(Self::McpBatch(batch));
+                        return Ok(Self::McpBatch(parts, batch));
                     }
                 }
                 JsonShape::Object => {
                     if let Ok(rpc) = serde_json::from_slice::<mcp::JsonRpcRequest>(&bytes) {
-                        return Ok(Self::Mcp(rpc));
+                        return Ok(Self::Mcp(parts, rpc));
                     }
                 }
                 JsonShape::Other => {}
@@ -65,10 +71,13 @@ impl Request {
 
 /// Outcome of an upstream call: a single JSON-RPC result, a batch (array
 /// on the wire, paired 1:1 with `Request::McpBatch`), or a raw HTTP
-/// response.
+/// response. The MCP variants carry the upstream's HTTP `Parts` so
+/// response headers (`mcp-session-id`, `Set-Cookie`, …) flow back to
+/// the client.
+#[derive(Clone, Debug)]
 pub enum Response {
-    Mcp(mcp::JsonRpcResult),
-    McpBatch(Vec<mcp::JsonRpcResult>),
+    Mcp(ResponseParts, mcp::JsonRpcResult),
+    McpBatch(ResponseParts, Vec<mcp::JsonRpcResult>),
     Http(http_request::Result),
 }
 
@@ -95,17 +104,23 @@ impl Response {
             match json_shape(&bytes) {
                 JsonShape::Array => {
                     if let Ok(batch) = serde_json::from_slice::<Vec<mcp::JsonRpcResult>>(&bytes) {
-                        return Ok(Self::McpBatch(batch));
+                        return Ok(Self::McpBatch(parts, batch));
                     }
                 }
                 JsonShape::Object => {
                     if let Ok(rpc) = serde_json::from_slice::<mcp::JsonRpcResult>(&bytes) {
-                        return Ok(Self::Mcp(rpc));
+                        return Ok(Self::Mcp(parts, rpc));
                     }
                 }
                 JsonShape::Other => {}
             }
         }
+        // TODO: parse `text/event-stream` responses here. The MCP TS SDK
+        // defaults to SSE (`enableJsonResponse: false`), so most upstreams
+        // wrap even single replies in `event: message\ndata: {...}\n\n`.
+        // Until that lands, those responses fall through to `Http` and the
+        // router stage rejects them as non-JSON-RPC. Servers can opt out via
+        // `enableJsonResponse: true` (see examples/weather-app/server.ts).
         Ok(Self::Http(axum::http::Response::from_parts(parts, bytes)))
     }
 }
@@ -249,17 +264,33 @@ mod tests {
     async fn request_from_axum__single_jsonrpc_returns_mcp() {
         let req = axum_post("application/json", RPC_REQUEST);
         let parsed = Request::from_axum(req).await.unwrap();
-        assert!(matches!(parsed, Request::Mcp(_)));
+        assert!(matches!(parsed, Request::Mcp(_, _)));
     }
 
     #[tokio::test]
     async fn request_from_axum__jsonrpc_array_returns_mcp_batch() {
         let req = axum_post("application/json", RPC_BATCH_REQUEST);
         let parsed = Request::from_axum(req).await.unwrap();
-        let Request::McpBatch(items) = parsed else {
+        let Request::McpBatch(_, items) = parsed else {
             panic!("expected McpBatch");
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn request_from_axum__mcp_preserves_inbound_headers() {
+        let req = HttpReq::post("/")
+            .header("content-type", "application/json")
+            .header("mcp-session-id", "sess-xyz")
+            .header("authorization", "Bearer abc")
+            .body(Body::from(RPC_REQUEST.to_string()))
+            .unwrap();
+        let parsed = Request::from_axum(req).await.unwrap();
+        let Request::Mcp(parts, _) = parsed else {
+            panic!("expected Mcp");
+        };
+        assert_eq!(parts.headers["mcp-session-id"], "sess-xyz");
+        assert_eq!(parts.headers["authorization"], "Bearer abc");
     }
 
     #[tokio::test]
@@ -318,7 +349,7 @@ mod tests {
         let parsed = Response::from_hyper(resp).await.unwrap();
         assert!(matches!(
             parsed,
-            Response::Mcp(mcp::JsonRpcResult::Response(_))
+            Response::Mcp(_, mcp::JsonRpcResult::Response(_))
         ));
     }
 
@@ -326,10 +357,29 @@ mod tests {
     async fn response_from_hyper__jsonrpc_array_returns_mcp_batch() {
         let resp = hyper_resp(200, "application/json", RPC_BATCH_RESULT);
         let parsed = Response::from_hyper(resp).await.unwrap();
-        let Response::McpBatch(items) = parsed else {
+        let Response::McpBatch(_, items) = parsed else {
             panic!("expected McpBatch");
         };
         assert_eq!(items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn response_from_hyper__mcp_preserves_upstream_headers() {
+        let resp = hyper::Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .header("mcp-session-id", "sess-xyz")
+            .header("set-cookie", "k=v; Path=/")
+            .body(http_body_util::Full::new(
+                axum::body::Bytes::copy_from_slice(RPC_RESULT.as_bytes()),
+            ))
+            .unwrap();
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        let Response::Mcp(parts, _) = parsed else {
+            panic!("expected Mcp");
+        };
+        assert_eq!(parts.headers["mcp-session-id"], "sess-xyz");
+        assert_eq!(parts.headers["set-cookie"], "k=v; Path=/");
     }
 
     #[tokio::test]

@@ -1266,6 +1266,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tower-http",
  "tracing",
  "url",
  "uuid",
@@ -1275,8 +1276,10 @@ dependencies = [
 name = "mcpr-integrations"
 version = "0.4.70"
 dependencies = [
+ "bytes",
  "chrono",
  "dirs",
+ "http",
  "mcpr-core",
  "reqwest",
  "rusqlite",

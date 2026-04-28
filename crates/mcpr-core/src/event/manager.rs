@@ -39,7 +39,7 @@ impl EventManager {
         self.sinks.is_empty()
     }
 
-    /// Spawn the background dispatch task and return a live handle.
+    // Spawn an os thread that handle the event and not try to use thread of tokio
     pub fn start(self) -> EventBusHandle {
         bus::spawn(self.sinks)
     }
