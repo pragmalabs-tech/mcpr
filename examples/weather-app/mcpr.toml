@@ -1,2 +1,13 @@
 mcp = "http://localhost:9001/mcp"
 port = 3000
+
+[csp]
+domain = "widgets.myshop.com"
+
+[csp.connectDomains]
+domains = ["https://api.myshop.com"]
+mode    = "extend"
+
+[csp.resourceDomains]
+domains = ["https://cdn.myshop.com"]
+mode    = "extend"
