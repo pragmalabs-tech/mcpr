@@ -13,6 +13,7 @@ use crate::{
     },
 };
 
+pub mod csp_rewritten_stage;
 pub mod log_stage;
 pub mod router_stage;
 pub mod types;
@@ -63,10 +64,10 @@ impl StagePipeline {
 mod tests {
     use super::*;
     use crate::{
-        csp::CspConfig,
         protocol::mcp::{
             ClientMethod, JsonRpcRequest, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
         },
+        proxy2::csp::CspConfig,
         proxy2::{proxy_config::ProxyConfig, state::InnerProxyState},
     };
     use async_trait::async_trait;

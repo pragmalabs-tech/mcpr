@@ -11,7 +11,7 @@
 use serde::Deserialize;
 use std::path::Path;
 
-use crate::csp::{CspConfig, DirectivePolicy, Mode as CspMode, WidgetScoped};
+use super::csp::{CspConfig, DirectivePolicy, Mode as CspMode, WidgetScoped};
 
 // ── File shape ─────────────────────────────────────────────────────────
 
