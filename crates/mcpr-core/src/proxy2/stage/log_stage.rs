@@ -1,3 +1,4 @@
+/// Log Stage will focus to track request and response events;
 use async_trait::async_trait;
 
 use crate::{

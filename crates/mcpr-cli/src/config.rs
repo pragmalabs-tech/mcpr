@@ -721,6 +721,7 @@ impl FileConfig {
 
 /// Resolved configuration for gateway (proxy) mode.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct GatewayConfig {
     pub name: String,
     pub mcp: Option<String>,

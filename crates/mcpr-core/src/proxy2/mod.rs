@@ -14,20 +14,24 @@ use axum::{
 };
 use tower_http::cors::CorsLayer;
 
-use crate::proxy2::{
-    proxy_config::ProxyConfig,
-    stage::{
-        StagePipeline,
-        csp_rewritten_stage::{CspRewriteConfig, CspRewritter},
-        log_stage::{RequestLogStage, ResponseLogStage},
-        router_stage::RouterStage,
-        types::{RequestStage, ResponseStage},
-    },
-    state::InnerProxyState,
-};
 use crate::{
     event::EventBus,
     protocol::{Request, Response},
+    proxy2::stage::sesion_stage::SessionStage,
+};
+use crate::{
+    protocol::session::SessionStore,
+    proxy2::{
+        proxy_config::ProxyConfig,
+        stage::{
+            StagePipeline,
+            csp_rewritten_stage::{CspRewriteConfig, CspRewritter},
+            log_stage::{RequestLogStage, ResponseLogStage},
+            router_stage::RouterStage,
+            types::{RequestStage, ResponseStage},
+        },
+        state::InnerProxyState,
+    },
 };
 
 /// Build an axum app that runs a single proxy from `cfg`. Every request
@@ -38,7 +42,8 @@ pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<R
     let cors = CorsLayer::permissive();
     let csp_rewritter = CspRewritter::new(CspRewriteConfig::from_proxy_config(&cfg));
     let router_stage = RouterStage::new(cfg)?;
-    let request_stages: Vec<Box<dyn RequestStage>> = vec![Box::new(RequestLogStage)];
+    let request_stages: Vec<Box<dyn RequestStage>> =
+        vec![Box::new(RequestLogStage), Box::new(SessionStage)];
     let response_stages: Vec<Box<dyn ResponseStage>> =
         vec![Box::new(csp_rewritter), Box::new(ResponseLogStage)];
 
@@ -46,7 +51,7 @@ pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<R
         request_stages,
         response_stages,
         router_stage,
-        Arc::new(InnerProxyState::new(event_bus)),
+        Arc::new(InnerProxyState::new(event_bus, SessionStore::new())),
     ));
 
     Ok(Router::new()

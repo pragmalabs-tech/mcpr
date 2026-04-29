@@ -2,6 +2,12 @@
 //! inbound traffic in order, `RouterStage` talks to upstream, response
 //! stages mutate outbound traffic in order on the way back.
 
+pub mod csp_rewritten_stage;
+pub mod log_stage;
+pub mod router_stage;
+pub mod sesion_stage;
+pub mod types;
+
 use crate::{
     protocol::{Request, Response},
     proxy2::{
@@ -12,11 +18,6 @@ use crate::{
         state::ProxyState,
     },
 };
-
-pub mod csp_rewritten_stage;
-pub mod log_stage;
-pub mod router_stage;
-pub mod types;
 
 pub struct StagePipeline {
     request_stages: Vec<Box<dyn RequestStage>>,
