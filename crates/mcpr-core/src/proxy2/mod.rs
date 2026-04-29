@@ -11,8 +11,7 @@ use axum::{
     response::{IntoResponse, Response as AxumResponse},
     routing::any,
 };
-use http::{Method, header::CONTENT_TYPE};
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use crate::proxy2::{
     proxy_config::ProxyConfig,

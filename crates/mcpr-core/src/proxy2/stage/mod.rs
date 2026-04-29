@@ -13,6 +13,7 @@ use crate::{
     },
 };
 
+pub mod csp_rewritten_stage;
 pub mod log_stage;
 pub mod router_stage;
 pub mod types;
