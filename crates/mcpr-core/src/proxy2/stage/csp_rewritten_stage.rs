@@ -20,9 +20,9 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 
 use crate::{
-    csp::{CspConfig, Directive, effective_domains, is_public_proxy_origin},
     protocol::{Response, mcp::JsonRpcResult},
-    proxy2::{stage::types::ResponseStage, state::ProxyState},
+    proxy2::csp::{CspConfig, Directive, effective_domains, is_public_proxy_origin},
+    proxy2::{proxy_config::ProxyConfig, stage::types::ResponseStage, state::ProxyState},
 };
 
 /// Inputs to the CSP rewrite. Held inside an `ArcSwap` on the stage so
@@ -41,6 +41,32 @@ pub struct CspRewriteConfig {
     pub mcp_upstream: String,
     /// Declarative CSP config — global policies plus widget-scoped overrides.
     pub csp: CspConfig,
+}
+
+impl CspRewriteConfig {
+    /// Derive runtime inputs from a resolved [`ProxyConfig`].
+    ///
+    /// `csp.domain` carries the operator-declared public host. When it is set
+    /// we build `https://{domain}` and inject it into widget CSP. When it is
+    /// absent we fall back to a loopback URL paired with an empty
+    /// `proxy_domain` — the same "no public origin" signal the rewrite checks
+    /// via [`crate::csp::is_public_proxy_origin`]. The exact port is
+    /// irrelevant in that case because injection is suppressed for loopback,
+    /// so we don't need the bound port to be known yet.
+    pub fn from_proxy_config(cfg: &ProxyConfig) -> Self {
+        let proxy_domain = cfg.csp.domain.clone().unwrap_or_default();
+        let proxy_url = if proxy_domain.is_empty() {
+            "http://localhost".to_string()
+        } else {
+            format!("https://{proxy_domain}")
+        };
+        Self {
+            proxy_url,
+            proxy_domain,
+            mcp_upstream: cfg.mcp.clone(),
+            csp: cfg.csp.clone(),
+        }
+    }
 }
 
 pub struct CspRewritter {
@@ -363,8 +389,8 @@ fn ensure_meta(container: &mut Value) -> Option<&mut Value> {
 mod tests {
     use super::*;
     use crate::{
-        csp::{CspConfig, DirectivePolicy, Mode, WidgetScoped},
         protocol::mcp::{JsonRpcError, JsonRpcResponse, JsonRpcVersion, RequestId},
+        proxy2::csp::{CspConfig, DirectivePolicy, Mode, WidgetScoped},
         proxy2::state::InnerProxyState,
     };
     use axum::http::response::Parts as ResponseParts;
@@ -388,6 +414,20 @@ mod tests {
             proxy_domain: String::new(),
             mcp_upstream: "http://localhost:9000".into(),
             csp: CspConfig::default(),
+        }
+    }
+
+    fn proxy_config_with_csp(csp: CspConfig) -> ProxyConfig {
+        ProxyConfig {
+            name: "test".into(),
+            mcp: "http://upstream.internal:9000".into(),
+            port: Some(9002),
+            csp,
+            max_request_body_size: None,
+            max_response_body_size: None,
+            max_concurrent_upstream: None,
+            connect_timeout: None,
+            request_timeout: None,
         }
     }
 
@@ -434,6 +474,49 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect()
+    }
+
+    // ── from_proxy_config ─────────────────────────────────────
+
+    #[test]
+    fn from_proxy_config__domain_set_builds_https_url() {
+        let mut csp = CspConfig::default();
+        csp.domain = Some("widgets.example.com".into());
+        let cfg = CspRewriteConfig::from_proxy_config(&proxy_config_with_csp(csp));
+        assert_eq!(cfg.proxy_domain, "widgets.example.com");
+        assert_eq!(cfg.proxy_url, "https://widgets.example.com");
+        assert_eq!(cfg.mcp_upstream, "http://upstream.internal:9000");
+    }
+
+    #[test]
+    fn from_proxy_config__domain_unset_signals_local_only() {
+        // Empty proxy_domain + loopback proxy_url is the "no public origin"
+        // signal — `is_public_proxy_origin` returns false for it, so widget
+        // CSP injection is suppressed instead of leaking localhost.
+        let cfg = CspRewriteConfig::from_proxy_config(&proxy_config_with_csp(CspConfig::default()));
+        assert_eq!(cfg.proxy_domain, "");
+        assert!(!is_public_proxy_origin(&cfg.proxy_url));
+    }
+
+    #[test]
+    fn from_proxy_config__copies_csp_policies() {
+        let mut csp = CspConfig::default();
+        csp.domain = Some("widgets.example.com".into());
+        csp.connect_domains = DirectivePolicy {
+            domains: vec!["https://api.example.com".into()],
+            mode: Mode::Replace,
+        };
+        csp.widgets.push(WidgetScoped {
+            match_pattern: "ui://widget/x".into(),
+            ..Default::default()
+        });
+        let cfg = CspRewriteConfig::from_proxy_config(&proxy_config_with_csp(csp));
+        assert_eq!(cfg.csp.connect_domains.mode, Mode::Replace);
+        assert_eq!(
+            cfg.csp.connect_domains.domains,
+            vec!["https://api.example.com"]
+        );
+        assert_eq!(cfg.csp.widgets.len(), 1);
     }
 
     // ── Pass-through cases ────────────────────────────────────

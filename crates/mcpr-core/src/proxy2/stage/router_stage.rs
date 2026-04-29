@@ -194,10 +194,10 @@ fn box_full(bytes: Bytes) -> BoxBody<Bytes, hyper::Error> {
 mod tests {
     use super::*;
     use crate::{
-        csp::CspConfig,
         protocol::mcp::{
             ClientMethod, JsonRpcRequest, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
         },
+        proxy2::csp::CspConfig,
         proxy2::state::InnerProxyState,
     };
     use axum::{

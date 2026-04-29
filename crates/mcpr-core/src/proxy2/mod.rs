@@ -1,3 +1,4 @@
+pub mod csp;
 pub mod proxy_config;
 pub mod stage;
 pub mod state;
@@ -17,6 +18,7 @@ use crate::proxy2::{
     proxy_config::ProxyConfig,
     stage::{
         StagePipeline,
+        csp_rewritten_stage::{CspRewriteConfig, CspRewritter},
         log_stage::{RequestLogStage, ResponseLogStage},
         router_stage::RouterStage,
         types::{RequestStage, ResponseStage},
@@ -28,14 +30,17 @@ use crate::{
     protocol::{Request, Response},
 };
 
-/// Build an axum app that runs a single proxy from `cfg`. Pipeline has no
-/// pre/post stages yet — every request flows: axum → `Request::from_axum`
-/// → `StagePipeline::process` → axum response.
+/// Build an axum app that runs a single proxy from `cfg`. Every request
+/// flows: axum → `Request::from_axum` → `StagePipeline::process` → axum
+/// response. The CSP rewrite stage runs after the router so widget metas
+/// in upstream responses are mutated before they reach the client.
 pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<Router> {
     let cors = CorsLayer::permissive();
+    let csp_rewritter = CspRewritter::new(CspRewriteConfig::from_proxy_config(&cfg));
     let router_stage = RouterStage::new(cfg)?;
     let request_stages: Vec<Box<dyn RequestStage>> = vec![Box::new(RequestLogStage)];
-    let response_stages: Vec<Box<dyn ResponseStage>> = vec![Box::new(ResponseLogStage)];
+    let response_stages: Vec<Box<dyn ResponseStage>> =
+        vec![Box::new(csp_rewritter), Box::new(ResponseLogStage)];
 
     let pipeline = Arc::new(StagePipeline::new(
         request_stages,
