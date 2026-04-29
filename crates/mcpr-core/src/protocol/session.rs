@@ -55,6 +55,12 @@ impl SessionInfo {
 
 /// In-memory session store. Both indexes live behind one `Mutex` so every
 /// operation is atomic across `sessions` and `request_ids`.
+///
+/// TODO: idle-session cleanup. Today sessions only end on an explicit
+/// client `DELETE` (see `end_session`). If the client crashes or never
+/// sends `DELETE`, the entry lives forever — `last_active` keeps
+/// advancing only while requests flow, so a TTL-based sweeper that
+/// closes sessions inactive for N minutes is the missing half.
 #[derive(Clone)]
 pub struct SessionStore {
     inner: Arc<Mutex<Inner>>,
@@ -112,13 +118,16 @@ impl SessionStore {
     }
 
     /// Remove a session and clear any reverse-index entries that pointed at it.
-    pub fn end_session(&self, id: &str) {
+    /// Returns the removed `SessionInfo` (with `state` flipped to `Closed`) so
+    /// callers can emit a final event. `None` if the session was unknown.
+    pub fn end_session(&self, id: &str) -> Option<SessionInfo> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(info) = inner.sessions.remove(id) {
-            for req_id in &info.request_ids {
-                inner.request_ids.remove(req_id);
-            }
+        let mut info = inner.sessions.remove(id)?;
+        for req_id in &info.request_ids {
+            inner.request_ids.remove(req_id);
         }
+        info.state = SessionState::Closed;
+        Some(info)
     }
 
     /// All sessions, sorted by `last_active` (most recent first).

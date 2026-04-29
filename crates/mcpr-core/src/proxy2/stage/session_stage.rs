@@ -1,9 +1,12 @@
 use async_trait::async_trait;
+use axum::http::Method;
 use axum::http::request::Parts as RequestParts;
 
 use crate::{
     event::ProxyEvent,
-    protocol::{Request, mcp::JsonRpcRequest, session::session_id_from_headers},
+    protocol::{
+        Request, http_request::HttpRequest, mcp::JsonRpcRequest, session::session_id_from_headers,
+    },
     proxy2::{stage::types::RequestStage, state::ProxyState},
 };
 
@@ -21,7 +24,9 @@ impl RequestStage for SessionStage {
                     track_mcp_request(parts, rpc, &state);
                 }
             }
-            Request::Http(_) => (),
+            Request::Http(http) => {
+                end_http_session(http, &state);
+            }
         }
 
         Ok(request)
@@ -51,6 +56,21 @@ fn track_mcp_request(
     Some(())
 }
 
+/// Observe an HTTP request: if it's a `DELETE` carrying `mcp-session-id`,
+/// the client is ending the session — drop our local record and emit a
+/// final event with `state = Closed`. Returns `None` otherwise.
+fn end_http_session(http: &HttpRequest, state: &ProxyState) -> Option<()> {
+    if http.method() != Method::DELETE {
+        return None;
+    }
+    let session_id = session_id_from_headers(http.headers())?;
+    let closed = state.sessions.end_session(&session_id)?;
+
+    state.event_bus.emit(ProxyEvent::Session(Box::new(closed)));
+
+    Some(())
+}
+
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
@@ -62,7 +82,7 @@ mod tests {
 
     use crate::event::{EventBusHandle, EventManager, EventSink};
     use crate::protocol::mcp::{ClientMethod, JsonRpcVersion, RequestId, ToolsMethod};
-    use crate::protocol::session::SessionStore;
+    use crate::protocol::session::{SessionState, SessionStore};
     use crate::proxy2::state::InnerProxyState;
 
     #[derive(Clone, Default)]
@@ -114,6 +134,14 @@ mod tests {
         }
     }
 
+    fn http_request_with(method: Method, headers: &[(&str, &str)]) -> HttpRequest {
+        let mut builder = HttpReq::builder().method(method).uri("/");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        builder.body(axum::body::Bytes::new()).unwrap()
+    }
+
     #[tokio::test]
     async fn track_mcp_request__forwards_session_header_and_emits() {
         let (state, sink, handle) = state_with_sink();
@@ -137,6 +165,69 @@ mod tests {
 
         assert!(track_mcp_request(&parts, &tools_list_request(), &state).is_none());
         assert!(state.sessions.list_sessions().is_empty());
+
+        handle.shutdown().await;
+        assert!(sink.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn end_http_session__delete_with_known_session_removes_and_emits_closed() {
+        let (state, sink, handle) = state_with_sink();
+        state
+            .sessions
+            .track_request("sess-1".into(), RequestId::Number(1), None);
+        let http = http_request_with(Method::DELETE, &[("mcp-session-id", "sess-1")]);
+
+        assert!(end_http_session(&http, &state).is_some());
+        assert!(state.sessions.get_session("sess-1").is_none());
+
+        handle.shutdown().await;
+        let closed = sink.snapshot().into_iter().find_map(|e| match e {
+            ProxyEvent::Session(s) if s.id == "sess-1" && s.state == SessionState::Closed => {
+                Some(s)
+            }
+            _ => None,
+        });
+        assert!(closed.is_some());
+    }
+
+    #[tokio::test]
+    async fn end_http_session__delete_unknown_session_is_noop() {
+        let (state, sink, handle) = state_with_sink();
+        let http = http_request_with(Method::DELETE, &[("mcp-session-id", "never-existed")]);
+
+        assert!(end_http_session(&http, &state).is_none());
+
+        handle.shutdown().await;
+        assert!(sink.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn end_http_session__non_delete_is_noop() {
+        let (state, sink, handle) = state_with_sink();
+        state
+            .sessions
+            .track_request("sess-1".into(), RequestId::Number(1), None);
+        let http = http_request_with(Method::POST, &[("mcp-session-id", "sess-1")]);
+
+        assert!(end_http_session(&http, &state).is_none());
+        assert!(state.sessions.get_session("sess-1").is_some());
+
+        handle.shutdown().await;
+        // The track_request above emits one Session event; no Closed should follow.
+        let saw_closed = sink
+            .snapshot()
+            .iter()
+            .any(|e| matches!(e, ProxyEvent::Session(s) if s.state == SessionState::Closed));
+        assert!(!saw_closed);
+    }
+
+    #[tokio::test]
+    async fn end_http_session__delete_without_session_header_is_noop() {
+        let (state, sink, handle) = state_with_sink();
+        let http = http_request_with(Method::DELETE, &[]);
+
+        assert!(end_http_session(&http, &state).is_none());
 
         handle.shutdown().await;
         assert!(sink.snapshot().is_empty());
