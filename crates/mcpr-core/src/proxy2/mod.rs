@@ -17,7 +17,7 @@ use tower_http::cors::CorsLayer;
 use crate::{
     event::EventBus,
     protocol::{Request, Response},
-    proxy2::stage::sesion_stage::SessionStage,
+    proxy2::stage::session_stage::SessionStage,
 };
 use crate::{
     protocol::session::SessionStore,

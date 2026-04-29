@@ -5,7 +5,7 @@
 pub mod csp_rewritten_stage;
 pub mod log_stage;
 pub mod router_stage;
-pub mod sesion_stage;
+pub mod session_stage;
 pub mod types;
 
 use crate::{
