@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 
-use crate::protocol::mcp::RequestId;
+use crate::protocol::mcp::{ClientInfo, RequestId};
 
 pub type SessionId = String;
 
@@ -11,17 +11,8 @@ pub type SessionId = String;
 /// The proxy doesn't control transitions; it observes them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionState {
-    Created,
-    Initialized,
     Active,
     Closed,
-}
-
-/// Client identity extracted from the MCP `initialize` request's `clientInfo` param.
-#[derive(Debug, Clone)]
-pub struct ClientInfo {
-    pub name: String,
-    pub version: Option<String>,
 }
 
 /// Observed session metadata tracked by the proxy for debugging/observability.
@@ -37,17 +28,27 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
-    pub fn new(id: SessionId, state: SessionState) -> Self {
+    pub fn new(id: SessionId, client_info: Option<ClientInfo>, request_id: RequestId) -> Self {
         let now = Utc::now();
         Self {
             id,
-            state,
-            client_info: None,
+            state: SessionState::Active,
+            client_info,
             created_at: now,
             last_active: now,
-            request_count: 0,
-            request_ids: Vec::new(),
+            request_count: 1,
+            request_ids: vec![request_id],
         }
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        if self.id != other.id {
+            return;
+        }
+
+        self.last_active = other.last_active;
+        self.request_count += other.request_count;
+        self.request_ids.extend(other.request_ids);
     }
 }
 
@@ -73,29 +74,40 @@ impl ActiveSessionStore {
         }
     }
 
-    /// Insert a fresh session. Overwrites any existing entry with the same id.
-    pub async fn new_session(&self, id: &str) -> SessionInfo {
-        let info = SessionInfo::new(id.to_string(), SessionState::Created);
-        self.inner
-            .lock()
-            .unwrap()
-            .sessions
-            .insert(id.to_string(), info.clone());
-        info
-    }
-
-    /// Bind a request id to a session: appends to the session's request list,
-    /// bumps `request_count` / `last_active`, and records the reverse index.
-    /// No-op if the session doesn't exist.
-    pub async fn attach_request(&self, request_id: RequestId, session_id: &str) {
+    /// Add a request to session store.
+    /// Can be used to create a new session if one doesn't exist.
+    ///
+    /// Returns `Some(info)` when state changed (new session or new request) so
+    /// callers can emit. Returns `None` when the request was already tracked.
+    pub async fn track_request(
+        &self,
+        session_id: SessionId,
+        request_id: RequestId,
+        client_info: Option<ClientInfo>,
+    ) -> Option<SessionInfo> {
         let mut inner = self.inner.lock().unwrap();
-        let Some(entry) = inner.sessions.get_mut(session_id) else {
-            return;
+
+        if inner.request_ids.contains_key(&request_id) {
+            return None;
+        }
+
+        let info = match inner.sessions.get_mut(&session_id) {
+            Some(existing) => {
+                existing.last_active = Utc::now();
+                existing.request_count += 1;
+                existing.request_ids.push(request_id.clone());
+                existing.clone()
+            }
+            None => {
+                let new_info =
+                    SessionInfo::new(session_id.clone(), client_info, request_id.clone());
+                inner.sessions.insert(session_id.clone(), new_info.clone());
+                new_info
+            }
         };
-        entry.last_active = Utc::now();
-        entry.request_count += 1;
-        entry.request_ids.push(request_id.clone());
-        inner.request_ids.insert(request_id, session_id.to_string());
+
+        inner.request_ids.insert(request_id, session_id);
+        Some(info)
     }
 
     /// Remove a session and clear any reverse-index entries that pointed at it.
@@ -133,17 +145,6 @@ impl Default for ActiveSessionStore {
     }
 }
 
-/// Extract `clientInfo` from MCP initialize request params.
-pub fn parse_client_info(params: &serde_json::Value) -> Option<ClientInfo> {
-    let client_info = params.get("clientInfo")?;
-    let name = client_info.get("name")?.as_str()?.to_string();
-    let version = client_info
-        .get("version")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    Some(ClientInfo { name, version })
-}
-
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
@@ -152,84 +153,137 @@ mod tests {
     use std::thread::sleep;
     use std::time::Duration;
 
-    use serde_json::json;
-
     fn req_num(n: i64) -> RequestId {
         RequestId::Number(n)
+    }
+
+    fn client(name: &str) -> ClientInfo {
+        ClientInfo {
+            name: name.to_string(),
+            version: None,
+        }
     }
 
     // ── SessionInfo::new ───────────────────────────────────────
 
     #[test]
-    fn session_info_new__defaults() {
-        let info = SessionInfo::new("s1".to_string(), SessionState::Initialized);
+    fn session_info_new__seeds_first_request() {
+        let info = SessionInfo::new("s1".to_string(), None, req_num(1));
         assert_eq!(info.id, "s1");
-        assert_eq!(info.state, SessionState::Initialized);
+        assert_eq!(info.state, SessionState::Active);
         assert!(info.client_info.is_none());
-        assert_eq!(info.request_count, 0);
-        assert!(info.request_ids.is_empty());
+        assert_eq!(info.request_count, 1);
+        assert_eq!(info.request_ids, vec![req_num(1)]);
         assert_eq!(info.created_at, info.last_active);
     }
 
-    // ── new_session ────────────────────────────────────────────
+    #[test]
+    fn session_info_new__captures_client_info() {
+        let info = SessionInfo::new("s1".to_string(), Some(client("cursor")), req_num(1));
+        assert_eq!(info.client_info.as_ref().unwrap().name, "cursor");
+    }
+
+    // ── SessionInfo::merge ─────────────────────────────────────
+
+    #[test]
+    fn session_info_merge__appends_requests_and_count() {
+        let mut a = SessionInfo::new("s1".to_string(), None, req_num(1));
+        let b = SessionInfo::new("s1".to_string(), None, req_num(2));
+        a.merge(b);
+        assert_eq!(a.request_count, 2);
+        assert_eq!(a.request_ids, vec![req_num(1), req_num(2)]);
+    }
+
+    #[test]
+    fn session_info_merge__ignores_mismatched_id() {
+        let mut a = SessionInfo::new("s1".to_string(), None, req_num(1));
+        let b = SessionInfo::new("s2".to_string(), None, req_num(2));
+        a.merge(b);
+        assert_eq!(a.request_count, 1);
+        assert_eq!(a.request_ids, vec![req_num(1)]);
+    }
+
+    // ── track_request ──────────────────────────────────────────
 
     #[tokio::test]
-    async fn new_session__inserts_and_returns() {
+    async fn track_request__creates_session_when_missing() {
         let store = ActiveSessionStore::new();
-        let info = store.new_session("abc").await;
-        assert_eq!(info.id, "abc");
-        assert_eq!(store.get_session("abc").await.unwrap().id, "abc");
+        let info = store
+            .track_request("s1".into(), req_num(1), Some(client("cursor")))
+            .await
+            .unwrap();
+        assert_eq!(info.id, "s1");
+        assert_eq!(info.request_count, 1);
+        assert_eq!(info.request_ids, vec![req_num(1)]);
+        assert_eq!(info.client_info.as_ref().unwrap().name, "cursor");
     }
 
     #[tokio::test]
-    async fn new_session__overwrites_existing() {
+    async fn track_request__appends_to_existing_session() {
         let store = ActiveSessionStore::new();
-        store.new_session("abc").await;
-        store.attach_request(req_num(1), "abc").await;
-        store.new_session("abc").await;
-        let info = store.get_session("abc").await.unwrap();
-        assert_eq!(info.request_count, 0);
-        assert!(info.request_ids.is_empty());
-    }
-
-    // ── attach_request ─────────────────────────────────────────
-
-    #[tokio::test]
-    async fn attach_request__appends_and_bumps_count() {
-        let store = ActiveSessionStore::new();
-        store.new_session("s1").await;
-        store.attach_request(req_num(1), "s1").await;
-        store.attach_request(req_num(2), "s1").await;
-        let info = store.get_session("s1").await.unwrap();
+        store.track_request("s1".into(), req_num(1), None).await;
+        let info = store
+            .track_request("s1".into(), req_num(2), None)
+            .await
+            .unwrap();
         assert_eq!(info.request_count, 2);
         assert_eq!(info.request_ids, vec![req_num(1), req_num(2)]);
     }
 
     #[tokio::test]
-    async fn attach_request__writes_reverse_index() {
+    async fn track_request__duplicate_request_returns_none() {
         let store = ActiveSessionStore::new();
-        store.new_session("s1").await;
-        store.attach_request(req_num(7), "s1").await;
+        store.track_request("s1".into(), req_num(1), None).await;
+        let again = store.track_request("s1".into(), req_num(1), None).await;
+        assert!(again.is_none());
+        let info = store.get_session("s1").await.unwrap();
+        assert_eq!(info.request_count, 1);
+    }
+
+    #[tokio::test]
+    async fn track_request__duplicate_request_across_sessions_returns_none() {
+        let store = ActiveSessionStore::new();
+        store.track_request("s1".into(), req_num(1), None).await;
+        let again = store.track_request("s2".into(), req_num(1), None).await;
+        assert!(again.is_none());
+        assert!(store.get_session("s2").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn track_request__writes_reverse_index() {
+        let store = ActiveSessionStore::new();
+        store.track_request("s1".into(), req_num(7), None).await;
         let found = store.get_session_by_request(&req_num(7)).await.unwrap();
         assert_eq!(found.id, "s1");
     }
 
     #[tokio::test]
-    async fn attach_request__missing_session_is_noop() {
+    async fn track_request__updates_last_active() {
         let store = ActiveSessionStore::new();
-        store.attach_request(req_num(1), "missing").await;
-        assert!(store.get_session("missing").await.is_none());
-        assert!(store.get_session_by_request(&req_num(1)).await.is_none());
+        let created = store
+            .track_request("s1".into(), req_num(1), None)
+            .await
+            .unwrap();
+        sleep(Duration::from_millis(2));
+        let after = store
+            .track_request("s1".into(), req_num(2), None)
+            .await
+            .unwrap();
+        assert!(after.last_active > created.last_active);
+        assert_eq!(after.created_at, created.created_at);
     }
 
     #[tokio::test]
-    async fn attach_request__updates_last_active() {
+    async fn track_request__keeps_initial_client_info_on_append() {
         let store = ActiveSessionStore::new();
-        let created = store.new_session("s1").await;
-        sleep(Duration::from_millis(2));
-        store.attach_request(req_num(1), "s1").await;
-        let after = store.get_session("s1").await.unwrap();
-        assert!(after.last_active > created.last_active);
+        store
+            .track_request("s1".into(), req_num(1), Some(client("cursor")))
+            .await;
+        store
+            .track_request("s1".into(), req_num(2), Some(client("other")))
+            .await;
+        let info = store.get_session("s1").await.unwrap();
+        assert_eq!(info.client_info.as_ref().unwrap().name, "cursor");
     }
 
     // ── end_session ────────────────────────────────────────────
@@ -237,9 +291,8 @@ mod tests {
     #[tokio::test]
     async fn end_session__removes_session_and_reverse_entries() {
         let store = ActiveSessionStore::new();
-        store.new_session("s1").await;
-        store.attach_request(req_num(1), "s1").await;
-        store.attach_request(req_num(2), "s1").await;
+        store.track_request("s1".into(), req_num(1), None).await;
+        store.track_request("s1".into(), req_num(2), None).await;
 
         store.end_session("s1").await;
 
@@ -251,10 +304,8 @@ mod tests {
     #[tokio::test]
     async fn end_session__leaves_other_sessions_intact() {
         let store = ActiveSessionStore::new();
-        store.new_session("s1").await;
-        store.new_session("s2").await;
-        store.attach_request(req_num(1), "s1").await;
-        store.attach_request(req_num(2), "s2").await;
+        store.track_request("s1".into(), req_num(1), None).await;
+        store.track_request("s2".into(), req_num(2), None).await;
 
         store.end_session("s1").await;
 
@@ -283,11 +334,11 @@ mod tests {
     #[tokio::test]
     async fn list_sessions__sorted_by_last_active_desc() {
         let store = ActiveSessionStore::new();
-        store.new_session("oldest").await;
+        store.track_request("oldest".into(), req_num(1), None).await;
         sleep(Duration::from_millis(2));
-        store.new_session("middle").await;
+        store.track_request("middle".into(), req_num(2), None).await;
         sleep(Duration::from_millis(2));
-        store.new_session("newest").await;
+        store.track_request("newest".into(), req_num(3), None).await;
 
         let ids: Vec<_> = store
             .list_sessions()
@@ -299,13 +350,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_sessions__attach_request_promotes_session() {
+    async fn list_sessions__track_request_promotes_session() {
         let store = ActiveSessionStore::new();
-        store.new_session("a").await;
+        store.track_request("a".into(), req_num(1), None).await;
         sleep(Duration::from_millis(2));
-        store.new_session("b").await;
+        store.track_request("b".into(), req_num(2), None).await;
         sleep(Duration::from_millis(2));
-        store.attach_request(req_num(1), "a").await;
+        store.track_request("a".into(), req_num(3), None).await;
 
         let ids: Vec<_> = store
             .list_sessions()
@@ -335,46 +386,8 @@ mod tests {
     #[tokio::test]
     async fn get_session_by_request__string_request_id() {
         let store = ActiveSessionStore::new();
-        store.new_session("s1").await;
         let rid = RequestId::String("req-abc".into());
-        store.attach_request(rid.clone(), "s1").await;
+        store.track_request("s1".into(), rid.clone(), None).await;
         assert_eq!(store.get_session_by_request(&rid).await.unwrap().id, "s1");
-    }
-
-    // ── parse_client_info ──────────────────────────────────────
-
-    #[test]
-    fn parse_client_info__name_and_version() {
-        let info = parse_client_info(&json!({
-            "clientInfo": {"name": "Claude Code", "version": "1.2.0"}
-        }))
-        .unwrap();
-        assert_eq!(info.name, "Claude Code");
-        assert_eq!(info.version.as_deref(), Some("1.2.0"));
-    }
-
-    #[test]
-    fn parse_client_info__name_only() {
-        let info = parse_client_info(&json!({
-            "clientInfo": {"name": "cursor"}
-        }))
-        .unwrap();
-        assert_eq!(info.name, "cursor");
-        assert!(info.version.is_none());
-    }
-
-    #[test]
-    fn parse_client_info__missing_clientinfo_is_none() {
-        assert!(parse_client_info(&json!({"capabilities": {}})).is_none());
-    }
-
-    #[test]
-    fn parse_client_info__missing_name_is_none() {
-        assert!(parse_client_info(&json!({"clientInfo": {"version": "1.0"}})).is_none());
-    }
-
-    #[test]
-    fn parse_client_info__non_string_name_is_none() {
-        assert!(parse_client_info(&json!({"clientInfo": {"name": 42}})).is_none());
     }
 }

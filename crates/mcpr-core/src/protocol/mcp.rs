@@ -37,6 +37,13 @@ impl<'de> Deserialize<'de> for JsonRpcVersion {
     }
 }
 
+/// Client identity extracted from the MCP `initialize` request's `clientInfo` param.
+#[derive(Debug, Clone)]
+pub struct ClientInfo {
+    pub name: String,
+    pub version: Option<String>,
+}
+
 /// JSON-RPC error. `data` is kept raw — middlewares skip parsing it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
@@ -82,6 +89,18 @@ impl JsonRpcRequest {
             return None;
         }
         self.params.as_ref()?.get("name")?.as_str()
+    }
+
+    /// Extract `clientInfo` from MCP initialize request params.
+    pub fn parse_client_info(&self) -> Option<ClientInfo> {
+        let params = self.params.as_ref()?;
+        let client_info = params.get("clientInfo")?;
+        let name = client_info.get("name")?.as_str()?.to_string();
+        let version = client_info
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        Some(ClientInfo { name, version })
     }
 }
 
@@ -859,5 +878,65 @@ mod tests {
     fn get_prompt__none_when_params_missing() {
         let r = req(ClientMethod::Prompts(PromptsMethod::Get), None);
         assert_eq!(r.get_prompt(), None);
+    }
+
+    // ── parse_client_info ──────────────────────────────────────
+
+    #[test]
+    fn parse_client_info__name_and_version() {
+        let r = req(
+            ClientMethod::Lifecycle(LifecycleMethod::Initialize),
+            one_param(
+                "clientInfo",
+                json!({"name": "Claude Code", "version": "1.2.0"}),
+            ),
+        );
+        let info = r.parse_client_info().unwrap();
+        assert_eq!(info.name, "Claude Code");
+        assert_eq!(info.version.as_deref(), Some("1.2.0"));
+    }
+
+    #[test]
+    fn parse_client_info__name_only() {
+        let r = req(
+            ClientMethod::Lifecycle(LifecycleMethod::Initialize),
+            one_param("clientInfo", json!({"name": "cursor"})),
+        );
+        let info = r.parse_client_info().unwrap();
+        assert_eq!(info.name, "cursor");
+        assert!(info.version.is_none());
+    }
+
+    #[test]
+    fn parse_client_info__missing_clientinfo_is_none() {
+        let r = req(
+            ClientMethod::Lifecycle(LifecycleMethod::Initialize),
+            one_param("capabilities", json!({})),
+        );
+        assert!(r.parse_client_info().is_none());
+    }
+
+    #[test]
+    fn parse_client_info__missing_name_is_none() {
+        let r = req(
+            ClientMethod::Lifecycle(LifecycleMethod::Initialize),
+            one_param("clientInfo", json!({"version": "1.0"})),
+        );
+        assert!(r.parse_client_info().is_none());
+    }
+
+    #[test]
+    fn parse_client_info__non_string_name_is_none() {
+        let r = req(
+            ClientMethod::Lifecycle(LifecycleMethod::Initialize),
+            one_param("clientInfo", json!({"name": 42})),
+        );
+        assert!(r.parse_client_info().is_none());
+    }
+
+    #[test]
+    fn parse_client_info__none_when_params_missing() {
+        let r = req(ClientMethod::Lifecycle(LifecycleMethod::Initialize), None);
+        assert!(r.parse_client_info().is_none());
     }
 }
