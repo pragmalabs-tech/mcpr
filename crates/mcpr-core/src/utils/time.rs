@@ -10,7 +10,7 @@
 /// # Examples
 ///
 /// ```
-/// use mcpr_core::time::format_latency_us;
+/// use mcpr_core::utils::time::format_latency_us;
 ///
 /// assert_eq!(format_latency_us(200), "200μs");
 /// assert_eq!(format_latency_us(4_200), "4.20ms");

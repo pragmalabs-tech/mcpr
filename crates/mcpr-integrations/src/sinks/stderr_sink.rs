@@ -93,10 +93,10 @@ mod tests {
     use bytes::Bytes;
     use http::{Request as HttpReq, Response as HttpResp, StatusCode};
     use mcpr_core::protocol::mcp::{
-        ClientMethod, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, JsonRpcVersion,
-        RequestId, ToolsMethod,
+        ClientInfo, ClientMethod, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JsonRpcResult,
+        JsonRpcVersion, RequestId, ToolsMethod,
     };
-    use mcpr_core::protocol::session::{ClientInfo, SessionInfo, SessionState};
+    use mcpr_core::protocol::session::SessionInfo;
     use serde_json::{Map, Value, json};
 
     // ── Helpers ──────────────────────────────────────────────────
@@ -166,9 +166,8 @@ mod tests {
         ProxyEvent::Response(Box::new(Response::Http(resp)))
     }
 
-    fn session(id: &str, state: SessionState, client: Option<ClientInfo>) -> ProxyEvent {
-        let mut info = SessionInfo::new(id.into(), state);
-        info.client_info = client;
+    fn session(id: &str, client: Option<ClientInfo>) -> ProxyEvent {
+        let info = SessionInfo::new(id.into(), client, RequestId::Number(1));
         ProxyEvent::Session(Box::new(info))
     }
 
@@ -268,7 +267,6 @@ mod tests {
     fn json__session_includes_id_state_and_client() {
         let v = render(&session(
             "sess-1",
-            SessionState::Active,
             Some(ClientInfo {
                 name: "cursor".into(),
                 version: None,
@@ -283,9 +281,9 @@ mod tests {
 
     #[test]
     fn json__session_without_client_emits_nulls() {
-        let v = render(&session("sess-2", SessionState::Created, None));
+        let v = render(&session("sess-2", None));
         assert_eq!(v["id"], "sess-2");
-        assert_eq!(v["state"], "Created");
+        assert_eq!(v["state"], "Active");
         assert!(v["client_name"].is_null());
         assert!(v["client_version"].is_null());
     }
