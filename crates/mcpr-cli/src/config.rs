@@ -75,7 +75,7 @@ enum Commands {
     Version,
     /// Update mcpr to the latest version
     Update,
-    /// Run proxies and query observability data (logs, slow calls, stats, sessions, clients)
+    /// Run and manage proxies (run, stop, list, delete, setup)
     Proxy(ProxyArgs),
     /// Storage maintenance (stats, vacuum)
     Store(StoreArgs),
@@ -83,7 +83,7 @@ enum Commands {
     Relay(RelayArgs),
 }
 
-// ── Proxy query subcommands ────────────────────────────────────────────
+// ── Proxy subcommands ────────────────────────────────────────────────
 
 #[derive(Parser)]
 pub struct ProxyArgs {
@@ -91,10 +91,9 @@ pub struct ProxyArgs {
     pub command: ProxyCommand,
 }
 
-/// Proxy lifecycle and observability commands.
+/// Proxy lifecycle commands.
 #[derive(Subcommand, Clone)]
 pub enum ProxyCommand {
-    // ── Lifecycle ─────────────────────────────────────────────────────
     /// Run a proxy in the background from a config file
     Run(ProxyRunArgs),
     /// Stop a running proxy (or all proxies with --all)
@@ -103,24 +102,6 @@ pub enum ProxyCommand {
     List(ProxyListArgs),
     /// Delete a stopped proxy — removes its on-disk state (must be stopped first)
     Delete(ProxyDeleteArgs),
-
-    // ── Observability ────────────────────────────────────────────────
-    /// Show recent request logs
-    Logs(ProxyLogsArgs),
-    /// Show slowest requests above a latency threshold
-    Slow(ProxySlowArgs),
-    /// List MCP sessions with client info
-    Sessions(ProxySessionsArgs),
-    /// Show client (AI model) breakdown
-    Clients(ProxyClientsArgs),
-    /// Show proxy status overview (running proxies, activity, errors)
-    Status(ProxyStatusArgs),
-    /// Drill into a single session — show session info and all its requests
-    Session(ProxySessionArgs),
-    /// Show captured MCP server schema (tools, resources, prompts)
-    Schema(ProxySchemaArgs),
-
-    // ── Onboarding ──────────────────────────────────────────────────
     /// Interactive setup — authenticate, pick project, generate config
     Setup(ProxySetupArgs),
 }
@@ -162,180 +143,6 @@ pub struct ProxyDeleteArgs {
     /// Skip the confirmation prompt
     #[arg(long, short = 'y')]
     pub yes: bool,
-}
-
-/// Arguments for `mcpr proxy logs [name]`.
-#[derive(Parser, Clone)]
-pub struct ProxyLogsArgs {
-    /// Filter to a specific proxy name (omit to show all proxies)
-    pub name: Option<String>,
-
-    /// Number of recent rows to show
-    #[arg(long, default_value = "50")]
-    pub tail: i64,
-
-    /// Time window: only rows newer than this duration (e.g., 1h, 30m, 7d).
-    /// Defaults to 1h, or all time when --session is used.
-    #[arg(long)]
-    pub since: Option<String>,
-
-    /// Filter to a specific tool name
-    #[arg(long)]
-    pub tool: Option<String>,
-
-    /// Filter by MCP method (e.g., tools/call, resources/read, initialize)
-    #[arg(long)]
-    pub method: Option<String>,
-
-    /// Filter by session ID (supports prefix matching, e.g. first 8 chars)
-    #[arg(long)]
-    pub session: Option<String>,
-
-    /// Filter by status: ok, error, timeout
-    #[arg(long)]
-    pub status: Option<String>,
-
-    /// Filter by JSON-RPC error code (e.g., -32601 for method not found)
-    #[arg(long)]
-    pub error_code: Option<String>,
-
-    /// Output as newline-delimited JSON (one object per line)
-    #[arg(long)]
-    pub json: bool,
-
-    /// Poll for new rows every 500ms (like tail -f)
-    #[arg(short, long)]
-    pub follow: bool,
-}
-
-/// Arguments for `mcpr proxy slow [name]`.
-#[derive(Parser, Clone)]
-pub struct ProxySlowArgs {
-    /// Filter to a specific proxy name (omit to show all proxies)
-    pub name: Option<String>,
-
-    /// Minimum latency to include (e.g., 200us, 500ms, 1s). Default: 500ms
-    #[arg(long, default_value = "500ms")]
-    pub threshold: String,
-
-    /// Time window (e.g., 1h, 24h)
-    #[arg(long, default_value = "1h")]
-    pub since: String,
-
-    /// Filter to a specific tool name
-    #[arg(long)]
-    pub tool: Option<String>,
-
-    /// Maximum rows to return
-    #[arg(long, default_value = "20")]
-    pub limit: i64,
-
-    /// Output as newline-delimited JSON
-    #[arg(long)]
-    pub json: bool,
-
-    /// Poll for new slow calls every 1s (like tail -f)
-    #[arg(short, long)]
-    pub follow: bool,
-}
-
-/// Arguments for `mcpr proxy sessions [name]`.
-#[derive(Parser, Clone)]
-pub struct ProxySessionsArgs {
-    /// Filter to a specific proxy name (omit to show all proxies)
-    pub name: Option<String>,
-
-    /// Only show active sessions (seen in last 5 minutes)
-    #[arg(long)]
-    pub active: bool,
-
-    /// Filter by client name (e.g., claude-desktop)
-    #[arg(long)]
-    pub client: Option<String>,
-
-    /// Time window for session start (e.g., 1h, 24h)
-    #[arg(long, default_value = "1h")]
-    pub since: String,
-
-    /// Maximum rows to return
-    #[arg(long, default_value = "50")]
-    pub limit: i64,
-
-    /// Output as newline-delimited JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Arguments for `mcpr proxy clients [name]`.
-#[derive(Parser, Clone)]
-pub struct ProxyClientsArgs {
-    /// Filter to a specific proxy name (omit to show all proxies)
-    pub name: Option<String>,
-
-    /// Lookback window (default longer: clients change slowly)
-    #[arg(long, default_value = "7d")]
-    pub since: String,
-
-    /// Output as newline-delimited JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Arguments for `mcpr proxy status [name]`.
-#[derive(Parser, Clone)]
-pub struct ProxyStatusArgs {
-    /// Filter to a specific proxy name (omit to show all proxies)
-    pub name: Option<String>,
-
-    /// Lookback window for activity summary (e.g., 1h, 24h)
-    #[arg(long, default_value = "1h")]
-    pub since: String,
-
-    /// Output as JSON snapshot
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Arguments for `mcpr proxy session <session_id>`.
-#[derive(Parser, Clone)]
-pub struct ProxySessionArgs {
-    /// Session ID to look up
-    pub session_id: String,
-
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Arguments for `mcpr proxy schema [name]`.
-#[derive(Parser, Clone)]
-pub struct ProxySchemaArgs {
-    /// Filter to a specific proxy name (omit to show all proxies)
-    pub name: Option<String>,
-
-    /// Filter to a specific MCP method (e.g., tools/list, initialize)
-    #[arg(long)]
-    pub method: Option<String>,
-
-    /// Show change history instead of current schema
-    #[arg(long)]
-    pub changes: bool,
-
-    /// Show tool usage — listed tools vs actual calls (unused tools highlighted)
-    #[arg(long)]
-    pub unused: bool,
-
-    /// Time window for usage stats (used with --unused, default: 7d)
-    #[arg(long, default_value = "7d")]
-    pub since: String,
-
-    /// Number of change history rows to show (used with --changes)
-    #[arg(long, default_value = "50")]
-    pub limit: i64,
-
-    /// Output as JSON
-    #[arg(long)]
-    pub json: bool,
 }
 
 /// Arguments for `mcpr proxy setup`.
