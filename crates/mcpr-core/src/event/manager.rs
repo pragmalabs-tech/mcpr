@@ -3,7 +3,7 @@
 //! ```rust,ignore
 //! let mut manager = EventManager::new();
 //! manager.register(Box::new(StderrSink::new(fmt)));
-//! manager.register(Box::new(SqliteSink::new(store)));
+//! manager.register(Box::new(SqliteSink::new(store, "proxy-name")));
 //! let handle = manager.start();
 //! let bus = handle.bus.clone();
 //! // … use bus.emit(event) from the proxy hot path …

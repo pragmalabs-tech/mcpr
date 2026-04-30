@@ -24,7 +24,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use config::{CliAction, GatewayConfig, Mode};
 use mcpr_core::event::EventManager;
-use mcpr_integrations::StderrSink;
+use mcpr_integrations::store::{Store, StoreConfig, path::resolve_db_path};
+use mcpr_integrations::{StderrSink, sinks::SqliteSink};
 
 fn main() {
     let action = config::load();
@@ -159,9 +160,33 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         request_timeout: cfg.request_timeout,
     });
 
+    // Open the local SQLite store. Default path is ~/.mcpr/store.db; the
+    // user can override via $MCPR_DB. The store handles its own writer
+    // thread and drains on drop, so no explicit shutdown is needed here —
+    // when EventBusHandle::shutdown() returns, the sinks Vec drops, the
+    // SqliteSink drops, and Store::drop flushes pending events.
+    let db_path = match resolve_db_path(None) {
+        Some(p) => p,
+        None => {
+            eprintln!("error: could not determine mcpr data directory ($HOME unset?)");
+            std::process::exit(1);
+        }
+    };
+    let store = match Store::open(StoreConfig {
+        db_path,
+        mcpr_version: env!("CARGO_PKG_VERSION").into(),
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: failed to open store: {e}");
+            std::process::exit(1);
+        }
+    };
+
     // Setup Event Bus
     let mut event_manager = EventManager::new();
     event_manager.register(Box::new(StderrSink));
+    event_manager.register(Box::new(SqliteSink::new(store, cfg.name.as_str())));
     let event_bus_handler = event_manager.start();
     let event_bus = event_bus_handler.bus.clone();
 

@@ -1,32 +1,38 @@
-//! SQLite event sink — writes proxy events to the local SQLite store.
+//! SQLite event sink — refcount dispatcher onto the storage channel.
 //!
-//! Converts `ProxyEvent` variants into store operations:
-//! - `Request` → insert into `requests` table + update session counters
-//! - `SessionStart` → insert into `sessions` table
-//! - `SessionEnd` → update `ended_at` on the session
-//! - `Heartbeat` → ignored (not stored locally)
+//! Each `ProxyEvent` is wrapped in a [`StoreEvent`] together with two
+//! pieces of context (`ts` stamped at sink time, `proxy` injected from
+//! sink config) and forwarded to the [`Store`]. The sink does no
+//! parsing or string allocation per event; the `Arc`s inside the
+//! `ProxyEvent` flow through to the writer by refcount, where SQL
+//! binding happens.
 
-use mcpr_core::event::{EventSink, ProxyEvent, SchemaVersionCreatedEvent};
+use std::sync::Arc;
+
+use chrono::Utc;
+use mcpr_core::event::{EventSink, ProxyEvent};
 
 use crate::store::engine::Store;
-use crate::store::event::{
-    RequestEvent as StoreRequestEvent, RequestStatus, SchemaVersionEvent,
-    SessionEvent as StoreSessionEvent, StoreEvent,
-};
+use crate::store::event::StoreEvent;
 
-/// Event sink that writes to the SQLite store.
-///
-/// Wraps the existing `Store` and converts `ProxyEvent` → `StoreEvent`.
+/// Adapter from the proxy event bus to the storage writer.
 pub struct SqliteSink {
     store: Store,
+    proxy: Arc<str>,
 }
 
 impl SqliteSink {
-    pub fn new(store: Store) -> Self {
-        Self { store }
+    /// Build a sink for a given proxy name. The name tags every row the
+    /// sink writes, so a shared database can hold data from multiple
+    /// proxies without ambiguity.
+    pub fn new(store: Store, proxy: impl Into<Arc<str>>) -> Self {
+        Self {
+            store,
+            proxy: proxy.into(),
+        }
     }
 
-    /// Shutdown the underlying store (flush pending writes).
+    /// Drain pending events and stop the writer thread.
     pub fn shutdown(&mut self) {
         self.store.shutdown();
     }
@@ -34,54 +40,11 @@ impl SqliteSink {
 
 impl EventSink for SqliteSink {
     fn on_event(&self, event: &ProxyEvent) {
-        match event {
-            ProxyEvent::Request(e) => {
-                let status = if e.error_code.is_some() || e.status >= 500 {
-                    RequestStatus::Error
-                } else {
-                    RequestStatus::Ok
-                };
-
-                self.store.record(StoreEvent::Request(StoreRequestEvent {
-                    request_id: e.id.clone(),
-                    ts: e.ts,
-                    proxy: e.proxy.clone(),
-                    session_id: e.session_id.clone(),
-                    method: e.mcp_method.clone().unwrap_or_else(|| e.method.clone()),
-                    tool: e.tool.clone(),
-                    resource_uri: e.resource_uri.clone(),
-                    prompt_name: e.prompt_name.clone(),
-                    latency_us: e.latency_us as i64,
-                    status,
-                    error_code: e.error_code.clone(),
-                    error_msg: e.error_msg.clone(),
-                    bytes_in: e.request_size.map(|s| s as i64),
-                    bytes_out: e.response_size.map(|s| s as i64),
-                }));
-            }
-            ProxyEvent::SessionStart(e) => {
-                self.store.record(StoreEvent::Session(StoreSessionEvent {
-                    session_id: e.session_id.clone(),
-                    proxy: e.proxy.clone(),
-                    started_at: e.ts,
-                    client_name: e.client_name.clone(),
-                    client_version: e.client_version.clone(),
-                    client_platform: e.client_platform.clone(),
-                }));
-            }
-            ProxyEvent::SessionEnd(e) => {
-                self.store.record(StoreEvent::SessionClosed {
-                    session_id: e.session_id.clone(),
-                    ended_at: e.ts,
-                });
-            }
-            ProxyEvent::Heartbeat(_) => {
-                // Heartbeats are not stored locally.
-            }
-            ProxyEvent::SchemaVersionCreated(e) => {
-                self.store.record(map_schema_version(e));
-            }
-        }
+        self.store.record(StoreEvent {
+            ts: Utc::now().timestamp_millis(),
+            proxy: Arc::clone(&self.proxy),
+            event: event.clone(),
+        });
     }
 
     fn name(&self) -> &'static str {
@@ -89,62 +52,81 @@ impl EventSink for SqliteSink {
     }
 }
 
-fn map_schema_version(e: &SchemaVersionCreatedEvent) -> StoreEvent {
-    StoreEvent::SchemaVersion(SchemaVersionEvent {
-        ts: e.ts,
-        proxy: e.upstream_id.clone(),
-        upstream_url: e.upstream_url.clone(),
-        method: e.method.clone(),
-        payload: e.payload.to_string(),
-        content_hash: e.content_hash.clone(),
-    })
-}
-
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
+
+    use mcpr_core::protocol::{
+        Request,
+        mcp::{ClientMethod, JsonRpcRequest, JsonRpcVersion, RequestId, ToolsMethod},
+    };
     use serde_json::json;
 
-    #[test]
-    fn map_schema_version__copies_fields_correctly() {
-        let event = SchemaVersionCreatedEvent {
-            ts: 1_700_000_000_000,
-            upstream_id: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            version: 3,
-            version_id: "abc123def4567890".into(),
-            content_hash: "abc123def4567890cafebabe".into(),
-            payload: json!({"tools": [{"name": "search"}]}),
-        };
+    use crate::store::engine::StoreConfig;
 
-        let StoreEvent::SchemaVersion(sv) = map_schema_version(&event) else {
-            panic!("expected StoreEvent::SchemaVersion");
-        };
-        assert_eq!(sv.ts, 1_700_000_000_000);
-        assert_eq!(sv.proxy, "api");
-        assert_eq!(sv.upstream_url, "http://localhost:9000");
-        assert_eq!(sv.method, "tools/list");
-        assert_eq!(sv.content_hash, "abc123def4567890cafebabe");
-        assert!(sv.payload.contains("search"));
+    fn open_store() -> (Store, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("sink.db");
+        let store = Store::open(StoreConfig {
+            db_path: db_path.clone(),
+            mcpr_version: "test".into(),
+        })
+        .unwrap();
+        (store, db_path, dir)
+    }
+
+    fn rpc(id: i64, tool: &str) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(id),
+            method: ClientMethod::Tools(ToolsMethod::Call),
+            params: Some(serde_json::Map::from_iter([("name".into(), json!(tool))])),
+        }
+    }
+
+    fn mcp_request(sid: &str, rpc: JsonRpcRequest) -> Request {
+        let parts = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("mcp-session-id", sid)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        Request::Mcp(parts, rpc)
     }
 
     #[test]
-    fn map_schema_version__upstream_id_maps_to_proxy_column() {
-        let event = SchemaVersionCreatedEvent {
-            ts: 0,
-            upstream_id: "proxy-alpha".into(),
-            upstream_url: "".into(),
-            method: "initialize".into(),
-            version: 1,
-            version_id: "0".into(),
-            content_hash: "0".into(),
-            payload: json!({}),
-        };
-        let StoreEvent::SchemaVersion(sv) = map_schema_version(&event) else {
-            panic!();
-        };
-        assert_eq!(sv.proxy, "proxy-alpha");
+    fn on_event__forwards_request_to_store_with_proxy_tag() {
+        let (store, db_path, _dir) = open_store();
+        let mut sink = SqliteSink::new(store, "alpha");
+
+        sink.on_event(&ProxyEvent::Request(Arc::new(mcp_request(
+            "sess-1",
+            rpc(1, "search"),
+        ))));
+
+        sink.shutdown();
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let (proxy, tool): (String, String) = conn
+            .query_row(
+                "SELECT proxy, tool FROM requests WHERE request_id = '1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(proxy, "alpha");
+        assert_eq!(tool, "search");
+    }
+
+    #[test]
+    fn name__is_sqlite() {
+        let (store, _path, _dir) = open_store();
+        let sink = SqliteSink::new(store, "p");
+        assert_eq!(sink.name(), "sqlite");
     }
 }

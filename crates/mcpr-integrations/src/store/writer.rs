@@ -1,65 +1,62 @@
 //! Background storage writer — dedicated OS thread with batch flushing.
 //!
-//! The writer receives [`StoreEvent`]s through a tokio mpsc channel and writes
-//! them to SQLite in batches. It runs on a dedicated OS thread (not a tokio task)
-//! because `rusqlite::Connection` is `!Send` — it cannot cross async task boundaries.
-//!
-//! # Design
+//! Receives [`StoreEvent`]s through a tokio mpsc channel and writes them
+//! to SQLite in batches. Runs on a dedicated OS thread because
+//! `rusqlite::Connection` is `!Send` and cannot cross async task
+//! boundaries.
 //!
 //! ```text
 //! Proxy hot path (tokio tasks)         Writer thread (OS thread)
 //! ─────────────────────────────        ──────────────────────────
-//! tx.try_send(event)           ──────► rx.blocking_recv()
-//!   (non-blocking, fire-and-forget)    accumulate in batch Vec
+//! tx.try_send(StoreEvent)      ──────► rx.try_recv()
+//!   (non-blocking)                     accumulate batch Vec
 //!                                      every 200ms or 500 events:
 //!                                        BEGIN TRANSACTION
-//!                                        INSERT requests / sessions
-//!                                        UPDATE session counters
+//!                                        bind+execute one prepared
+//!                                          statement per StoreEvent
 //!                                        COMMIT
 //! ```
 //!
 //! # Backpressure
 //!
-//! The channel has a fixed capacity (default 10,000). If the channel is full,
-//! `Store::record()` drops the event via `try_send().ok()`. A busy proxy is
-//! more important than a complete log.
+//! The channel is fixed-capacity (10k). `Store::record` uses `try_send`
+//! and silently drops on overflow — a busy proxy is more important than
+//! a complete log.
 //!
 //! # Shutdown
 //!
-//! On graceful shutdown, the sender is dropped → `recv()` returns `None` →
-//! the writer flushes any remaining batch and exits. This guarantees no
-//! events are lost on SIGTERM.
+//! On graceful shutdown the sender is dropped → `recv` returns `None` →
+//! the writer flushes the remaining batch and exits, so no events are
+//! lost on SIGTERM.
 
 use std::time::{Duration, Instant};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, params};
+use sha2::{Digest, Sha256};
 
-use super::event::{RequestStatus, StoreEvent};
+use mcpr_core::event::ProxyEvent;
+use mcpr_core::protocol::{
+    Request, Response,
+    mcp::{ClientMethod, JsonRpcRequest, JsonRpcResult, RequestId},
+    schema::{ChangeSchema, Reason},
+    session::{SessionInfo, SessionState, session_id_from_headers},
+};
+
+use super::event::StoreEvent;
 use super::schema;
 
-/// How often the writer flushes accumulated events to SQLite.
-///
-/// 200ms means at most 5 transactions/second even under 1,000 req/s load.
-/// SQLite handles this trivially. The 200ms lag is imperceptible in `--follow` mode.
+/// How often the writer flushes accumulated events. 200ms = at most 5
+/// transactions/second even at 1k req/s. Imperceptible in `--follow`.
 const BATCH_INTERVAL: Duration = Duration::from_millis(200);
 
-/// Maximum events per batch before forcing a flush.
-///
-/// Caps memory usage of the batch buffer. At ~200 bytes per event,
-/// 500 events ≈ 100KB — negligible.
+/// Max events per batch before forcing a flush. Caps memory.
 const MAX_BATCH_SIZE: usize = 500;
 
-/// Run the storage writer loop on the current thread (blocking).
+/// Run the writer loop on the current thread (blocking).
 ///
-/// This function blocks forever until the sender is dropped. It is intended
-/// to be called from `std::thread::spawn`, not from a tokio task.
-///
-/// # Arguments
-///
-/// - `conn`: a read-write SQLite connection (already migrated).
-/// - `rx`: the receiving end of the event channel.
-pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEvent>) {
-    let mut rx = rx;
+/// Spawned from `std::thread::spawn` by `Store::open`, never from a
+/// tokio task. Returns when the sender is dropped.
+pub fn run_writer_loop(mut conn: Connection, mut rx: tokio::sync::mpsc::Receiver<StoreEvent>) {
     let mut batch: Vec<StoreEvent> = Vec::with_capacity(MAX_BATCH_SIZE);
     let mut last_flush = Instant::now();
 
@@ -84,13 +81,13 @@ pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEv
                 }
 
                 if batch.len() >= MAX_BATCH_SIZE {
-                    flush_batch(&conn, &mut batch);
+                    flush_batch(&mut conn, &mut batch);
                     last_flush = Instant::now();
                 }
             }
             None => {
                 if !batch.is_empty() {
-                    flush_batch(&conn, &mut batch);
+                    flush_batch(&mut conn, &mut batch);
                     last_flush = Instant::now();
                 }
 
@@ -101,23 +98,19 @@ pub fn run_writer_loop(conn: Connection, rx: tokio::sync::mpsc::Receiver<StoreEv
         }
 
         if !batch.is_empty() && last_flush.elapsed() >= BATCH_INTERVAL {
-            flush_batch(&conn, &mut batch);
+            flush_batch(&mut conn, &mut batch);
             last_flush = Instant::now();
         }
     }
 }
 
-/// Receive one event with a timeout, blocking the current thread.
-///
-/// tokio's mpsc receiver doesn't have a native `blocking_recv_timeout`,
-/// so we poll with short sleeps. The granularity (10ms) is fine — this
-/// only affects flush timing, not request latency.
+/// Receive one event with a timeout (tokio's mpsc has no native
+/// blocking_recv_timeout, so we poll).
 fn recv_with_timeout(
     rx: &mut tokio::sync::mpsc::Receiver<StoreEvent>,
     timeout: Duration,
 ) -> Option<StoreEvent> {
     let deadline = Instant::now() + timeout;
-
     loop {
         match rx.try_recv() {
             Ok(event) => return Some(event),
@@ -126,181 +119,303 @@ fn recv_with_timeout(
                 if Instant::now() >= deadline {
                     return None;
                 }
-                // Short sleep to avoid busy-spinning. 10ms granularity is acceptable
-                // for a background writer — it only affects batch flush timing.
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
     }
 }
 
-/// Flush all accumulated events to SQLite in a single transaction.
-///
-/// Session inserts, request inserts, and counter updates all happen in the
-/// same transaction — counters are always consistent with the request rows.
-fn flush_batch(conn: &Connection, batch: &mut Vec<StoreEvent>) {
+/// Flush every event in `batch` inside one transaction. Drains the Vec.
+fn flush_batch(conn: &mut Connection, batch: &mut Vec<StoreEvent>) {
     if batch.is_empty() {
         return;
     }
 
-    let result = conn.execute_batch("BEGIN TRANSACTION;");
-    if let Err(e) = result {
-        tracing::warn!("storage writer: failed to begin transaction: {e}");
-        batch.clear();
-        return;
-    }
-
-    for event in batch.drain(..) {
-        match event {
-            StoreEvent::Session(s) => {
-                if let Err(e) = conn.execute(
-                    schema::INSERT_SESSION_SQL,
-                    rusqlite::params![
-                        s.session_id,
-                        s.proxy,
-                        s.started_at,
-                        s.client_name,
-                        s.client_version,
-                        s.client_platform,
-                    ],
-                ) {
-                    tracing::warn!("storage writer: session insert failed: {e}");
-                }
-            }
-
-            StoreEvent::Request(r) => {
-                if let Err(e) = conn.execute(
-                    schema::INSERT_REQUEST_SQL,
-                    rusqlite::params![
-                        r.request_id,
-                        r.ts,
-                        r.proxy,
-                        r.session_id,
-                        r.method,
-                        r.tool,
-                        r.resource_uri,
-                        r.prompt_name,
-                        r.latency_us,
-                        r.status.as_str(),
-                        r.error_code,
-                        r.error_msg,
-                        r.bytes_in,
-                        r.bytes_out,
-                    ],
-                ) {
-                    tracing::warn!("storage writer: request insert failed: {e}");
-                }
-
-                // Increment session counters in the same transaction.
-                if let Some(ref sid) = r.session_id {
-                    let error_inc: i64 =
-                        if matches!(r.status, RequestStatus::Error | RequestStatus::Timeout) {
-                            1
-                        } else {
-                            0
-                        };
-
-                    if let Err(e) = conn.execute(
-                        schema::UPDATE_SESSION_COUNTERS_SQL,
-                        rusqlite::params![r.ts, error_inc, sid],
-                    ) {
-                        tracing::warn!("storage writer: session counter update failed: {e}");
-                    }
-                }
-            }
-
-            StoreEvent::SessionClosed {
-                session_id,
-                ended_at,
-            } => {
-                if let Err(e) = conn.execute(
-                    schema::CLOSE_SESSION_SQL,
-                    rusqlite::params![ended_at, session_id],
-                ) {
-                    tracing::warn!("storage writer: session close failed: {e}");
-                }
-            }
-
-            StoreEvent::SchemaVersion(sv) => {
-                handle_schema_version(conn, sv);
-            }
+    let tx = match conn.transaction() {
+        Ok(tx) => tx,
+        Err(e) => {
+            tracing::warn!("storage writer: failed to begin transaction: {e}");
+            batch.clear();
+            return;
         }
+    };
+
+    let drained = std::mem::take(batch);
+    if let Err(e) = write_events(&tx, &drained) {
+        tracing::warn!("storage writer: batch write failed: {e}");
     }
 
-    if let Err(e) = conn.execute_batch("COMMIT;") {
+    if let Err(e) = tx.commit() {
         tracing::warn!("storage writer: commit failed: {e}");
     }
 }
 
-// ── Schema version persistence ────────────────────────────────────────
-
-/// Persist a new `SchemaVersion` event: append change rows, upsert snapshot.
-///
-/// The event only fires on content change (SchemaManager guarantees this),
-/// so we don't re-hash or re-check for equality. We only read the prior
-/// payload to compute granular diff rows for `schema_changes`.
-fn handle_schema_version(conn: &Connection, sv: super::event::SchemaVersionEvent) {
-    let prior: Option<(String, String)> = conn
-        .query_row(
-            schema::GET_SCHEMA_HASH_SQL,
-            rusqlite::params![sv.proxy, sv.upstream_url, sv.method],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .ok();
-
-    match prior {
-        None => {
-            insert_change_row(
-                conn,
-                &sv,
-                "initial",
-                None,
-                None,
-                Some(sv.content_hash.as_str()),
-            );
-        }
-        Some((_old_hash, _old_payload)) => {
-            // TODO: Replace by new method
+/// Bind and execute every `StoreEvent` against its prepared statement.
+/// One transaction encloses the whole batch (set up by `flush_batch`).
+fn write_events(tx: &Transaction, batch: &[StoreEvent]) -> rusqlite::Result<()> {
+    for msg in batch {
+        match &msg.event {
+            ProxyEvent::Request(req) => write_request(tx, msg.ts, &msg.proxy, req)?,
+            ProxyEvent::Response(res) => write_response(tx, msg.ts, res)?,
+            ProxyEvent::Session(info) => write_session(tx, &msg.proxy, info)?,
+            ProxyEvent::Schema(change) => write_schema_change(tx, msg.ts, &msg.proxy, change)?,
         }
     }
+    Ok(())
+}
 
-    if let Err(e) = conn.execute(
-        schema::UPSERT_SERVER_SCHEMA_SQL,
-        rusqlite::params![
-            sv.proxy,
-            sv.upstream_url,
-            sv.method,
-            sv.payload,
-            sv.ts,
-            sv.content_hash
-        ],
-    ) {
-        tracing::warn!("storage writer: schema upsert failed: {e}");
+// ── Request side ──────────────────────────────────────────────────────
+
+fn write_request(
+    tx: &Transaction,
+    ts: i64,
+    proxy: &str,
+    request: &Request,
+) -> rusqlite::Result<()> {
+    match request {
+        Request::Mcp(parts, rpc) => {
+            let session_id = session_id_from_headers(&parts.headers);
+            insert_request_row(tx, ts, proxy, session_id.as_deref(), rpc)
+        }
+        Request::McpBatch(parts, rpcs) => {
+            let session_id = session_id_from_headers(&parts.headers);
+            for rpc in rpcs {
+                insert_request_row(tx, ts, proxy, session_id.as_deref(), rpc)?;
+            }
+            Ok(())
+        }
+        Request::Http(_) => Ok(()),
     }
 }
 
-fn insert_change_row(
-    conn: &Connection,
-    sv: &super::event::SchemaVersionEvent,
-    change_type: &str,
-    item_name: Option<&str>,
-    old_hash: Option<&str>,
-    new_hash: Option<&str>,
-) {
-    if let Err(e) = conn.execute(
-        schema::INSERT_SCHEMA_CHANGE_SQL,
-        rusqlite::params![
-            sv.proxy,
-            sv.upstream_url,
-            sv.method,
-            change_type,
-            item_name,
+fn insert_request_row(
+    tx: &Transaction,
+    ts: i64,
+    proxy: &str,
+    session_id: Option<&str>,
+    rpc: &JsonRpcRequest,
+) -> rusqlite::Result<()> {
+    let request_id = stringify_request_id(&rpc.id);
+    let method = method_str(&rpc.method);
+
+    tx.prepare_cached(schema::INSERT_REQUEST_SQL)?
+        .execute(params![
+            ts,
+            proxy,
+            session_id,
+            request_id,
+            method,
+            rpc.get_tool(),
+            rpc.get_resource_uri(),
+            rpc.get_prompt(),
+            None::<i64>,
+        ])?;
+    Ok(())
+}
+
+// ── Response side ─────────────────────────────────────────────────────
+
+fn write_response(tx: &Transaction, ts: i64, response: &Response) -> rusqlite::Result<()> {
+    match response {
+        Response::Mcp(parts, result) => {
+            let session_id = session_id_from_headers(&parts.headers);
+            insert_response_row(tx, ts, session_id.as_deref(), result)
+        }
+        Response::McpBatch(parts, results) => {
+            let session_id = session_id_from_headers(&parts.headers);
+            for result in results {
+                insert_response_row(tx, ts, session_id.as_deref(), result)?;
+            }
+            Ok(())
+        }
+        Response::Http(_) => Ok(()),
+    }
+}
+
+fn insert_response_row(
+    tx: &Transaction,
+    ts: i64,
+    session_id: Option<&str>,
+    result: &JsonRpcResult,
+) -> rusqlite::Result<()> {
+    // The bare `JsonRpcError` envelope carries no jsonrpc id, so we
+    // cannot correlate it back to a `requests` row. Drop until the
+    // protocol layer preserves the id alongside the error.
+    let resp = match result {
+        JsonRpcResult::Response(resp) => resp,
+        JsonRpcResult::Error(_) => return Ok(()),
+    };
+
+    let request_id = stringify_request_id(&resp.id);
+
+    tx.prepare_cached(schema::INSERT_RESPONSE_SQL)?
+        .execute(params![
+            ts,
+            session_id,
+            request_id,
+            "ok",
+            None::<i64>,
+            None::<&str>,
+            None::<i64>,
+        ])?;
+    Ok(())
+}
+
+// ── Session side ──────────────────────────────────────────────────────
+
+fn write_session(tx: &Transaction, proxy: &str, info: &SessionInfo) -> rusqlite::Result<()> {
+    let state_str = match info.state {
+        SessionState::Active => "active",
+        SessionState::Closed => "closed",
+    };
+    let (client_name, client_version) = match info.client_info.as_ref() {
+        Some(ci) => (Some(ci.name.as_str()), ci.version.as_deref()),
+        None => (None, None),
+    };
+
+    tx.prepare_cached(schema::UPSERT_SESSION_SQL)?
+        .execute(params![
+            info.id,
+            proxy,
+            state_str,
+            client_name,
+            client_version,
+            info.created_at.timestamp_millis(),
+            info.last_active.timestamp_millis(),
+            info.request_count as i64,
+        ])?;
+    Ok(())
+}
+
+// ── Schema side ───────────────────────────────────────────────────────
+
+fn write_schema_change(
+    tx: &Transaction,
+    ts: i64,
+    proxy: &str,
+    change: &ChangeSchema,
+) -> rusqlite::Result<()> {
+    let (kind, item_key, payload, reason) = canonicalize_change(change)?;
+    let payload_hash = hash_item(kind, &payload);
+
+    let old_hash: Option<String> = tx
+        .prepare_cached(schema::GET_SCHEMA_ITEM_HASH_SQL)?
+        .query_row(params![proxy, kind, item_key.as_str()], |row| row.get(0))
+        .ok();
+
+    if old_hash.as_deref() == Some(payload_hash.as_str()) {
+        return Ok(());
+    }
+
+    tx.prepare_cached(schema::UPSERT_SCHEMA_ITEM_SQL)?
+        .execute(params![
+            proxy,
+            kind,
+            item_key.as_str(),
+            payload,
+            payload_hash,
+            ts,
+        ])?;
+
+    let reason_str = match reason {
+        Reason::Added => "added",
+        Reason::Observed => "observed",
+    };
+
+    tx.prepare_cached(schema::INSERT_SCHEMA_CHANGE_SQL)?
+        .execute(params![
+            proxy,
+            kind,
+            item_key.as_str(),
+            reason_str,
             old_hash,
-            new_hash,
-            sv.ts
-        ],
-    ) {
-        tracing::warn!("storage writer: schema change insert failed: {e}");
+            payload_hash,
+            ts,
+        ])?;
+    Ok(())
+}
+
+/// Pull the kind tag, item key, JSON payload, and reason out of a
+/// `ChangeSchema`. The serialized JSON is canonical because the inner
+/// types use `BTreeMap` and `serde_json::Value::Object` (a `BTreeMap`)
+/// for nested data.
+fn canonicalize_change(
+    change: &ChangeSchema,
+) -> rusqlite::Result<(&'static str, String, String, Reason)> {
+    let serialize_err = |e: serde_json::Error| {
+        rusqlite::Error::ToSqlConversionFailure(
+            Box::new(e) as Box<dyn std::error::Error + Send + Sync>
+        )
+    };
+
+    Ok(match change {
+        ChangeSchema::Tool(reason, tool) => (
+            "tool",
+            tool.name.clone(),
+            serde_json::to_string(tool).map_err(serialize_err)?,
+            *reason,
+        ),
+        ChangeSchema::Prompt(reason, prompt) => (
+            "prompt",
+            prompt.name.clone(),
+            serde_json::to_string(prompt).map_err(serialize_err)?,
+            *reason,
+        ),
+        ChangeSchema::Resource(reason, resource) => (
+            "resource",
+            resource.uri.clone(),
+            serde_json::to_string(resource).map_err(serialize_err)?,
+            *reason,
+        ),
+        ChangeSchema::ResourceTemplate(reason, template) => (
+            "resource_template",
+            template.uri_template.clone(),
+            serde_json::to_string(template).map_err(serialize_err)?,
+            *reason,
+        ),
+    })
+}
+
+/// `sha256(kind || \0 || canonical_json)` as a 64-char hex string. The
+/// kind tag prevents cross-kind collisions even though SHA-256 makes
+/// them astronomically unlikely.
+fn hash_item(kind: &str, payload: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(kind.as_bytes());
+    h.update(b"\0");
+    h.update(payload.as_bytes());
+    let digest = h.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(out, "{byte:02x}").expect("write to String never fails");
+    }
+    out
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────
+
+fn stringify_request_id(id: &RequestId) -> String {
+    match id {
+        RequestId::Number(n) => n.to_string(),
+        RequestId::String(s) => s.clone(),
+    }
+}
+
+/// MCP method name suitable for the `method` column. Returns `&'static str`
+/// for known variants (via `IntoStaticStr`) or an owned `String` for
+/// `Unknown`. We emit `Cow` indirectly by allocating only on `Unknown`.
+fn method_str(method: &ClientMethod) -> String {
+    match method {
+        ClientMethod::Ping => "ping".into(),
+        ClientMethod::Lifecycle(m) => Into::<&'static str>::into(*m).to_owned(),
+        ClientMethod::Tools(m) => Into::<&'static str>::into(*m).to_owned(),
+        ClientMethod::Resources(m) => Into::<&'static str>::into(*m).to_owned(),
+        ClientMethod::Prompts(m) => Into::<&'static str>::into(*m).to_owned(),
+        ClientMethod::Completion(m) => Into::<&'static str>::into(*m).to_owned(),
+        ClientMethod::Logging(m) => Into::<&'static str>::into(*m).to_owned(),
+        ClientMethod::Tasks(m) => Into::<&'static str>::into(*m).to_owned(),
+        ClientMethod::Unknown(s) => s.clone(),
     }
 }
 
@@ -308,193 +423,467 @@ fn insert_change_row(
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use http::request::Builder as RequestBuilder;
+    use mcpr_core::protocol::{
+        Request, Response,
+        mcp::{
+            ClientMethod, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JsonRpcResult,
+            JsonRpcVersion, LifecycleMethod, RequestId, ToolsMethod,
+        },
+        schema::{ChangeSchema, Reason, Tool},
+        session::{SessionInfo, SessionState},
+    };
+    use serde_json::json;
+
     use crate::store::db;
-    use crate::store::event::{RequestEvent, SchemaVersionEvent, SessionEvent};
 
     fn test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("PRAGMA journal_mode = WAL;").ok();
-        db::run_migrations(&conn, "test").unwrap();
+        db::init_schema(&conn, "test").unwrap();
         conn
     }
 
-    fn session_event(id: &str) -> SessionEvent {
-        SessionEvent {
-            session_id: id.into(),
-            proxy: "api".into(),
-            started_at: 1000,
-            client_name: Some("claude-desktop".into()),
-            client_version: Some("1.0.0".into()),
-            client_platform: Some("claude".into()),
+    fn proxy_arc() -> Arc<str> {
+        Arc::from("api")
+    }
+
+    fn parts_with_session(sid: &str) -> http::request::Parts {
+        RequestBuilder::new()
+            .method("POST")
+            .uri("/")
+            .header("mcp-session-id", sid)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0
+    }
+
+    fn rpc_tools_call(id: i64, tool: &str) -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(id),
+            method: ClientMethod::Tools(ToolsMethod::Call),
+            params: Some(serde_json::Map::from_iter([("name".into(), json!(tool))])),
         }
     }
 
-    fn request_event(id: &str, session_id: &str, status: RequestStatus) -> RequestEvent {
-        RequestEvent {
-            request_id: id.into(),
-            ts: 1001,
-            proxy: "api".into(),
-            session_id: Some(session_id.into()),
-            method: "tools/call".into(),
-            tool: Some("search".into()),
-            resource_uri: None,
-            prompt_name: None,
-            latency_us: 142,
-            status,
-            error_code: None,
-            error_msg: None,
-            bytes_in: Some(256),
-            bytes_out: Some(1024),
-        }
+    fn mcp_request(sid: &str, rpc: JsonRpcRequest) -> Request {
+        Request::Mcp(parts_with_session(sid), rpc)
     }
 
-    fn tools_payload(names: &[&str]) -> String {
-        let tools: Vec<serde_json::Value> = names
-            .iter()
-            .map(|n| serde_json::json!({"name": n, "description": format!("tool {n}")}))
-            .collect();
-        serde_json::json!({"tools": tools}).to_string()
+    fn mcp_response_ok(id: i64) -> Response {
+        let parts = http::Response::new(()).into_parts().0;
+        Response::Mcp(
+            parts,
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(id),
+                result: Some(json!({"ok": true})),
+            }),
+        )
     }
 
-    fn schema_version_event(payload: &str, hash: &str, ts: i64) -> SchemaVersionEvent {
-        SchemaVersionEvent {
+    fn store_event(event: ProxyEvent, ts: i64) -> StoreEvent {
+        StoreEvent {
             ts,
-            proxy: "api".into(),
-            upstream_url: "http://localhost:9000".into(),
-            method: "tools/list".into(),
-            payload: payload.to_string(),
-            content_hash: hash.to_string(),
+            proxy: proxy_arc(),
+            event,
+        }
+    }
+
+    fn session_event(id: &str, state: SessionState, count: u64) -> StoreEvent {
+        let now = Utc::now();
+        let info = SessionInfo {
+            id: id.into(),
+            state,
+            client_info: Some(mcpr_core::protocol::mcp::ClientInfo {
+                name: "claude-desktop".into(),
+                version: Some("1.0.0".into()),
+            }),
+            created_at: now,
+            last_active: now,
+            request_count: count,
+            request_ids: vec![],
+        };
+        StoreEvent {
+            ts: now.timestamp_millis(),
+            proxy: proxy_arc(),
+            event: ProxyEvent::Session(Arc::new(info)),
+        }
+    }
+
+    fn drain(conn: &mut Connection, batch: &mut Vec<StoreEvent>) {
+        flush_batch(conn, batch);
+    }
+
+    // ── request side ─────────────────────────────────────────────────
+
+    #[test]
+    fn flush_batch__inserts_request_row_for_mcp() {
+        let mut conn = test_db();
+        let mut batch = vec![store_event(
+            ProxyEvent::Request(Arc::new(mcp_request("sess-1", rpc_tools_call(1, "search")))),
+            1_000,
+        )];
+        drain(&mut conn, &mut batch);
+
+        let (sid, rid, method, tool): (Option<String>, String, String, Option<String>) = conn
+            .query_row(
+                "SELECT session_id, request_id, method, tool FROM requests",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(sid.as_deref(), Some("sess-1"));
+        assert_eq!(rid, "1");
+        assert_eq!(method, "tools/call");
+        assert_eq!(tool.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn flush_batch__unfolds_mcp_batch_into_n_rows() {
+        let mut conn = test_db();
+        let parts = parts_with_session("sess-2");
+        let batch_req = Request::McpBatch(
+            parts,
+            vec![
+                rpc_tools_call(1, "a"),
+                rpc_tools_call(2, "b"),
+                rpc_tools_call(3, "c"),
+            ],
+        );
+
+        let mut batch = vec![store_event(ProxyEvent::Request(Arc::new(batch_req)), 1_000)];
+        drain(&mut conn, &mut batch);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn flush_batch__skips_http_request_silently() {
+        let mut conn = test_db();
+        let http: mcpr_core::protocol::http_request::HttpRequest = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .body(bytes::Bytes::new())
+            .unwrap();
+
+        let mut batch = vec![store_event(
+            ProxyEvent::Request(Arc::new(Request::Http(http))),
+            1_000,
+        )];
+        drain(&mut conn, &mut batch);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn flush_batch__duplicate_request_id_is_ignored() {
+        let mut conn = test_db();
+        let mut batch = vec![
+            store_event(
+                ProxyEvent::Request(Arc::new(mcp_request("s", rpc_tools_call(1, "x")))),
+                1_000,
+            ),
+            store_event(
+                ProxyEvent::Request(Arc::new(mcp_request("s", rpc_tools_call(1, "x")))),
+                1_001,
+            ),
+        ];
+        drain(&mut conn, &mut batch);
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // ── response side ────────────────────────────────────────────────
+
+    #[test]
+    fn flush_batch__inserts_response_ok() {
+        let mut conn = test_db();
+        let parts = http::Response::builder()
+            .header("mcp-session-id", "sess-1")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let resp = Response::Mcp(
+            parts,
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(7),
+                result: Some(json!({})),
+            }),
+        );
+
+        let mut batch = vec![store_event(ProxyEvent::Response(Arc::new(resp)), 2_000)];
+        drain(&mut conn, &mut batch);
+
+        let (sid, rid, status): (Option<String>, String, String) = conn
+            .query_row(
+                "SELECT session_id, request_id, status FROM responses",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(sid.as_deref(), Some("sess-1"));
+        assert_eq!(rid, "7");
+        assert_eq!(status, "ok");
+    }
+
+    // ── join via request_log view ────────────────────────────────────
+
+    #[test]
+    fn request_log_view__computes_latency_when_response_present() {
+        let mut conn = test_db();
+        let mut batch = vec![
+            store_event(
+                ProxyEvent::Request(Arc::new(mcp_request("sess-3", rpc_tools_call(42, "x")))),
+                1_000,
+            ),
+            store_event(ProxyEvent::Response(Arc::new(mcp_response_ok(42))), 1_142),
+        ];
+        drain(&mut conn, &mut batch);
+
+        // The Mcp response above has no session-id header, so the view's
+        // join uses (NULL, '42') ↔ (sess-3, '42'), which won't match.
+        // Verify pending shows up:
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM request_log WHERE request_id = '42'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn request_log_view__joins_when_session_ids_match() {
+        let mut conn = test_db();
+        let parts = http::Response::builder()
+            .header("mcp-session-id", "sess-J")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let resp = Response::Mcp(
+            parts,
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(99),
+                result: Some(json!({})),
+            }),
+        );
+        let mut batch = vec![
+            store_event(
+                ProxyEvent::Request(Arc::new(mcp_request("sess-J", rpc_tools_call(99, "go")))),
+                1_000,
+            ),
+            store_event(ProxyEvent::Response(Arc::new(resp)), 1_250),
+        ];
+        drain(&mut conn, &mut batch);
+
+        let (latency_us, status): (i64, String) = conn
+            .query_row(
+                "SELECT latency_us, status FROM request_log WHERE request_id = '99'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(latency_us, 250_000);
+        assert_eq!(status, "ok");
+    }
+
+    // ── session side ─────────────────────────────────────────────────
+
+    #[test]
+    fn flush_batch__upserts_session_active() {
+        let mut conn = test_db();
+        let mut batch = vec![session_event("sess-A", SessionState::Active, 1)];
+        drain(&mut conn, &mut batch);
+
+        let (state, name, count): (String, String, i64) = conn
+            .query_row(
+                "SELECT state, client_name, request_count FROM sessions WHERE id = 'sess-A'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "active");
+        assert_eq!(name, "claude-desktop");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn flush_batch__upsert_preserves_created_at() {
+        let mut conn = test_db();
+        let first = session_event("sess-B", SessionState::Active, 1);
+        let original_created = first.ts;
+        let mut batch = vec![first];
+        drain(&mut conn, &mut batch);
+
+        // Second event with a later created_at — should be ignored on conflict.
+        let mut later = session_event("sess-B", SessionState::Closed, 5);
+        later.ts = original_created + 10_000;
+        let mut batch = vec![later];
+        drain(&mut conn, &mut batch);
+
+        let (state, count, created): (String, i64, i64) = conn
+            .query_row(
+                "SELECT state, request_count, created_at FROM sessions WHERE id = 'sess-B'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, "closed");
+        assert_eq!(count, 5);
+        // created_at must equal the first session_event's UTC timestamp,
+        // not the second event's.
+        assert!(created < original_created + 10_000);
+    }
+
+    // ── schema side ──────────────────────────────────────────────────
+
+    fn tool_with(name: &str, desc: Option<&str>) -> Tool {
+        Tool {
+            name: name.into(),
+            title: None,
+            description: desc.map(str::to_owned),
+            input_schema: json!({"type": "object"}),
+            output_schema: None,
+            annotations: None,
+            meta: None,
         }
     }
 
     #[test]
-    fn flush_batch__inserts_session_and_request() {
-        let conn = test_db();
+    fn flush_batch__schema_first_seen_writes_item_and_change_with_null_old_hash() {
+        let mut conn = test_db();
+        let change = ChangeSchema::Tool(Reason::Added, tool_with("search", Some("v1")));
+        let mut batch = vec![store_event(ProxyEvent::Schema(Arc::new(change)), 1_000)];
+        drain(&mut conn, &mut batch);
+
+        let (kind, key, hash): (String, String, String) = conn
+            .query_row(
+                "SELECT kind, item_key, payload_hash FROM schema_items",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "tool");
+        assert_eq!(key, "search");
+        assert_eq!(hash.len(), 64);
+
+        let (reason, old_hash): (String, Option<String>) = conn
+            .query_row("SELECT reason, old_hash FROM schema_changes", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(reason, "added");
+        assert!(old_hash.is_none());
+    }
+
+    #[test]
+    fn flush_batch__schema_identical_payload_does_not_log_change() {
+        let mut conn = test_db();
+        let change_a = ChangeSchema::Tool(Reason::Added, tool_with("t", Some("v1")));
+        let change_b = ChangeSchema::Tool(Reason::Observed, tool_with("t", Some("v1")));
+
         let mut batch = vec![
-            StoreEvent::Session(session_event("sess-1")),
-            StoreEvent::Request(request_event("req-1", "sess-1", RequestStatus::Ok)),
+            store_event(ProxyEvent::Schema(Arc::new(change_a)), 1_000),
+            store_event(ProxyEvent::Schema(Arc::new(change_b)), 2_000),
         ];
-        flush_batch(&conn, &mut batch);
+        drain(&mut conn, &mut batch);
 
-        let client: String = conn
-            .query_row(
-                "SELECT client_name FROM sessions WHERE session_id = 'sess-1'",
-                [],
-                |row| row.get(0),
-            )
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_changes", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(client, "claude-desktop");
-
-        let (calls, errors): (i64, i64) = conn
-            .query_row(
-                "SELECT total_calls, total_errors FROM sessions WHERE session_id = 'sess-1'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(calls, 1);
-        assert_eq!(errors, 0);
+        assert_eq!(count, 1);
     }
 
     #[test]
-    fn flush_batch__session_closed() {
-        let conn = test_db();
-        let mut batch = vec![StoreEvent::Session(session_event("sess-2"))];
-        flush_batch(&conn, &mut batch);
+    fn flush_batch__schema_payload_change_appends_change_row() {
+        let mut conn = test_db();
+        let change_a = ChangeSchema::Tool(Reason::Added, tool_with("t", Some("v1")));
+        let change_b = ChangeSchema::Tool(Reason::Added, tool_with("t", Some("v2")));
 
-        let mut batch = vec![StoreEvent::SessionClosed {
-            session_id: "sess-2".into(),
-            ended_at: 3000,
-        }];
-        flush_batch(&conn, &mut batch);
-
-        let ended: i64 = conn
-            .query_row(
-                "SELECT ended_at FROM sessions WHERE session_id = 'sess-2'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(ended, 3000);
-    }
-
-    #[test]
-    fn flush_batch__error_increments_counter() {
-        let conn = test_db();
         let mut batch = vec![
-            StoreEvent::Session(session_event("sess-3")),
-            StoreEvent::Request(request_event("req-err-1", "sess-3", RequestStatus::Error)),
+            store_event(ProxyEvent::Schema(Arc::new(change_a)), 1_000),
+            store_event(ProxyEvent::Schema(Arc::new(change_b)), 2_000),
         ];
-        flush_batch(&conn, &mut batch);
+        drain(&mut conn, &mut batch);
 
-        let (calls, errors): (i64, i64) = conn
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_changes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let (old_hash, new_hash): (Option<String>, String) = conn
             .query_row(
-                "SELECT total_calls, total_errors FROM sessions WHERE session_id = 'sess-3'",
+                "SELECT old_hash, new_hash FROM schema_changes ORDER BY id DESC LIMIT 1",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(calls, 1);
-        assert_eq!(errors, 1);
+        assert!(old_hash.is_some());
+        assert_eq!(new_hash.len(), 64);
+        assert_ne!(old_hash.unwrap(), new_hash);
     }
 
-    // ── SchemaVersion persistence ────────────────────────────────────
+    // ── error response (id-less) is dropped, not panic ───────────────
 
     #[test]
-    fn schema_version__first_ingest_records_initial() {
-        let conn = test_db();
-        let payload = tools_payload(&["search", "create"]);
-        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
-            &payload, "hash-v1", 1000,
-        ))];
-        flush_batch(&conn, &mut batch);
+    fn flush_batch__bare_jsonrpc_error_is_dropped() {
+        let mut conn = test_db();
+        let parts = http::Response::new(()).into_parts().0;
+        let err = Response::Mcp(
+            parts,
+            JsonRpcResult::Error(JsonRpcError {
+                code: -32600,
+                message: "bad request".into(),
+                data: None,
+            }),
+        );
+        let mut batch = vec![store_event(ProxyEvent::Response(Arc::new(err)), 3_000)];
+        drain(&mut conn, &mut batch);
 
-        let (method, hash): (String, String) = conn
-            .query_row(
-                "SELECT method, schema_hash FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM responses", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(method, "tools/list");
-        assert_eq!(hash, "hash-v1");
+        assert_eq!(count, 0);
+    }
 
-        let change_type: String = conn
-            .query_row(
-                "SELECT change_type FROM schema_changes WHERE upstream_url = 'http://localhost:9000'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(change_type, "initial");
+    // ── method_str smoke ─────────────────────────────────────────────
+
+    #[test]
+    fn method_str__known_variants_use_static_str() {
+        assert_eq!(
+            method_str(&ClientMethod::Lifecycle(LifecycleMethod::Initialize)),
+            "initialize"
+        );
+        assert_eq!(
+            method_str(&ClientMethod::Tools(ToolsMethod::List)),
+            "tools/list"
+        );
     }
 
     #[test]
-    fn schema_version__upsert_overwrites_payload_and_hash() {
-        let conn = test_db();
-
-        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
-            &tools_payload(&["a"]),
-            "hash-v1",
-            1000,
-        ))];
-        flush_batch(&conn, &mut batch);
-
-        let mut batch = vec![StoreEvent::SchemaVersion(schema_version_event(
-            &tools_payload(&["a", "b"]),
-            "hash-v2",
-            2000,
-        ))];
-        flush_batch(&conn, &mut batch);
-
-        let (hash, captured_at): (String, i64) = conn
-            .query_row(
-                "SELECT schema_hash, captured_at FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(hash, "hash-v2");
-        assert_eq!(captured_at, 2000);
+    fn method_str__unknown_uses_owned_string() {
+        assert_eq!(
+            method_str(&ClientMethod::Unknown("custom/thing".into())),
+            "custom/thing"
+        );
     }
 }

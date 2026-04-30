@@ -86,15 +86,23 @@ pub struct SchemaStatusRow {
 }
 
 impl QueryEngine {
-    /// Fetch all captured schema snapshots, optionally filtered by proxy
-    /// name and/or MCP method.
+    /// List per-item schema snapshots. The new model stores one row per
+    /// item (tool/prompt/resource/resource_template) rather than one row
+    /// per (upstream, method) payload, so:
+    ///   `upstream_url` is empty (we no longer track upstream URLs at the
+    ///                            schema layer)
+    ///   `method`       is the item kind ("tool" | "prompt" | …)
+    ///   `payload`      is the per-item JSON
+    ///   `schema_hash`  is `payload_hash`
+    ///
+    /// TODO: redesign the public CLI shape around items instead of methods.
     pub fn schema(&self, params: &SchemaParams) -> Result<Vec<SchemaRow>, rusqlite::Error> {
         let sql = "
-            SELECT upstream_url, method, payload, captured_at, schema_hash
-            FROM server_schema
+            SELECT '' AS upstream_url, kind AS method, payload, captured_at, payload_hash
+            FROM schema_items
             WHERE (?1 IS NULL OR proxy = ?1)
-              AND (?2 IS NULL OR method = ?2)
-            ORDER BY upstream_url, method
+              AND (?2 IS NULL OR kind = ?2)
+            ORDER BY kind, item_key
         ";
         let mut stmt = self.conn().prepare(sql)?;
         let rows = stmt.query_map(params![params.proxy, params.method], |row| {
@@ -109,17 +117,27 @@ impl QueryEngine {
         rows.collect()
     }
 
-    /// Fetch schema change history, optionally filtered by proxy name
-    /// and/or MCP method.
+    /// Fetch the per-item schema change log. The legacy fields map onto
+    /// the new schema as:
+    ///   `upstream_url` — empty (unavailable)
+    ///   `method`       — item kind
+    ///   `change_type`  — reason ("added" | "observed")
+    ///   `item_name`    — item_key
     pub fn schema_changes(
         &self,
         params: &SchemaChangesParams,
     ) -> Result<Vec<SchemaChangeRow>, rusqlite::Error> {
         let sql = "
-            SELECT upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at
+            SELECT '' AS upstream_url,
+                   kind AS method,
+                   reason AS change_type,
+                   item_key AS item_name,
+                   old_hash,
+                   new_hash,
+                   detected_at
             FROM schema_changes
             WHERE (?1 IS NULL OR proxy = ?1)
-              AND (?2 IS NULL OR method = ?2)
+              AND (?2 IS NULL OR kind = ?2)
             ORDER BY detected_at DESC
             LIMIT ?3
         ";
@@ -131,242 +149,122 @@ impl QueryEngine {
                 change_type: row.get(2)?,
                 item_name: row.get(3)?,
                 old_hash: row.get(4)?,
-                new_hash: row.get(5)?,
+                new_hash: Some(row.get::<_, String>(5)?),
                 detected_at: row.get(6)?,
             })
         })?;
         rows.collect()
     }
 
-    /// Compute the schema status for a given upstream URL.
+    /// Schema status used to be derived from a captured `initialize`
+    /// payload. The new event model drops `initialize` capture entirely
+    /// — schema_items only holds tools/prompts/resources/templates.
+    /// Return "unknown" with a list of kinds we have items for.
+    ///
+    /// TODO: reintroduce a `SchemaSnapshot` event for `initialize` so we
+    /// can populate serverInfo / protocolVersion / capabilities again.
     pub fn schema_status(&self, upstream_url: &str) -> Result<SchemaStatusRow, rusqlite::Error> {
-        let methods_sql = "
-            SELECT method, captured_at FROM server_schema
-            WHERE upstream_url = ?1
-            ORDER BY method
+        let kinds_sql = "
+            SELECT DISTINCT kind, MAX(captured_at) AS last
+            FROM schema_items
+            GROUP BY kind
+            ORDER BY kind
         ";
-        let mut stmt = self.conn().prepare(methods_sql)?;
-        let methods: Vec<(String, i64)> = stmt
-            .query_map(params![upstream_url], |row| Ok((row.get(0)?, row.get(1)?)))?
+        let mut stmt = self.conn().prepare(kinds_sql)?;
+        let kinds: Vec<(String, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
 
-        if methods.is_empty() {
-            return Ok(SchemaStatusRow {
-                upstream_url: upstream_url.to_string(),
-                status: "unknown".to_string(),
-                server_name: None,
-                server_version: None,
-                protocol_version: None,
-                capabilities: vec![],
-                methods_captured: vec![],
-                last_captured_at: None,
-            });
-        }
-
-        let method_names: Vec<String> = methods.iter().map(|(m, _)| m.clone()).collect();
-        let last_captured = methods.iter().map(|(_, ts)| *ts).max();
-
-        // Extract server info from initialize payload if available.
-        let (server_name, server_version, protocol_version, capabilities) =
-            self.extract_server_info(upstream_url);
-
-        let has_initialize = method_names.iter().any(|m| m == "initialize");
-        let list_methods = [
-            "tools/list",
-            "resources/list",
-            "resources/templates/list",
-            "prompts/list",
-        ];
-        let has_any_list = list_methods
-            .iter()
-            .any(|m| method_names.iter().any(|n| n == m));
-
-        let status = if has_initialize && has_any_list {
-            "complete"
-        } else {
-            "partial"
-        };
+        let last_captured = kinds.iter().map(|(_, ts)| *ts).max();
+        let methods_captured: Vec<String> = kinds.into_iter().map(|(k, _)| k).collect();
 
         Ok(SchemaStatusRow {
             upstream_url: upstream_url.to_string(),
-            status: status.to_string(),
-            server_name,
-            server_version,
-            protocol_version,
-            capabilities,
-            methods_captured: method_names,
+            status: "unknown".to_string(),
+            server_name: None,
+            server_version: None,
+            protocol_version: None,
+            capabilities: vec![],
+            methods_captured,
             last_captured_at: last_captured,
         })
     }
 
-    /// Fetch the latest persisted schema row for `(proxy, method)` —
-    /// used at proxy startup to hydrate `SchemaManager` from disk.
+    /// Used by SchemaManager hydration at startup. The new model has no
+    /// payload-per-method shape, so there's nothing useful to return.
+    /// SchemaManager rebuilds from the next observed list response.
     ///
-    /// Returns `None` when no row matches. `server_schema` is an
-    /// UPSERT-keyed-by-(proxy, upstream_url, method) table, so the
-    /// "latest" is simply the single row per key; we pick by highest
-    /// `captured_at` to be robust against multiple upstream URLs that
-    /// share the same proxy name (unlikely today but possible).
+    /// TODO: replace with a per-kind hydrator once SchemaManager learns
+    /// to consume `schema_items` rows directly.
     pub fn latest_schema_row(
         &self,
-        proxy: &str,
-        method: &str,
+        _proxy: &str,
+        _method: &str,
     ) -> Result<Option<LatestSchemaRow>, rusqlite::Error> {
-        let sql = "
-            SELECT proxy, upstream_url, method, payload, captured_at, schema_hash
-            FROM server_schema
-            WHERE proxy = ?1 AND method = ?2
-            ORDER BY captured_at DESC
-            LIMIT 1
-        ";
-        self.conn()
-            .query_row(sql, params![proxy, method], |row| {
-                Ok(LatestSchemaRow {
-                    proxy: row.get(0)?,
-                    upstream_url: row.get(1)?,
-                    method: row.get(2)?,
-                    payload: row.get(3)?,
-                    captured_at: row.get(4)?,
-                    schema_hash: row.get(5)?,
-                })
-            })
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })
+        Ok(None)
     }
 
-    /// Cross-reference captured tools/list schema with actual request logs.
-    /// Returns all listed tools with their usage stats — unused tools have calls = 0.
+    /// Cross-reference recorded tools with actual request logs to surface
+    /// tools that were declared but never called.
     pub fn schema_unused(
         &self,
         params: &SchemaUnusedParams,
     ) -> Result<Vec<SchemaToolUsageRow>, rusqlite::Error> {
-        // Step 1: Get the tools/list payload from server_schema.
-        let payload: Option<String> = self
-            .conn()
-            .query_row(
-                "SELECT payload FROM server_schema WHERE method = 'tools/list' LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .ok();
+        let items_sql = "
+            SELECT item_key, payload FROM schema_items
+            WHERE kind = 'tool'
+              AND (?1 IS NULL OR proxy = ?1)
+        ";
+        let mut stmt = self.conn().prepare(items_sql)?;
+        let items: Vec<(String, String)> = stmt
+            .query_map(params![params.proxy], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let payload = match payload {
-            Some(p) => p,
-            None => return Ok(vec![]),
-        };
-
-        // Step 2: Parse tool names from the payload.
-        let val: serde_json::Value = serde_json::from_str(&payload).unwrap_or_default();
-        let tools = match val.get("tools").and_then(|t| t.as_array()) {
-            Some(arr) => arr,
-            None => return Ok(vec![]),
-        };
-
-        let mut tool_info: Vec<(String, String)> = Vec::new();
-        for tool in tools {
-            let name = tool
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("")
-                .to_string();
-            let desc = tool
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !name.is_empty() {
-                tool_info.push((name, desc));
-            }
-        }
-
-        if tool_info.is_empty() {
+        if items.is_empty() {
             return Ok(vec![]);
         }
 
-        // Step 3: Query request logs for each tool's usage.
-        let sql = "
-            SELECT COUNT(*) as calls,
-                   SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors,
-                   MAX(ts) as last_called_at
-            FROM requests
+        let usage_sql = "
+            SELECT COUNT(*) AS calls,
+                   SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS errors,
+                   MAX(ts) AS last_called_at
+            FROM request_log
             WHERE (?1 IS NULL OR proxy = ?1) AND ts >= ?2 AND tool = ?3
         ";
 
-        let mut result = Vec::new();
-        for (name, desc) in &tool_info {
-            let row =
-                self.conn()
-                    .query_row(sql, params![params.proxy, params.since_ts, name], |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                        ))
-                    });
+        let mut result = Vec::with_capacity(items.len());
+        for (name, payload) in &items {
+            let description = serde_json::from_str::<serde_json::Value>(payload)
+                .ok()
+                .and_then(|v| {
+                    v.get("description")
+                        .and_then(|d| d.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_default();
 
+            let row = self.conn().query_row(
+                usage_sql,
+                params![params.proxy, params.since_ts, name],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            );
             let (calls, errors, last_called_at) = row.unwrap_or((0, 0, None));
             result.push(SchemaToolUsageRow {
                 tool_name: name.clone(),
-                description: desc.clone(),
+                description,
                 calls,
                 errors,
                 last_called_at,
             });
         }
 
-        // Sort: unused first (calls = 0), then by calls ascending.
         result.sort_by(|a, b| a.calls.cmp(&b.calls));
-
         Ok(result)
-    }
-
-    /// Extract server info from a captured initialize payload.
-    fn extract_server_info(
-        &self,
-        upstream_url: &str,
-    ) -> (Option<String>, Option<String>, Option<String>, Vec<String>) {
-        let payload: Option<String> = self
-            .conn()
-            .query_row(
-                "SELECT payload FROM server_schema WHERE upstream_url = ?1 AND method = 'initialize'",
-                params![upstream_url],
-                |row| row.get(0),
-            )
-            .ok();
-
-        let payload = match payload {
-            Some(p) => p,
-            None => return (None, None, None, vec![]),
-        };
-
-        let val: serde_json::Value = match serde_json::from_str(&payload) {
-            Ok(v) => v,
-            Err(_) => return (None, None, None, vec![]),
-        };
-
-        let server_name = val
-            .get("serverInfo")
-            .and_then(|i| i.get("name"))
-            .and_then(|n| n.as_str())
-            .map(String::from);
-        let server_version = val
-            .get("serverInfo")
-            .and_then(|i| i.get("version"))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-        let protocol_version = val
-            .get("protocolVersion")
-            .and_then(|p| p.as_str())
-            .map(String::from);
-        let capabilities = val
-            .get("capabilities")
-            .and_then(|c| c.as_object())
-            .map(|obj| obj.keys().cloned().collect())
-            .unwrap_or_default();
-
-        (server_name, server_version, protocol_version, capabilities)
     }
 }

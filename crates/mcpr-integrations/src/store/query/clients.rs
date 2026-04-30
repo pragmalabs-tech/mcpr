@@ -42,7 +42,7 @@ impl QueryEngine {
                 END AS error_pct,
                 MIN(started_at) AS first_seen,
                 MAX(last_seen_at) AS last_seen
-            FROM sessions
+            FROM sessions_view
             WHERE (?1 IS NULL OR proxy = ?1) AND started_at >= ?2
             GROUP BY client_name, client_version, client_platform
             ORDER BY total_calls DESC

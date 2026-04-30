@@ -24,7 +24,7 @@ impl QueryEngine {
     pub fn slow(&self, params: &SlowParams) -> Result<Vec<LogRow>, rusqlite::Error> {
         let sql = format!(
             "SELECT {LOG_COLUMNS}
-            FROM requests
+            FROM request_log
             WHERE (?1 IS NULL OR proxy = ?1)
               AND latency_us >= ?2
               AND (?3 IS NULL OR tool = ?3)
@@ -56,7 +56,7 @@ impl QueryEngine {
     ) -> Result<Vec<LogRow>, rusqlite::Error> {
         let sql = format!(
             "SELECT {LOG_COLUMNS}
-            FROM requests
+            FROM request_log
             WHERE (?1 IS NULL OR proxy = ?1)
               AND latency_us >= ?2
               AND (?3 IS NULL OR tool = ?3)

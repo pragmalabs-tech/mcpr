@@ -17,7 +17,11 @@
 //! })?;
 //!
 //! // Hot path — non-blocking, fire-and-forget.
-//! store.record(StoreEvent::Request(event));
+//! store.record(StoreEvent {
+//!     ts: chrono::Utc::now().timestamp_millis(),
+//!     proxy: proxy_arc.clone(),
+//!     event: proxy_event,
+//! });
 //!
 //! // Shutdown — blocks until writer drains pending events.
 //! store.shutdown();
@@ -91,8 +95,8 @@ impl Store {
         let conn = db::open_connection(&config.db_path)
             .map_err(|e| StoreError::Sqlite(format!("failed to open database: {e}")))?;
 
-        db::run_migrations(&conn, &config.mcpr_version)
-            .map_err(|e| StoreError::Sqlite(format!("schema migration failed: {e}")))?;
+        db::init_schema(&conn, &config.mcpr_version)
+            .map_err(|e| StoreError::Sqlite(format!("schema init failed: {e}")))?;
 
         // Create the event channel.
         let (tx, rx) = mpsc::channel::<StoreEvent>(CHANNEL_CAPACITY);
@@ -189,8 +193,18 @@ impl std::error::Error for StoreError {}
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use mcpr_core::event::ProxyEvent;
+    use mcpr_core::protocol::{
+        Request,
+        mcp::{ClientMethod, JsonRpcRequest, JsonRpcVersion, RequestId, ToolsMethod},
+        session::{SessionInfo, SessionState},
+    };
+    use serde_json::json;
+
     use super::*;
-    use crate::store::event::{RequestEvent, RequestStatus, SessionEvent};
 
     #[test]
     fn store__open_record_shutdown() {
@@ -203,31 +217,49 @@ mod tests {
         })
         .unwrap();
 
-        store.record(StoreEvent::Session(SessionEvent {
-            session_id: "s1".into(),
-            proxy: "test-proxy".into(),
-            started_at: 1000,
-            client_name: Some("test-client".into()),
-            client_version: Some("0.1".into()),
-            client_platform: Some("unknown".into()),
-        }));
+        let proxy: Arc<str> = Arc::from("test-proxy");
+        let now = Utc::now();
 
-        store.record(StoreEvent::Request(RequestEvent {
-            request_id: "r1".into(),
-            ts: 1001,
-            proxy: "test-proxy".into(),
-            session_id: Some("s1".into()),
-            method: "tools/call".into(),
-            tool: Some("test_tool".into()),
-            resource_uri: None,
-            prompt_name: None,
-            latency_us: 50_000,
-            status: RequestStatus::Ok,
-            error_code: None,
-            error_msg: None,
-            bytes_in: Some(100),
-            bytes_out: Some(200),
-        }));
+        let info = SessionInfo {
+            id: "s1".into(),
+            state: SessionState::Active,
+            client_info: Some(mcpr_core::protocol::mcp::ClientInfo {
+                name: "test-client".into(),
+                version: Some("0.1".into()),
+            }),
+            created_at: now,
+            last_active: now,
+            request_count: 1,
+            request_ids: vec![],
+        };
+        store.record(StoreEvent {
+            ts: now.timestamp_millis(),
+            proxy: proxy.clone(),
+            event: ProxyEvent::Session(Arc::new(info)),
+        });
+
+        let parts = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("mcp-session-id", "s1")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let rpc = JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(1),
+            method: ClientMethod::Tools(ToolsMethod::Call),
+            params: Some(serde_json::Map::from_iter([(
+                "name".into(),
+                json!("test_tool"),
+            )])),
+        };
+        store.record(StoreEvent {
+            ts: now.timestamp_millis() + 1,
+            proxy: proxy.clone(),
+            event: ProxyEvent::Request(Arc::new(Request::Mcp(parts, rpc))),
+        });
 
         store.shutdown();
 
@@ -245,7 +277,7 @@ mod tests {
 
         let tool: String = conn
             .query_row(
-                "SELECT tool FROM requests WHERE request_id = 'r1'",
+                "SELECT tool FROM requests WHERE request_id = '1'",
                 [],
                 |row| row.get(0),
             )
