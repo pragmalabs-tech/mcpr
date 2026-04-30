@@ -1,6 +1,18 @@
 //! Request → router → response stage chain. Request stages mutate
 //! inbound traffic in order, `RouterStage` talks to upstream, response
 //! stages mutate outbound traffic in order on the way back.
+//!
+//! TODO: vision is 1 request (has batch mcp requests) → N responses (streaming).
+//!  Today `ResponseStage` is invoked once per HTTP response and receives the
+//! whole `Response` (`Mcp` / `McpBatch` / `Http`); every stage that
+//! cares about individual results has to manually match the variant
+//! and iterate. Refactor to per-message: change the trait to
+//! `on_message(JsonRpcResult) -> JsonRpcResult` and have the pipeline
+//! iterate — `Mcp` runs stages once, `McpBatch` runs them N times,
+//! and a future `Response::Stream` runs them per frame as it arrives.
+//! That removes the batch-handling boilerplate, makes per-result
+//! encoding natural, and lets streaming drop in without touching
+//! stages.
 
 pub mod csp_rewritten_stage;
 pub mod log_stage;
