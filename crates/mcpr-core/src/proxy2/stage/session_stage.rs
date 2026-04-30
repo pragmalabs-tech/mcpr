@@ -9,14 +9,22 @@ use crate::{
     protocol::{
         Request, http_request::HttpRequest, mcp::JsonRpcRequest, session::session_id_from_headers,
     },
-    proxy2::{stage::types::RequestStage, state::ProxyState},
+    proxy2::{
+        stage::types::{RequestContext, RequestStage},
+        state::ProxyState,
+    },
 };
 
 pub struct SessionStage;
 
 #[async_trait]
 impl RequestStage for SessionStage {
-    async fn process(&self, request: Request, state: ProxyState) -> anyhow::Result<Request> {
+    async fn process(
+        &self,
+        request: Request,
+        _request_ctx: RequestContext,
+        state: ProxyState,
+    ) -> anyhow::Result<Request> {
         match &request {
             Request::Mcp(parts, rpc) => {
                 track_mcp_request(parts, rpc, &state);

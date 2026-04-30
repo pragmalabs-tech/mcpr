@@ -28,6 +28,7 @@ use crate::{
             csp_rewritten_stage::{CspRewriteConfig, CspRewritter},
             log_stage::{RequestLogStage, ResponseLogStage},
             router_stage::RouterStage,
+            schema_tracking_stage::SchemaTrackingStage,
             types::{RequestStage, ResponseStage},
         },
         state::InnerProxyState,
@@ -40,12 +41,17 @@ use crate::{
 /// in upstream responses are mutated before they reach the client.
 pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<Router> {
     let cors = CorsLayer::permissive();
+
+    // Build Stages
     let csp_rewritter = CspRewritter::new(CspRewriteConfig::from_proxy_config(&cfg));
     let router_stage = RouterStage::new(cfg)?;
     let request_stages: Vec<Box<dyn RequestStage>> =
         vec![Box::new(RequestLogStage), Box::new(SessionStage)];
-    let response_stages: Vec<Box<dyn ResponseStage>> =
-        vec![Box::new(csp_rewritter), Box::new(ResponseLogStage)];
+    let response_stages: Vec<Box<dyn ResponseStage>> = vec![
+        Box::new(SchemaTrackingStage),
+        Box::new(csp_rewritter),
+        Box::new(ResponseLogStage),
+    ];
 
     let pipeline = Arc::new(StagePipeline::new(
         request_stages,

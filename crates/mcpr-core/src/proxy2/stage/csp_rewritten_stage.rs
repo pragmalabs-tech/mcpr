@@ -22,7 +22,11 @@ use serde_json::{Map, Value};
 use crate::{
     protocol::{Response, mcp::JsonRpcResult},
     proxy2::csp::{CspConfig, Directive, effective_domains, is_public_proxy_origin},
-    proxy2::{proxy_config::ProxyConfig, stage::types::ResponseStage, state::ProxyState},
+    proxy2::{
+        proxy_config::ProxyConfig,
+        stage::types::{RequestContext, ResponseStage},
+        state::ProxyState,
+    },
 };
 
 /// Inputs to the CSP rewrite. Held inside an `ArcSwap` on the stage so
@@ -95,7 +99,12 @@ impl CspRewritter {
 
 #[async_trait]
 impl ResponseStage for CspRewritter {
-    async fn process(&self, mut res: Response, _state: ProxyState) -> anyhow::Result<Response> {
+    async fn process(
+        &self,
+        mut res: Response,
+        _request_ctx: RequestContext,
+        _state: ProxyState,
+    ) -> anyhow::Result<Response> {
         let cfg = self.config.load();
         match &mut res {
             Response::Mcp(_, JsonRpcResult::Response(r)) => {
@@ -435,6 +444,11 @@ mod tests {
         InnerProxyState::for_tests()
     }
 
+    /// CSP doesn't read the request — an empty context suffices.
+    fn ctx() -> RequestContext {
+        RequestContext::default()
+    }
+
     fn empty_response_parts() -> ResponseParts {
         axum::http::Response::new(()).into_parts().0
     }
@@ -528,7 +542,10 @@ mod tests {
             .header("content-type", "text/html")
             .body(Bytes::from_static(b"<html/>"))
             .unwrap();
-        let out = stage.process(Response::Http(http), state()).await.unwrap();
+        let out = stage
+            .process(Response::Http(http), ctx(), state())
+            .await
+            .unwrap();
         let Response::Http(resp) = out else {
             panic!("expected Http");
         };
@@ -546,7 +563,7 @@ mod tests {
                 data: None,
             }),
         );
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let Response::Mcp(_, JsonRpcResult::Error(e)) = out else {
             panic!("expected error");
         };
@@ -556,7 +573,10 @@ mod tests {
     #[tokio::test]
     async fn process__missing_result_is_left_none() {
         let stage = CspRewritter::new(config());
-        let out = stage.process(mcp_with_no_result(), state()).await.unwrap();
+        let out = stage
+            .process(mcp_with_no_result(), ctx(), state())
+            .await
+            .unwrap();
         let Response::Mcp(_, JsonRpcResult::Response(r)) = out else {
             panic!("expected Response");
         };
@@ -580,7 +600,7 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let meta = &extract_result(&out)["tools"][0]["_meta"];
         assert_eq!(
             meta["openai/widgetDomain"].as_str().unwrap(),
@@ -604,7 +624,7 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let meta = &extract_result(&out)["tools"][0]["_meta"];
         let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
@@ -626,7 +646,7 @@ mod tests {
             }
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let meta = &extract_result(&out)["_meta"];
         assert_eq!(
             meta["openai/widgetDomain"].as_str().unwrap(),
@@ -644,7 +664,7 @@ mod tests {
             "_meta": { "requestId": "abc-123" }
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let meta = &extract_result(&out)["_meta"];
         assert!(meta.get("openai/widgetCSP").is_none());
         assert!(meta.get("openai/widgetDomain").is_none());
@@ -668,7 +688,7 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let meta = &extract_result(&out)["resources"][0]["_meta"];
         let connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         assert_eq!(
@@ -700,7 +720,7 @@ mod tests {
             ]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let result = extract_result(&out);
         let pay = as_strs(&result["resources"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]);
         let search =
@@ -716,7 +736,7 @@ mod tests {
             "resources": [{ "name": "malformed" }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         assert!(extract_result(&out)["resources"][0].get("_meta").is_none());
     }
 
@@ -732,7 +752,7 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let resources = as_strs(
             &extract_result(&out)["resourceTemplates"][0]["_meta"]["openai/widgetCSP"]["resource_domains"],
         );
@@ -754,7 +774,7 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let entry = &extract_result(&out)["contents"][0];
         assert_eq!(
             entry["text"].as_str().unwrap(),
@@ -783,7 +803,7 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let frames = as_strs(
             &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["frame_domains"],
         );
@@ -804,7 +824,7 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let meta = &extract_result(&out)["contents"][0]["_meta"];
         let connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         assert_eq!(connect, vec!["https://api.external.com"]);
@@ -830,7 +850,7 @@ mod tests {
         };
         let resp = Response::McpBatch(empty_response_parts(), vec![make(1), make(2)]);
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let Response::McpBatch(_, items) = out else {
             panic!("expected McpBatch");
         };
@@ -863,7 +883,7 @@ mod tests {
         });
         let resp = Response::McpBatch(empty_response_parts(), vec![ok, err]);
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let Response::McpBatch(_, items) = out else {
             panic!();
         };
@@ -889,7 +909,7 @@ mod tests {
                 "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
             }]
         }));
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let connect = as_strs(
             &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
         );
@@ -914,7 +934,7 @@ mod tests {
                 "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
             }]
         }));
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let connect = as_strs(
             &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
         );
@@ -932,7 +952,7 @@ mod tests {
             }
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let domains = as_strs(&extract_result(&out)["deeply"]["nested"]["connect_domains"]);
         assert_eq!(
             domains,
@@ -952,7 +972,7 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, state()).await.unwrap();
+        let out = stage.process(resp, ctx(), state()).await.unwrap();
         let frames = as_strs(&extract_result(&out)["tools"][0]["_meta"]["deeply"]["frame_domains"]);
         assert_eq!(frames, vec!["https://embed.partner.com"]);
     }

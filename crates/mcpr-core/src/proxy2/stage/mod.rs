@@ -5,6 +5,7 @@
 pub mod csp_rewritten_stage;
 pub mod log_stage;
 pub mod router_stage;
+pub mod schema_tracking_stage;
 pub mod session_stage;
 pub mod types;
 
@@ -13,7 +14,7 @@ use crate::{
     proxy2::{
         stage::{
             router_stage::RouterStage,
-            types::{RequestStage, ResponseStage},
+            types::{RequestContext, RequestStage, ResponseStage},
         },
         state::ProxyState,
     },
@@ -42,9 +43,17 @@ impl StagePipeline {
     }
 
     /// Entry point after the axum body has been parsed into `Request`.
+    ///
+    /// Builds the `RequestContext` once from the parsed request and
+    /// hands a clone to every stage so they can dispatch on the
+    /// originating MCP method without re-parsing.
     pub async fn process(&self, mut request: Request) -> anyhow::Result<Response> {
+        let request_ctx = RequestContext::from_request(&request);
+
         for stage in &self.request_stages {
-            request = stage.process(request, self.state.clone()).await?;
+            request = stage
+                .process(request, request_ctx.clone(), self.state.clone())
+                .await?;
         }
 
         let mut response = self
@@ -53,7 +62,9 @@ impl StagePipeline {
             .await?;
 
         for stage in &self.response_stages {
-            response = stage.process(response, self.state.clone()).await?;
+            response = stage
+                .process(response, request_ctx.clone(), self.state.clone())
+                .await?;
         }
 
         Ok(response)
@@ -86,7 +97,12 @@ mod tests {
 
     #[async_trait]
     impl RequestStage for TaggedRequestStage {
-        async fn process(&self, req: Request, _: ProxyState) -> anyhow::Result<Request> {
+        async fn process(
+            &self,
+            req: Request,
+            _: RequestContext,
+            _: ProxyState,
+        ) -> anyhow::Result<Request> {
             self.log.lock().unwrap().push(self.tag);
             Ok(req)
         }
@@ -99,7 +115,12 @@ mod tests {
 
     #[async_trait]
     impl ResponseStage for TaggedResponseStage {
-        async fn process(&self, res: Response, _: ProxyState) -> anyhow::Result<Response> {
+        async fn process(
+            &self,
+            res: Response,
+            _: RequestContext,
+            _: ProxyState,
+        ) -> anyhow::Result<Response> {
             self.log.lock().unwrap().push(self.tag);
             Ok(res)
         }
@@ -110,7 +131,12 @@ mod tests {
 
     #[async_trait]
     impl RequestStage for FailingRequestStage {
-        async fn process(&self, _: Request, _: ProxyState) -> anyhow::Result<Request> {
+        async fn process(
+            &self,
+            _: Request,
+            _: RequestContext,
+            _: ProxyState,
+        ) -> anyhow::Result<Request> {
             Err(anyhow::anyhow!("nope"))
         }
     }
