@@ -1,6 +1,5 @@
 //! Command dispatch — thin handlers that wire logic → render.
 
-mod observe;
 mod proxy;
 mod relay;
 pub mod setup;
@@ -10,7 +9,6 @@ use crate::config::{ProxyCommand, RelayCommand, StoreCommand};
 
 pub fn handle_proxy_command(cmd: ProxyCommand) {
     let result = match cmd {
-        // Lifecycle commands
         ProxyCommand::Run(_) => {
             unreachable!("`mcpr proxy run` is handled before async dispatch");
         }
@@ -20,15 +18,6 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         ProxyCommand::Stop(args) => proxy::stop(args),
         ProxyCommand::List(args) => proxy::list(args),
         ProxyCommand::Delete(args) => proxy::delete(args),
-
-        // Observability commands
-        ProxyCommand::Logs(args) => observe::logs(args),
-        ProxyCommand::Slow(args) => observe::slow(args),
-        ProxyCommand::Sessions(args) => observe::sessions(args),
-        ProxyCommand::Clients(args) => observe::clients(args),
-        ProxyCommand::Status(args) => observe::status(args),
-        ProxyCommand::Session(args) => observe::session(args),
-        ProxyCommand::Schema(args) => observe::schema(args),
     };
 
     if let Err(e) = result {
