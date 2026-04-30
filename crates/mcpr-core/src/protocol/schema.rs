@@ -1,26 +1,20 @@
 //! Schema state for an upstream MCP server.
 //!
-//! `Schema` accumulates the identity-defining fields of an upstream's
-//! tools, prompts, resources, and resource templates. `add_*` methods
-//! return `true` if the schema actually changed — wiring version bumps
-//! to real API changes, not description tweaks or per-request metadata.
+//! `Schema` accumulates the upstream's tools, prompts, resources, and
+//! resource templates as defined by MCP 2025-11-25. Each item carries
+//! every field the spec defines so downstream consumers (TUI, cloud
+//! ingest) can render or diff them without re-fetching from upstream.
 //!
-//! Stored fields per spec table:
-//!
-//! | Item              | Stored                |
-//! |-------------------|-----------------------|
-//! | tool              | `name`, `inputSchema` |
-//! | prompt            | `name`, `arguments`   |
-//! | resource          | `name`, `uri`         |
-//! | resource template | `name`, `uriTemplate` |
+//! Tracking is currently implemented only for tools. `add_tool` returns
+//! `Some(ChangeSchema)` if the inserted tool differs from what's stored
+//! (or if it's new), and `None` if the tool is byte-equal to the
+//! existing entry. The wrapped `Reason` records how the caller observed
+//! the tool — via a `tools/list` response or via a `tools/call`.
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fmt::Write;
-
-use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Schema {
@@ -31,45 +25,134 @@ pub struct Schema {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Tool {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub input_schema: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Prompt {
-    pub arguments: Value,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<Vec<PromptArgument>>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptArgument {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub uri: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ResourceTemplate {
     pub uri_template: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Annotations>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Value>,
 }
 
-/// Outcome of a successful `add_*` mutation.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SchemaChange {
-    /// `content_hash()` after the mutation.
-    pub hash: String,
-    pub reason: ChangeReason,
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Annotations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<Vec<Role>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
 }
 
-/// What changed in the most recent mutation. Carries the affected
-/// item's name so the caller can emit a structured event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+/// How an item entered the schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// Discovered via a list call (e.g. `tools/list`).
+    Added,
+    /// Observed via a direct call (e.g. `tools/call`).
+    Observed,
+}
+
+/// A change to the upstream schema. Wraps the affected item alongside
+/// the `Reason` describing how the caller observed it.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ChangeReason {
-    ToolAdded { name: String },
-    ToolModified { name: String },
-    PromptAdded { name: String },
-    PromptModified { name: String },
-    ResourceAdded { name: String },
-    ResourceModified { name: String },
-    ResourceTemplateAdded { name: String },
-    ResourceTemplateModified { name: String },
+pub enum ChangeSchema {
+    Tool(Reason, Tool),
+    Prompt(Reason, Prompt),
+    Resource(Reason, Resource),
+    ResourceTemplate(Reason, ResourceTemplate),
 }
 
 impl Schema {
@@ -77,82 +160,15 @@ impl Schema {
         Self::default()
     }
 
-    /// Insert or update a tool. Returns `Some(SchemaChange)` if the
-    /// schema changed, `None` if the new value matches the existing one.
-    pub fn add_tool(&mut self, name: String, input_schema: Value) -> Option<SchemaChange> {
-        let new = Tool { input_schema };
-        let reason = match self.tools.get(&name) {
-            Some(existing) if *existing == new => return None,
-            Some(_) => ChangeReason::ToolModified { name: name.clone() },
-            None => ChangeReason::ToolAdded { name: name.clone() },
-        };
-        self.tools.insert(name, new);
-        Some(SchemaChange {
-            hash: self.content_hash(),
-            reason,
-        })
-    }
-
-    /// Insert or update a prompt.
-    pub fn add_prompt(&mut self, name: String, arguments: Value) -> Option<SchemaChange> {
-        let new = Prompt { arguments };
-        let reason = match self.prompts.get(&name) {
-            Some(existing) if *existing == new => return None,
-            Some(_) => ChangeReason::PromptModified { name: name.clone() },
-            None => ChangeReason::PromptAdded { name: name.clone() },
-        };
-        self.prompts.insert(name, new);
-        Some(SchemaChange {
-            hash: self.content_hash(),
-            reason,
-        })
-    }
-
-    /// Insert or update a resource.
-    pub fn add_resource(&mut self, name: String, uri: String) -> Option<SchemaChange> {
-        let new = Resource { uri };
-        let reason = match self.resources.get(&name) {
-            Some(existing) if *existing == new => return None,
-            Some(_) => ChangeReason::ResourceModified { name: name.clone() },
-            None => ChangeReason::ResourceAdded { name: name.clone() },
-        };
-        self.resources.insert(name, new);
-        Some(SchemaChange {
-            hash: self.content_hash(),
-            reason,
-        })
-    }
-
-    /// Insert or update a resource template.
-    pub fn add_resource_template(
-        &mut self,
-        name: String,
-        uri_template: String,
-    ) -> Option<SchemaChange> {
-        let new = ResourceTemplate { uri_template };
-        let reason = match self.resource_templates.get(&name) {
-            Some(existing) if *existing == new => return None,
-            Some(_) => ChangeReason::ResourceTemplateModified { name: name.clone() },
-            None => ChangeReason::ResourceTemplateAdded { name: name.clone() },
-        };
-        self.resource_templates.insert(name, new);
-        Some(SchemaChange {
-            hash: self.content_hash(),
-            reason,
-        })
-    }
-
-    /// SHA-256 hex of the canonical JSON. Stable across insertion order
-    /// because every container is a `BTreeMap` and serde_json's default
-    /// `Map` is also key-sorted.
-    pub fn content_hash(&self) -> String {
-        let canonical = serde_json::to_vec(self).expect("Schema is serializable");
-        let digest = Sha256::digest(&canonical);
-        let mut hex = String::with_capacity(64);
-        for b in digest.iter() {
-            write!(hex, "{b:02x}").expect("write to String never fails");
+    /// Insert or update a tool. Returns `Some(ChangeSchema::Tool)` if
+    /// the schema changed, `None` if the new value is byte-equal to the
+    /// existing entry.
+    pub fn add_tool(&mut self, tool: Tool, reason: Reason) -> Option<ChangeSchema> {
+        if self.tools.get(&tool.name) == Some(&tool) {
+            return None;
         }
-        hex
+        self.tools.insert(tool.name.clone(), tool.clone());
+        Some(ChangeSchema::Tool(reason, tool))
     }
 }
 
@@ -162,213 +178,182 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn tool(name: &str) -> Tool {
+        Tool {
+            name: name.into(),
+            title: None,
+            description: None,
+            input_schema: json!({"type": "object"}),
+            output_schema: None,
+            annotations: None,
+            meta: None,
+        }
+    }
+
     // ── add_tool ─────────────────────────────────────────────
 
     #[test]
-    fn add_tool__first_insert_reports_added_with_latest_hash() {
+    fn add_tool__new_tool_returns_change_with_reason() {
         let mut s = Schema::new();
-        let change = s.add_tool("a".into(), json!({"type": "object"})).unwrap();
-        assert_eq!(change.reason, ChangeReason::ToolAdded { name: "a".into() });
-        assert_eq!(change.hash, s.content_hash());
+        let change = s.add_tool(tool("a"), Reason::Added).unwrap();
+        assert_eq!(change, ChangeSchema::Tool(Reason::Added, tool("a")));
     }
 
     #[test]
     fn add_tool__identical_reinsert_returns_none() {
         let mut s = Schema::new();
-        s.add_tool("a".into(), json!({"type": "object"}));
-        assert!(s.add_tool("a".into(), json!({"type": "object"})).is_none());
+        s.add_tool(tool("a"), Reason::Added);
+        assert!(s.add_tool(tool("a"), Reason::Added).is_none());
     }
 
     #[test]
-    fn add_tool__input_schema_change_reports_modified() {
+    fn add_tool__identical_reinsert_with_different_reason_returns_none() {
         let mut s = Schema::new();
-        s.add_tool("a".into(), json!({"type": "object"}));
-        let change = s
-            .add_tool(
-                "a".into(),
-                json!({"type": "object", "properties": {"q": {"type": "string"}}}),
-            )
-            .unwrap();
+        s.add_tool(tool("a"), Reason::Added);
+        assert!(s.add_tool(tool("a"), Reason::Observed).is_none());
+    }
+
+    #[test]
+    fn add_tool__input_schema_change_replaces() {
+        let mut s = Schema::new();
+        s.add_tool(tool("a"), Reason::Added);
+        let mut updated = tool("a");
+        updated.input_schema = json!({"type": "object", "properties": {"q": {"type": "string"}}});
+        let change = s.add_tool(updated.clone(), Reason::Added).unwrap();
+        assert_eq!(change, ChangeSchema::Tool(Reason::Added, updated.clone()));
+        assert_eq!(s.tools.get("a"), Some(&updated));
+    }
+
+    #[test]
+    fn add_tool__title_change_replaces() {
+        let mut s = Schema::new();
+        s.add_tool(tool("a"), Reason::Added);
+        let mut updated = tool("a");
+        updated.title = Some("Alpha".into());
+        let change = s.add_tool(updated.clone(), Reason::Observed).unwrap();
+        assert_eq!(change, ChangeSchema::Tool(Reason::Observed, updated));
+    }
+
+    #[test]
+    fn add_tool__keys_by_tool_name() {
+        let mut s = Schema::new();
+        s.add_tool(tool("a"), Reason::Added);
+        s.add_tool(tool("b"), Reason::Added);
+        assert_eq!(s.tools.keys().collect::<Vec<_>>(), vec!["a", "b"]);
+    }
+
+    // ── Tool serde (spec field-name compliance) ──────────────
+
+    #[test]
+    fn tool__serializes_optional_fields_with_camel_case() {
+        let t = Tool {
+            name: "search".into(),
+            title: Some("Search".into()),
+            description: Some("desc".into()),
+            input_schema: json!({"type": "object"}),
+            output_schema: Some(json!({"type": "string"})),
+            annotations: Some(ToolAnnotations {
+                read_only_hint: Some(true),
+                ..Default::default()
+            }),
+            meta: Some(json!({"trace": "abc"})),
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("inputSchema").is_some());
+        assert!(v.get("outputSchema").is_some());
+        assert!(v.get("_meta").is_some());
+        assert_eq!(v["annotations"]["readOnlyHint"], json!(true));
+    }
+
+    #[test]
+    fn tool__omits_unset_optional_fields() {
+        let t = tool("t");
+        let v = serde_json::to_value(&t).unwrap();
+        let obj = v.as_object().unwrap();
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["inputSchema", "name"]);
+    }
+
+    #[test]
+    fn tool__roundtrip_preserves_all_fields() {
+        let t = Tool {
+            name: "search".into(),
+            title: Some("Search".into()),
+            description: Some("desc".into()),
+            input_schema: json!({"type": "object"}),
+            output_schema: Some(json!({"type": "string"})),
+            annotations: Some(ToolAnnotations {
+                title: Some("Search".into()),
+                read_only_hint: Some(true),
+                destructive_hint: Some(false),
+                idempotent_hint: Some(true),
+                open_world_hint: Some(false),
+            }),
+            meta: Some(json!({"trace": "abc"})),
+        };
+        let json = serde_json::to_string(&t).unwrap();
+        let back: Tool = serde_json::from_str(&json).unwrap();
+        assert_eq!(t, back);
+    }
+
+    // ── Prompt / Resource / ResourceTemplate serde ────────────
+
+    #[test]
+    fn prompt__roundtrip_preserves_arguments() {
+        let p = Prompt {
+            name: "greet".into(),
+            title: Some("Greet".into()),
+            description: Some("Say hi".into()),
+            arguments: Some(vec![PromptArgument {
+                name: "topic".into(),
+                title: None,
+                description: Some("subject".into()),
+                required: Some(true),
+            }]),
+            meta: None,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(p, serde_json::from_str::<Prompt>(&json).unwrap());
+    }
+
+    #[test]
+    fn resource__serializes_uri_and_mime_type() {
+        let r = Resource {
+            uri: "file:///a".into(),
+            name: "a".into(),
+            title: None,
+            description: None,
+            mime_type: Some("text/plain".into()),
+            size: Some(42),
+            annotations: Some(Annotations {
+                audience: Some(vec![Role::User]),
+                priority: Some(0.5),
+                last_modified: Some("2026-01-01T00:00:00Z".into()),
+            }),
+            meta: None,
+        };
+        let v = serde_json::to_value(&r).unwrap();
+        assert_eq!(v["mimeType"], json!("text/plain"));
+        assert_eq!(v["annotations"]["audience"], json!(["user"]));
         assert_eq!(
-            change.reason,
-            ChangeReason::ToolModified { name: "a".into() }
-        );
-    }
-
-    // ── add_prompt ───────────────────────────────────────────
-
-    #[test]
-    fn add_prompt__first_insert_reports_added() {
-        let mut s = Schema::new();
-        let change = s
-            .add_prompt("greet".into(), json!([{"name": "topic", "required": true}]))
-            .unwrap();
-        assert_eq!(
-            change.reason,
-            ChangeReason::PromptAdded {
-                name: "greet".into()
-            }
+            v["annotations"]["lastModified"],
+            json!("2026-01-01T00:00:00Z")
         );
     }
 
     #[test]
-    fn add_prompt__identical_reinsert_returns_none() {
-        let mut s = Schema::new();
-        let args = json!([{"name": "topic", "required": true}]);
-        s.add_prompt("greet".into(), args.clone());
-        assert!(s.add_prompt("greet".into(), args).is_none());
-    }
-
-    // ── add_resource ─────────────────────────────────────────
-
-    #[test]
-    fn add_resource__first_insert_reports_added() {
-        let mut s = Schema::new();
-        let change = s.add_resource("r".into(), "file:///a".into()).unwrap();
-        assert_eq!(
-            change.reason,
-            ChangeReason::ResourceAdded { name: "r".into() }
-        );
-    }
-
-    #[test]
-    fn add_resource__uri_change_reports_modified() {
-        let mut s = Schema::new();
-        s.add_resource("r".into(), "file:///a".into());
-        let change = s.add_resource("r".into(), "file:///b".into()).unwrap();
-        assert_eq!(
-            change.reason,
-            ChangeReason::ResourceModified { name: "r".into() }
-        );
-    }
-
-    // ── add_resource_template ────────────────────────────────
-
-    #[test]
-    fn add_resource_template__first_insert_reports_added() {
-        let mut s = Schema::new();
-        let change = s
-            .add_resource_template("doc".into(), "doc://{id}".into())
-            .unwrap();
-        assert_eq!(
-            change.reason,
-            ChangeReason::ResourceTemplateAdded { name: "doc".into() }
-        );
-    }
-
-    #[test]
-    fn add_resource_template__identical_reinsert_returns_none() {
-        let mut s = Schema::new();
-        s.add_resource_template("doc".into(), "doc://{id}".into());
-        assert!(
-            s.add_resource_template("doc".into(), "doc://{id}".into())
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn add__returned_hash_matches_post_mutation_hash() {
-        let mut s = Schema::new();
-        let change = s.add_tool("t".into(), json!({"type": "object"})).unwrap();
-        assert_eq!(change.hash, s.content_hash());
-    }
-
-    // ── content_hash ─────────────────────────────────────────
-
-    #[test]
-    fn content_hash__stable_across_insertion_order() {
-        let mut a = Schema::new();
-        a.add_tool("a".into(), json!({"type": "object"}));
-        a.add_tool("b".into(), json!({"type": "object"}));
-
-        let mut b = Schema::new();
-        b.add_tool("b".into(), json!({"type": "object"}));
-        b.add_tool("a".into(), json!({"type": "object"}));
-
-        assert_eq!(a.content_hash(), b.content_hash());
-    }
-
-    #[test]
-    fn content_hash__changes_when_tool_input_schema_changes() {
-        let mut a = Schema::new();
-        a.add_tool("t".into(), json!({"type": "object"}));
-
-        let mut b = Schema::new();
-        b.add_tool(
-            "t".into(),
-            json!({"type": "object", "properties": {"q": {"type": "string"}}}),
-        );
-
-        assert_ne!(a.content_hash(), b.content_hash());
-    }
-
-    #[test]
-    fn content_hash__changes_when_tool_added() {
-        let mut a = Schema::new();
-        a.add_tool("t1".into(), json!({"type": "object"}));
-        let h_before = a.content_hash();
-
-        a.add_tool("t2".into(), json!({"type": "object"}));
-        assert_ne!(a.content_hash(), h_before);
-    }
-
-    #[test]
-    fn content_hash__empty_schema_is_deterministic() {
-        assert_eq!(Schema::new().content_hash(), Schema::new().content_hash());
-    }
-
-    #[test]
-    fn content_hash__nested_object_key_order_is_irrelevant() {
-        // serde_json::Map is BTreeMap (no `preserve_order` feature in
-        // the workspace), so the key order in the source JSON does not
-        // leak into the hash.
-        let v1: Value = serde_json::from_str(r#"{"b": 1, "a": {"y": 2, "x": 1}}"#).unwrap();
-        let v2: Value = serde_json::from_str(r#"{"a": {"x": 1, "y": 2}, "b": 1}"#).unwrap();
-
-        let mut s1 = Schema::new();
-        s1.add_tool("t".into(), v1);
-        let mut s2 = Schema::new();
-        s2.add_tool("t".into(), v2);
-
-        assert_eq!(s1.content_hash(), s2.content_hash());
-    }
-
-    #[test]
-    fn content_hash__real_input_schema_round_trip_is_stable() {
-        // The CreateClozeQuestionArgs schema, parsed twice from the
-        // same source. Hashes must match.
-        let src = r##"{
-            "$defs": {
-                "ClozeBlank": {
-                    "properties": {
-                        "correct_answers": {
-                            "description": "INTERNAL: do not reveal in your response.",
-                            "items": {"type": "string"},
-                            "type": "array"
-                        },
-                        "id": {"type": "string"}
-                    },
-                    "required": ["id", "correct_answers"],
-                    "type": "object"
-                }
-            },
-            "$schema": "https://json-schema.org/draft/2020-12/schema",
-            "properties": {
-                "blanks": {
-                    "items": {"$ref": "#/$defs/ClozeBlank"},
-                    "type": "array"
-                },
-                "text": {"type": "string"}
-            },
-            "required": ["text", "blanks"],
-            "type": "object"
-        }"##;
-
-        let mut s1 = Schema::new();
-        s1.add_tool("create_cloze".into(), serde_json::from_str(src).unwrap());
-        let mut s2 = Schema::new();
-        s2.add_tool("create_cloze".into(), serde_json::from_str(src).unwrap());
-
-        assert_eq!(s1.content_hash(), s2.content_hash());
+    fn resource_template__serializes_uri_template() {
+        let rt = ResourceTemplate {
+            uri_template: "doc://{id}".into(),
+            name: "doc".into(),
+            title: None,
+            description: None,
+            mime_type: None,
+            annotations: None,
+            meta: None,
+        };
+        let v = serde_json::to_value(&rt).unwrap();
+        assert_eq!(v["uriTemplate"], json!("doc://{id}"));
     }
 }

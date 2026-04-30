@@ -3,7 +3,11 @@
 //! [`ProxyEvent`] is the single event enum; sinks match on the variant to
 //! decide what to do with each event.
 
-use crate::protocol::{Request, Response, session::SessionInfo};
+use crate::protocol::{
+    Request, Response,
+    schema::ChangeSchema,
+    session::SessionInfo,
+};
 
 /// All events flowing through the event bus.
 ///
@@ -14,4 +18,5 @@ pub enum ProxyEvent {
     Request(Box<Request>),
     Response(Box<Response>),
     Session(Box<SessionInfo>),
+    Schema(Box<ChangeSchema>),
 }

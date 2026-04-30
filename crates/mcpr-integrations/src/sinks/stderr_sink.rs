@@ -5,6 +5,7 @@
 use std::io::Write;
 
 use mcpr_core::event::{EventSink, ProxyEvent};
+use mcpr_core::protocol::schema::ChangeSchema;
 use mcpr_core::protocol::{Request, Response};
 use serde_json::json;
 
@@ -81,6 +82,32 @@ fn format_json(event: &ProxyEvent) -> String {
             "client_version": info.client_info.as_ref().and_then(|c| c.version.clone()),
             "request_count": info.request_count,
         }),
+        ProxyEvent::Schema(change) => match change.as_ref() {
+            ChangeSchema::Tool(reason, tool) => json!({
+                "type": "schema",
+                "kind": "tool",
+                "reason": format!("{reason:?}"),
+                "tool": tool,
+            }),
+            ChangeSchema::Prompt(reason, prompt) => json!({
+                "type": "schema",
+                "kind": "prompt",
+                "reason": format!("{reason:?}"),
+                "prompt": prompt,
+            }),
+            ChangeSchema::Resource(reason, resource) => json!({
+                "type": "schema",
+                "kind": "resource",
+                "reason": format!("{reason:?}"),
+                "resource": resource,
+            }),
+            ChangeSchema::ResourceTemplate(reason, rt) => json!({
+                "type": "schema",
+                "kind": "resource_template",
+                "reason": format!("{reason:?}"),
+                "resource_template": rt,
+            }),
+        },
     };
     serde_json::to_string(&value).unwrap_or_default()
 }
