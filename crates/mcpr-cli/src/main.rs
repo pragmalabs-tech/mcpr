@@ -10,16 +10,11 @@
 //!   WebSocket connections and assigns subdomains. One per machine.
 //!
 //! All state (lockfiles, config snapshots, sqlite store) lives under `~/.mcpr/`.
-//!
-//! NOTE: the gateway runtime is mid-rewrite onto `mcpr_core::proxy2`. Until
-//! that wiring lands, `mcpr proxy run` calls `todo!()`. The legacy `proxy`
-//! module is parked in tree as reference and not used by the CLI.
 
 mod cmd;
 mod config;
 mod logic;
 
-#[allow(dead_code)]
 mod proxy_lock;
 mod relay_lock;
 mod render;

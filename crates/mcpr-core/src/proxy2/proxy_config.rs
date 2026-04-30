@@ -210,39 +210,6 @@ impl FileProxyConfig {
     }
 }
 
-impl ProxyConfig {
-    /// Names of fields that differ between `self` and `other` and require a
-    /// full restart rather than a hot reload.
-    ///
-    /// `csp` is intentionally omitted — it is the only field a live reload may
-    /// swap. `name` is omitted too: a proxy's identity is fixed at boot.
-    pub fn reload_unsafe_changes(&self, other: &ProxyConfig) -> Vec<&'static str> {
-        let mut changed = Vec::new();
-        if self.mcp != other.mcp {
-            changed.push("mcp");
-        }
-        if self.port != other.port {
-            changed.push("port");
-        }
-        if self.max_request_body_size != other.max_request_body_size {
-            changed.push("max_request_body_size");
-        }
-        if self.max_response_body_size != other.max_response_body_size {
-            changed.push("max_response_body_size");
-        }
-        if self.max_concurrent_upstream != other.max_concurrent_upstream {
-            changed.push("max_concurrent_upstream");
-        }
-        if self.connect_timeout != other.connect_timeout {
-            changed.push("connect_timeout");
-        }
-        if self.request_timeout != other.request_timeout {
-            changed.push("request_timeout");
-        }
-        changed
-    }
-}
-
 // ── Identity resolution ────────────────────────────────────────────────
 
 /// Resolve proxy name: explicit > filename stem (with `mcpr.toml` → `default`)
@@ -275,75 +242,6 @@ fn resolve_proxy_name(explicit_name: Option<&str>, config_path: Option<&Path>) -
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-
-    fn proxy_config() -> ProxyConfig {
-        ProxyConfig {
-            name: "test".into(),
-            mcp: "http://localhost:9000".into(),
-            port: Some(3000),
-            csp: CspConfig::default(),
-            max_request_body_size: None,
-            max_response_body_size: None,
-            max_concurrent_upstream: None,
-            connect_timeout: None,
-            request_timeout: None,
-        }
-    }
-
-    // ── reload_unsafe_changes ──────────────────────────────────────────
-
-    #[test]
-    fn reload_unsafe_changes__identical_is_empty() {
-        let a = proxy_config();
-        let b = proxy_config();
-        assert!(a.reload_unsafe_changes(&b).is_empty());
-    }
-
-    #[test]
-    fn reload_unsafe_changes__csp_difference_is_safe() {
-        let a = proxy_config();
-        let mut b = proxy_config();
-        b.csp.widgets.push(WidgetScoped {
-            match_pattern: "ui://widget/test".into(),
-            ..Default::default()
-        });
-        assert!(a.reload_unsafe_changes(&b).is_empty());
-    }
-
-    #[test]
-    fn reload_unsafe_changes__name_difference_is_safe() {
-        let a = proxy_config();
-        let mut b = proxy_config();
-        b.name = "renamed".into();
-        assert!(a.reload_unsafe_changes(&b).is_empty());
-    }
-
-    #[test]
-    fn reload_unsafe_changes__mcp_flagged() {
-        let a = proxy_config();
-        let mut b = proxy_config();
-        b.mcp = "http://localhost:9999".into();
-        assert_eq!(a.reload_unsafe_changes(&b), vec!["mcp"]);
-    }
-
-    #[test]
-    fn reload_unsafe_changes__port_flagged() {
-        let a = proxy_config();
-        let mut b = proxy_config();
-        b.port = Some(4000);
-        assert_eq!(a.reload_unsafe_changes(&b), vec!["port"]);
-    }
-
-    #[test]
-    fn reload_unsafe_changes__multiple_fields_listed() {
-        let a = proxy_config();
-        let mut b = proxy_config();
-        b.mcp = "http://other:9000".into();
-        b.port = Some(4000);
-        let changed = a.reload_unsafe_changes(&b);
-        assert!(changed.contains(&"mcp"));
-        assert!(changed.contains(&"port"));
-    }
 
     // ── File deserialization ──────────────────────────────────────────
 
