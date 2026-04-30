@@ -21,6 +21,7 @@ pub mod http_request;
 pub mod mcp;
 pub mod schema;
 pub mod session;
+pub mod sse;
 
 use axum::body::Bytes;
 use axum::http::header::CONTENT_TYPE;
@@ -115,12 +116,32 @@ impl Response {
                 JsonShape::Other => {}
             }
         }
-        // TODO: parse `text/event-stream` responses here. The MCP TS SDK
-        // defaults to SSE (`enableJsonResponse: false`), so most upstreams
-        // wrap even single replies in `event: message\ndata: {...}\n\n`.
-        // Until that lands, those responses fall through to `Http` and the
-        // router stage rejects them as non-JSON-RPC. Servers can opt out via
-        // `enableJsonResponse: true` (see examples/weather-app/server.ts).
+        // SSE upstream: decode each `event: message` frame as a JSON-RPC
+        // result. Non-result frames (e.g. intermediate notifications) don't
+        // parse and are dropped here.
+        //
+        // TODO: true streaming passthrough — forward upstream frames to the
+        // client as they arrive (no `body.collect().await`), preserve
+        // server-initiated notifications (`notifications/progress`, etc.),
+        // and byte-for-byte match upstream. Requires a `Response::Stream`
+        // variant and a streaming `to_axum_response`. Deferred: the buffered
+        // path is fine for the common request/response shape; only matters
+        // for long-running tool calls that emit live notifications.
+        if is_event_stream(parts.headers.get(CONTENT_TYPE)) {
+            let frames = sse::decode_frames(&bytes);
+            let results: Vec<mcp::JsonRpcResult> = frames
+                .iter()
+                .filter_map(|f| serde_json::from_slice::<mcp::JsonRpcResult>(f).ok())
+                .collect();
+            match results.len() {
+                0 => {}
+                1 => {
+                    let mut results = results;
+                    return Ok(Self::Mcp(parts, results.pop().unwrap()));
+                }
+                _ => return Ok(Self::McpBatch(parts, results)),
+            }
+        }
         Ok(Self::Http(axum::http::Response::from_parts(parts, bytes)))
     }
 }
@@ -129,6 +150,12 @@ fn is_json(header: Option<&axum::http::HeaderValue>) -> bool {
     header
         .and_then(|v| v.to_str().ok())
         .is_some_and(|s| s.starts_with("application/json"))
+}
+
+pub(crate) fn is_event_stream(header: Option<&axum::http::HeaderValue>) -> bool {
+    header
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.starts_with("text/event-stream"))
 }
 
 enum JsonShape {
@@ -390,8 +417,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn response_from_hyper__sse_content_type_falls_back_to_http() {
-        let resp = hyper_resp(200, "text/event-stream", "data: hi\n\n");
+    async fn response_from_hyper__sse_with_single_message_frame_returns_mcp() {
+        let body = format!("event: message\ndata: {RPC_RESULT}\n\n");
+        let resp = hyper_resp(200, "text/event-stream", &body);
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        assert!(matches!(
+            parsed,
+            Response::Mcp(_, mcp::JsonRpcResult::Response(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn response_from_hyper__sse_with_multiple_message_frames_returns_mcp_batch() {
+        let body = format!("data: {RPC_RESULT}\n\ndata: {RPC_RESULT}\n\n");
+        let resp = hyper_resp(200, "text/event-stream", &body);
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        let Response::McpBatch(_, items) = parsed else {
+            panic!("expected McpBatch");
+        };
+        assert_eq!(items.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn response_from_hyper__sse_drops_non_message_frames_keeps_response() {
+        let body = format!(
+            "event: notifications/progress\ndata: {{\"x\":1}}\n\nevent: message\ndata: {RPC_RESULT}\n\n"
+        );
+        let resp = hyper_resp(200, "text/event-stream", &body);
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        assert!(matches!(
+            parsed,
+            Response::Mcp(_, mcp::JsonRpcResult::Response(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn response_from_hyper__sse_preserves_upstream_headers() {
+        let body = format!("data: {RPC_RESULT}\n\n");
+        let resp = hyper::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .header("mcp-session-id", "sess-xyz")
+            .header("set-cookie", "k=v; Path=/")
+            .body(http_body_util::Full::new(
+                axum::body::Bytes::copy_from_slice(body.as_bytes()),
+            ))
+            .unwrap();
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        let Response::Mcp(parts, _) = parsed else {
+            panic!("expected Mcp");
+        };
+        assert_eq!(parts.headers["mcp-session-id"], "sess-xyz");
+        assert_eq!(parts.headers["set-cookie"], "k=v; Path=/");
+    }
+
+    #[tokio::test]
+    async fn response_from_hyper__sse_empty_body_falls_back_to_http() {
+        let resp = hyper_resp(200, "text/event-stream", "");
+        let parsed = Response::from_hyper(resp).await.unwrap();
+        assert!(matches!(parsed, Response::Http(_)));
+    }
+
+    #[tokio::test]
+    async fn response_from_hyper__sse_only_unparseable_frames_falls_back_to_http() {
+        let resp = hyper_resp(200, "text/event-stream", "data: not-json\n\n");
         let parsed = Response::from_hyper(resp).await.unwrap();
         assert!(matches!(parsed, Response::Http(_)));
     }

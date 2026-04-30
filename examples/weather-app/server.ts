@@ -173,7 +173,7 @@ app.post("/mcp", async (req, res) => {
       // New session
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
-        enableJsonResponse: true,
+        enableJsonResponse: false,
         onsessioninitialized: (id) => {
           transports[id] = transport;
         },

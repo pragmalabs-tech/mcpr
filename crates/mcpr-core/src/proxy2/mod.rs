@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::{
     event::EventBus,
-    protocol::{Request, Response},
+    protocol::{Request, Response, is_event_stream, mcp::JsonRpcResult, sse},
     proxy2::stage::session_stage::SessionStage,
 };
 use crate::{
@@ -88,8 +88,8 @@ async fn handle_request(
 
 fn to_axum_response(resp: Response) -> AxumResponse {
     match resp {
-        Response::Mcp(parts, result) => mcp_axum_response(parts, axum::Json(result)),
-        Response::McpBatch(parts, results) => mcp_axum_response(parts, axum::Json(results)),
+        Response::Mcp(parts, result) => encode_mcp(parts, vec![result]),
+        Response::McpBatch(parts, results) => encode_mcp(parts, results),
         Response::Http(http) => {
             let (parts, bytes) = http.into_parts();
             AxumResponse::from_parts(parts, axum::body::Body::from(bytes))
@@ -97,25 +97,170 @@ fn to_axum_response(resp: Response) -> AxumResponse {
     }
 }
 
-/// Build an axum response that re-uses the upstream `parts` (status + headers)
-/// but replaces the body with our re-serialized JSON. We strip headers the
-/// HTTP layer recalculates (`content-length`) and force `content-type` so the
-/// body byte count and media type match what we actually wrote.
-fn mcp_axum_response<B: IntoResponse>(
-    mut parts: axum::http::response::Parts,
-    body: B,
-) -> AxumResponse {
+/// Re-emit MCP results to the client in the wire format upstream chose: SSE
+/// frames if upstream returned `text/event-stream`, JSON otherwise. JSON
+/// uses a single object for one result and an array for batches, matching
+/// the wire shape of `Response::Mcp` vs `Response::McpBatch`.
+fn encode_mcp(mut parts: axum::http::response::Parts, results: Vec<JsonRpcResult>) -> AxumResponse {
+    let upstream_was_sse = is_event_stream(parts.headers.get(axum::http::header::CONTENT_TYPE));
+
     parts.headers.remove(axum::http::header::CONTENT_LENGTH);
     parts.headers.remove(axum::http::header::TRANSFER_ENCODING);
-    parts.headers.insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("application/json"),
-    );
-    let mut resp = body.into_response();
+
+    let (content_type, body) = if upstream_was_sse {
+        (
+            axum::http::HeaderValue::from_static("text/event-stream"),
+            axum::body::Body::from(sse::encode_results(&results)),
+        )
+    } else if results.len() == 1 {
+        (
+            axum::http::HeaderValue::from_static("application/json"),
+            axum::body::Body::from(
+                serde_json::to_vec(&results[0]).expect("JsonRpcResult serializes"),
+            ),
+        )
+    } else {
+        (
+            axum::http::HeaderValue::from_static("application/json"),
+            axum::body::Body::from(serde_json::to_vec(&results).expect("JsonRpcResult serializes")),
+        )
+    };
+    parts
+        .headers
+        .insert(axum::http::header::CONTENT_TYPE, content_type);
+
+    let mut resp = AxumResponse::new(body);
     *resp.status_mut() = parts.status;
     let resp_headers = resp.headers_mut();
     for (name, value) in parts.headers.iter() {
         resp_headers.insert(name, value.clone());
     }
     resp
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+
+    use crate::protocol::mcp::{JsonRpcResponse, JsonRpcVersion, RequestId};
+    use axum::http::HeaderValue;
+
+    fn rpc_result(id: i64) -> JsonRpcResult {
+        JsonRpcResult::Response(JsonRpcResponse {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(id),
+            result: Some(serde_json::json!({"ok": true})),
+        })
+    }
+
+    fn parts_with(content_type: &str) -> axum::http::response::Parts {
+        let mut parts = axum::http::Response::new(()).into_parts().0;
+        parts
+            .headers
+            .insert("content-type", HeaderValue::from_str(content_type).unwrap());
+        parts
+    }
+
+    async fn body_string(resp: AxumResponse) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__json_upstream_returns_application_json() {
+        let resp = to_axum_response(Response::Mcp(parts_with("application/json"), rpc_result(1)));
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__json_upstream_batch_emits_array() {
+        let resp = to_axum_response(Response::McpBatch(
+            parts_with("application/json"),
+            vec![rpc_result(1), rpc_result(2)],
+        ));
+        assert_eq!(resp.headers()["content-type"], "application/json");
+        let body = body_string(resp).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v.is_array());
+        assert_eq!(v.as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__sse_upstream_returns_event_stream() {
+        let resp = to_axum_response(Response::Mcp(
+            parts_with("text/event-stream"),
+            rpc_result(1),
+        ));
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+        let body = body_string(resp).await;
+        assert!(body.starts_with("event: message\ndata: "));
+        assert!(body.ends_with("\n\n"));
+        assert_eq!(body.matches("\n\n").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__sse_upstream_batch_emits_one_frame_per_result() {
+        let resp = to_axum_response(Response::McpBatch(
+            parts_with("text/event-stream"),
+            vec![rpc_result(1), rpc_result(2), rpc_result(3)],
+        ));
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+        let body = body_string(resp).await;
+        assert_eq!(body.matches("event: message\n").count(), 3);
+        assert_eq!(body.matches("\n\n").count(), 3);
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__sse_upstream_roundtrips_through_decoder() {
+        let original = vec![rpc_result(1), rpc_result(2)];
+        let resp = to_axum_response(Response::McpBatch(
+            parts_with("text/event-stream"),
+            original.clone(),
+        ));
+        let body = body_string(resp).await;
+        let frames = sse::decode_frames(body.as_bytes());
+        assert_eq!(frames.len(), original.len());
+        for (frame, expected) in frames.iter().zip(&original) {
+            let parsed: JsonRpcResult = serde_json::from_slice(frame).unwrap();
+            assert_eq!(
+                serde_json::to_value(&parsed).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__strips_content_length_and_transfer_encoding() {
+        let mut parts = parts_with("application/json");
+        parts
+            .headers
+            .insert("content-length", HeaderValue::from_static("999"));
+        parts
+            .headers
+            .insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        let resp = to_axum_response(Response::Mcp(parts, rpc_result(1)));
+        assert!(!resp.headers().contains_key("transfer-encoding"));
+        let cl = resp
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok());
+        assert_ne!(cl, Some(999));
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__preserves_mcp_session_id() {
+        let mut parts = parts_with("application/json");
+        parts
+            .headers
+            .insert("mcp-session-id", HeaderValue::from_static("sess-xyz"));
+        let resp = to_axum_response(Response::Mcp(parts, rpc_result(1)));
+        assert_eq!(resp.headers()["mcp-session-id"], "sess-xyz");
+    }
 }
