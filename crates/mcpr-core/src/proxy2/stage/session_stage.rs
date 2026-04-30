@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use axum::http::Method;
 use axum::http::request::Parts as RequestParts;
@@ -51,7 +53,7 @@ fn track_mcp_request(
 
     state
         .event_bus
-        .emit(ProxyEvent::Session(Box::new(new_change)));
+        .emit(ProxyEvent::Session(Arc::new(new_change)));
 
     Some(())
 }
@@ -66,7 +68,7 @@ fn end_http_session(http: &HttpRequest, state: &ProxyState) -> Option<()> {
     let session_id = session_id_from_headers(http.headers())?;
     let closed = state.sessions.end_session(&session_id)?;
 
-    state.event_bus.emit(ProxyEvent::Session(Box::new(closed)));
+    state.event_bus.emit(ProxyEvent::Session(Arc::new(closed)));
 
     Some(())
 }

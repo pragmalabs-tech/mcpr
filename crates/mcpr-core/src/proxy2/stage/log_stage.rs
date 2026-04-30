@@ -1,4 +1,6 @@
 /// Log Stage will focus to track request and response events;
+use std::sync::Arc;
+
 use async_trait::async_trait;
 
 use crate::{
@@ -17,7 +19,7 @@ impl RequestStage for RequestLogStage {
     async fn process(&self, request: Request, state: ProxyState) -> anyhow::Result<Request> {
         state
             .event_bus
-            .emit(ProxyEvent::Request(Box::new(request.clone())));
+            .emit(ProxyEvent::Request(Arc::new(request.clone())));
 
         Ok(request)
     }
@@ -30,7 +32,7 @@ impl ResponseStage for ResponseLogStage {
     async fn process(&self, res: Response, state: ProxyState) -> anyhow::Result<Response> {
         state
             .event_bus
-            .emit(ProxyEvent::Response(Box::new(res.clone())));
+            .emit(ProxyEvent::Response(Arc::new(res.clone())));
 
         Ok(res)
     }
