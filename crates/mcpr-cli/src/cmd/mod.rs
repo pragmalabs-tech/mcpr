@@ -18,7 +18,6 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
             unreachable!("`mcpr proxy setup` is handled in async dispatch");
         }
         ProxyCommand::Stop(args) => proxy::stop(args),
-        ProxyCommand::Reload(args) => proxy::reload(args),
         ProxyCommand::List(args) => proxy::list(args),
         ProxyCommand::Delete(args) => proxy::delete(args),
 

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
-pub use mcpr_core::proxy2::csp::Mode as CspMode;
-pub use mcpr_core::proxy2::csp::{CspConfig, DirectivePolicy, WidgetScoped};
+pub use mcpr_core::proxy2::csp::CspConfig;
+use mcpr_core::proxy2::proxy_config::{FileCspConfig, parse_mode};
 use mcpr_tunnel::RelayConfig;
 
 const CONFIG_FILE: &str = "mcpr.toml";
@@ -99,8 +99,6 @@ pub enum ProxyCommand {
     Run(ProxyRunArgs),
     /// Stop a running proxy (or all proxies with --all)
     Stop(ProxyStopArgs),
-    /// Hot-reload a running proxy's config without dropping sessions
-    Reload(ProxyReloadArgs),
     /// List all known proxies and their status
     List(ProxyListArgs),
     /// Delete a stopped proxy — removes its on-disk state (must be stopped first)
@@ -145,18 +143,6 @@ pub struct ProxyStopArgs {
     /// Stop all running proxies
     #[arg(long)]
     pub all: bool,
-}
-
-/// Arguments for `mcpr proxy reload <name> --config <path>`.
-#[derive(Parser, Clone)]
-pub struct ProxyReloadArgs {
-    /// Proxy name to reload
-    pub name: String,
-
-    /// Config file path — the snapshot is refreshed from this file
-    /// before the SIGHUP is sent
-    #[arg(long, short, required = true)]
-    pub config: String,
 }
 
 /// Arguments for `mcpr proxy list`.
@@ -442,142 +428,6 @@ pub struct RuntimeOptions {
 }
 
 // ── TOML config file ────────────────────────────────────────────────────
-
-/// `[csp]` table in config file.
-///
-/// The canonical shape is one sub-table per directive plus an optional
-/// `[[csp.widget]]` array:
-///
-/// ```toml
-/// [csp.connectDomains]
-/// domains = ["api.example.com"]
-/// mode    = "extend"
-///
-/// [csp.resourceDomains]
-/// domains = ["cdn.example.com"]
-/// mode    = "extend"
-///
-/// [csp.frameDomains]
-/// domains = []
-/// mode    = "replace"
-///
-/// [[csp.widget]]
-/// match              = "ui://widget/payment*"
-/// connectDomains     = ["api.stripe.com"]
-/// connectDomainsMode = "extend"
-/// ```
-///
-/// The legacy flat shape (`csp.mode` + `csp.domains`) is still accepted for
-/// one release and folded into `connectDomains` and `resourceDomains`. A
-/// validation warning nudges operators to migrate.
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct FileCspConfig {
-    // -- Legacy flat shape (deprecated) --
-    mode: Option<String>,
-    domains: Vec<String>,
-
-    // -- Canonical per-directive shape --
-    #[serde(rename = "connectDomains")]
-    connect_domains: Option<FileDirectivePolicy>,
-    #[serde(rename = "resourceDomains")]
-    resource_domains: Option<FileDirectivePolicy>,
-    #[serde(rename = "frameDomains")]
-    frame_domains: Option<FileDirectivePolicy>,
-
-    /// Bare public host (no scheme) for this proxy. When set, feeds the
-    /// `openai/widgetDomain` meta field and the proxy-URL injection.
-    /// `_meta.ui.domain` is left untouched — Claude derives that field
-    /// itself and rejects any value supplied by an MCP layer. When unset,
-    /// the runtime falls back to the tunnel URL or suppresses injection in
-    /// local-only mode rather than leaking `localhost` into widget config.
-    domain: Option<String>,
-
-    #[serde(rename = "widget")]
-    widgets: Vec<WidgetScoped>,
-}
-
-/// Per-directive policy as it appears in the config file.
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct FileDirectivePolicy {
-    domains: Vec<String>,
-    mode: Option<String>,
-}
-
-/// Parse a string into the core `Mode` enum. Unknown values return `None`
-/// so validation can surface the error.
-fn parse_mode(s: &str) -> Option<CspMode> {
-    match s.to_lowercase().as_str() {
-        "extend" => Some(CspMode::Extend),
-        "replace" | "override" => Some(CspMode::Replace),
-        _ => None,
-    }
-}
-
-impl FileDirectivePolicy {
-    fn into_policy(self, default_mode: CspMode) -> DirectivePolicy {
-        let mode = self
-            .mode
-            .as_deref()
-            .and_then(parse_mode)
-            .unwrap_or(default_mode);
-        DirectivePolicy {
-            domains: self.domains,
-            mode,
-        }
-    }
-}
-
-impl FileCspConfig {
-    /// Lower the file representation into a runtime [`CspConfig`].
-    ///
-    /// Precedence rules:
-    /// - If `connectDomains` / `resourceDomains` / `frameDomains` are present,
-    ///   they fully define those directives.
-    /// - Otherwise the legacy `mode` + `domains` pair fills both
-    ///   `connectDomains` and `resourceDomains` with the same values, matching
-    ///   what the previous implementation did when injecting extras.
-    /// - `frameDomains` defaults to `replace` with an empty domain list.
-    fn into_runtime(self) -> CspConfig {
-        let legacy_mode = self
-            .mode
-            .as_deref()
-            .and_then(parse_mode)
-            .unwrap_or(CspMode::Extend);
-        let legacy_domains = self.domains;
-
-        let connect = match self.connect_domains {
-            Some(p) => p.into_policy(CspMode::Extend),
-            None => DirectivePolicy {
-                domains: legacy_domains.clone(),
-                mode: legacy_mode,
-            },
-        };
-        let resource = match self.resource_domains {
-            Some(p) => p.into_policy(CspMode::Extend),
-            None => DirectivePolicy {
-                domains: legacy_domains,
-                mode: legacy_mode,
-            },
-        };
-        let frame = match self.frame_domains {
-            Some(p) => p.into_policy(CspMode::Replace),
-            None => DirectivePolicy::strict(),
-        };
-
-        CspConfig {
-            connect_domains: connect,
-            resource_domains: resource,
-            frame_domains: frame,
-            widgets: self.widgets,
-            domain: self
-                .domain
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty()),
-        }
-    }
-}
 
 /// Entry in `[[relay.tokens]]` array
 #[derive(serde::Deserialize)]
@@ -1074,6 +924,7 @@ fn load_gateway(
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+    use mcpr_core::proxy2::csp::Mode as CspMode;
 
     #[test]
     fn file_config__max_request_body_size() {

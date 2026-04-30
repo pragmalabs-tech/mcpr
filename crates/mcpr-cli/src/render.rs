@@ -140,10 +140,6 @@ pub fn validate_issues(issues: &[(&str, String)]) {
 
 // ── Proxy lifecycle ───────────────────────────────────────────────────
 
-pub fn proxy_reload_applied(name: &str) {
-    eprintln!("Reloaded proxy \"{}\".", name);
-}
-
 pub fn proxy_stopping(name: &str, pid: u32) {
     eprintln!("Stopping proxy \"{}\" (pid {})...", name, pid);
 }
