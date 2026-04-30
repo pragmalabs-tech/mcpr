@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use axum::http::Method;
 use axum::http::request::Parts as RequestParts;
@@ -7,14 +9,22 @@ use crate::{
     protocol::{
         Request, http_request::HttpRequest, mcp::JsonRpcRequest, session::session_id_from_headers,
     },
-    proxy2::{stage::types::RequestStage, state::ProxyState},
+    proxy2::{
+        stage::types::{RequestContext, RequestStage},
+        state::ProxyState,
+    },
 };
 
 pub struct SessionStage;
 
 #[async_trait]
 impl RequestStage for SessionStage {
-    async fn process(&self, request: Request, state: ProxyState) -> anyhow::Result<Request> {
+    async fn process(
+        &self,
+        request: Request,
+        _request_ctx: RequestContext,
+        state: ProxyState,
+    ) -> anyhow::Result<Request> {
         match &request {
             Request::Mcp(parts, rpc) => {
                 track_mcp_request(parts, rpc, &state);
@@ -51,7 +61,7 @@ fn track_mcp_request(
 
     state
         .event_bus
-        .emit(ProxyEvent::Session(Box::new(new_change)));
+        .emit(ProxyEvent::Session(Arc::new(new_change)));
 
     Some(())
 }
@@ -66,7 +76,7 @@ fn end_http_session(http: &HttpRequest, state: &ProxyState) -> Option<()> {
     let session_id = session_id_from_headers(http.headers())?;
     let closed = state.sessions.end_session(&session_id)?;
 
-    state.event_bus.emit(ProxyEvent::Session(Box::new(closed)));
+    state.event_bus.emit(ProxyEvent::Session(Arc::new(closed)));
 
     Some(())
 }

@@ -82,7 +82,7 @@ mod tests {
             .unwrap()
             .into_parts()
             .0;
-        ProxyEvent::Request(Box::new(Request::Mcp(
+        ProxyEvent::Request(Arc::new(Request::Mcp(
             parts,
             JsonRpcRequest {
                 jsonrpc: JsonRpcVersion,

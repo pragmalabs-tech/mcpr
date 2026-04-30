@@ -5,6 +5,7 @@
 use std::io::Write;
 
 use mcpr_core::event::{EventSink, ProxyEvent};
+use mcpr_core::protocol::schema::ChangeSchema;
 use mcpr_core::protocol::{Request, Response};
 use serde_json::json;
 
@@ -81,6 +82,32 @@ fn format_json(event: &ProxyEvent) -> String {
             "client_version": info.client_info.as_ref().and_then(|c| c.version.clone()),
             "request_count": info.request_count,
         }),
+        ProxyEvent::Schema(change) => match change.as_ref() {
+            ChangeSchema::Tool(reason, tool) => json!({
+                "type": "schema",
+                "kind": "tool",
+                "reason": format!("{reason:?}"),
+                "tool": tool,
+            }),
+            ChangeSchema::Prompt(reason, prompt) => json!({
+                "type": "schema",
+                "kind": "prompt",
+                "reason": format!("{reason:?}"),
+                "prompt": prompt,
+            }),
+            ChangeSchema::Resource(reason, resource) => json!({
+                "type": "schema",
+                "kind": "resource",
+                "reason": format!("{reason:?}"),
+                "resource": resource,
+            }),
+            ChangeSchema::ResourceTemplate(reason, rt) => json!({
+                "type": "schema",
+                "kind": "resource_template",
+                "reason": format!("{reason:?}"),
+                "resource_template": rt,
+            }),
+        },
     };
     serde_json::to_string(&value).unwrap_or_default()
 }
@@ -89,6 +116,8 @@ fn format_json(event: &ProxyEvent) -> String {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
+
+    use std::sync::Arc;
 
     use bytes::Bytes;
     use http::{Request as HttpReq, Response as HttpResp, StatusCode};
@@ -116,7 +145,7 @@ mod tests {
     }
 
     fn mcp_request(method: ClientMethod, params: Option<Map<String, Value>>) -> ProxyEvent {
-        ProxyEvent::Request(Box::new(Request::Mcp(
+        ProxyEvent::Request(Arc::new(Request::Mcp(
             empty_request_parts(),
             JsonRpcRequest {
                 jsonrpc: JsonRpcVersion,
@@ -128,7 +157,7 @@ mod tests {
     }
 
     fn mcp_response_ok() -> ProxyEvent {
-        ProxyEvent::Response(Box::new(Response::Mcp(
+        ProxyEvent::Response(Arc::new(Response::Mcp(
             empty_response_parts(),
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -139,7 +168,7 @@ mod tests {
     }
 
     fn mcp_response_error(code: i32, message: &str) -> ProxyEvent {
-        ProxyEvent::Response(Box::new(Response::Mcp(
+        ProxyEvent::Response(Arc::new(Response::Mcp(
             empty_response_parts(),
             JsonRpcResult::Error(JsonRpcError {
                 code,
@@ -155,7 +184,7 @@ mod tests {
             .uri(path)
             .body(Bytes::copy_from_slice(body))
             .unwrap();
-        ProxyEvent::Request(Box::new(Request::Http(req)))
+        ProxyEvent::Request(Arc::new(Request::Http(req)))
     }
 
     fn http_response(status: u16, body: &[u8]) -> ProxyEvent {
@@ -163,12 +192,12 @@ mod tests {
             .status(StatusCode::from_u16(status).unwrap())
             .body(Bytes::copy_from_slice(body))
             .unwrap();
-        ProxyEvent::Response(Box::new(Response::Http(resp)))
+        ProxyEvent::Response(Arc::new(Response::Http(resp)))
     }
 
     fn session(id: &str, client: Option<ClientInfo>) -> ProxyEvent {
         let info = SessionInfo::new(id.into(), client, RequestId::Number(1));
-        ProxyEvent::Session(Box::new(info))
+        ProxyEvent::Session(Arc::new(info))
     }
 
     fn render(event: &ProxyEvent) -> Value {
@@ -214,7 +243,7 @@ mod tests {
                 params: None,
             },
         ];
-        let v = render(&ProxyEvent::Request(Box::new(Request::McpBatch(
+        let v = render(&ProxyEvent::Request(Arc::new(Request::McpBatch(
             empty_request_parts(),
             rpcs,
         ))));
