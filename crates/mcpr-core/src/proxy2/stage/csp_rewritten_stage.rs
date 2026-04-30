@@ -1,17 +1,27 @@
 //! Response stage that rewrites widget CSP directives in MCP results.
 //!
-//! Mirrors [`crate::csp::effective_domains`] over the response shape:
-//! `tools/list` (`result.tools[]._meta`), `tools/call` (`result._meta`),
-//! `resources/list` (`result.resources[]._meta`), `resources/templates/list`,
-//! and `resources/read` (`result.contents[]._meta`) all flow through the
-//! same widget-meta rewrite. Method context isn't plumbed into the response
-//! stage, so the dispatch is shape-driven instead — the result keys are
-//! mutually exclusive across these methods.
+//! Dispatch is method-driven via [`RequestContext::client_methods`] —
+//! the originating MCP method, looked up by response id, decides which
+//! rewrite walk applies. Same idiom as
+//! [`super::schema_tracking_stage`].
 //!
-//! Both CSP shapes are emitted from a single declared config: ChatGPT reads
-//! `openai/widgetCSP` (snake_case) and Claude/VS Code read `ui.csp`
-//! (camelCase). Unknown keys are ignored, so emitting both means one
-//! declaration works on every host.
+//! | Originating method            | Rewrites                              |
+//! |-------------------------------|---------------------------------------|
+//! | `tools/list`                  | `result.tools[]._meta`                |
+//! | `tools/call`                  | `result._meta`                        |
+//! | `resources/list`              | `result.resources[]._meta` (uri)      |
+//! | `resources/templates/list`    | `result.resourceTemplates[]._meta`    |
+//! | `resources/read`              | `result.contents[]._meta` (uri)       |
+//!
+//! After the targeted walk we run [`inject_proxy_into_all_csp`] as a
+//! safety net — it prepends the proxy URL to any CSP-shaped array the
+//! targeted walk missed. This runs for every method we recognise, so
+//! stray nested CSP arrays still get repaired.
+//!
+//! Both CSP shapes are emitted from a single declared config: ChatGPT
+//! reads `openai/widgetCSP` (snake_case) and Claude/VS Code read
+//! `ui.csp` (camelCase). Unknown keys are ignored, so emitting both
+//! means one declaration works on every host.
 
 use std::sync::Arc;
 
@@ -20,7 +30,10 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 
 use crate::{
-    protocol::{Response, mcp::JsonRpcResult},
+    protocol::{
+        Response,
+        mcp::{ClientMethod, JsonRpcResponse, JsonRpcResult, ResourcesMethod, ToolsMethod},
+    },
     proxy2::csp::{CspConfig, Directive, effective_domains, is_public_proxy_origin},
     proxy2::{
         proxy_config::ProxyConfig,
@@ -102,22 +115,18 @@ impl ResponseStage for CspRewritter {
     async fn process(
         &self,
         mut res: Response,
-        _request_ctx: RequestContext,
+        request_ctx: RequestContext,
         _state: ProxyState,
     ) -> anyhow::Result<Response> {
         let cfg = self.config.load();
         match &mut res {
             Response::Mcp(_, JsonRpcResult::Response(r)) => {
-                if let Some(result) = r.result.as_mut() {
-                    rewrite_result(result, &cfg);
-                }
+                rewrite_if_known(r, &request_ctx, &cfg);
             }
             Response::McpBatch(_, items) => {
                 for item in items {
-                    if let JsonRpcResult::Response(r) = item
-                        && let Some(result) = r.result.as_mut()
-                    {
-                        rewrite_result(result, &cfg);
+                    if let JsonRpcResult::Response(r) = item {
+                        rewrite_if_known(r, &request_ctx, &cfg);
                     }
                 }
             }
@@ -127,37 +136,84 @@ impl ResponseStage for CspRewritter {
     }
 }
 
-/// Dispatch on result shape and rewrite each widget meta site, then run a
-/// deep-scan safety net that prepends the proxy URL to any CSP-shaped array
-/// the targeted walks missed.
-fn rewrite_result(result: &mut Value, config: &CspRewriteConfig) {
-    if let Some(tools) = result.get_mut("tools").and_then(|t| t.as_array_mut()) {
-        for tool in tools {
-            if let Some(meta) = tool.get_mut("_meta") {
+/// Look up the originating method for this response's id and dispatch
+/// to the right rewrite walk. No-op if the id isn't in the context
+/// (e.g. an HTTP request) or if the method isn't one we rewrite.
+fn rewrite_if_known(
+    response: &mut JsonRpcResponse,
+    request_ctx: &RequestContext,
+    config: &CspRewriteConfig,
+) {
+    let Some(method) = request_ctx.get_method(&response.id) else {
+        return;
+    };
+    let Some(result) = response.result.as_mut() else {
+        return;
+    };
+
+    match method {
+        ClientMethod::Tools(ToolsMethod::List) => {
+            for_each_meta_in(result, "tools", |meta| {
+                rewrite_widget_meta(meta, None, config)
+            });
+        }
+        ClientMethod::Tools(ToolsMethod::Call) => {
+            // Only rewrite if upstream actually emitted `_meta` — synthesising
+            // it would pollute non-widget tool results.
+            if let Some(meta) = result.get_mut("_meta") {
                 rewrite_widget_meta(meta, None, config);
             }
         }
-    } else if let Some(resources) = result.get_mut("resources").and_then(|r| r.as_array_mut()) {
-        for resource in resources {
-            rewrite_uri_keyed_meta(resource, "uri", config);
+        ClientMethod::Resources(ResourcesMethod::List) => {
+            for_each_uri_keyed(result, "resources", "uri", config);
         }
-    } else if let Some(templates) = result
-        .get_mut("resourceTemplates")
-        .and_then(|t| t.as_array_mut())
-    {
-        for template in templates {
-            rewrite_uri_keyed_meta(template, "uriTemplate", config);
+        ClientMethod::Resources(ResourcesMethod::TemplatesList) => {
+            for_each_uri_keyed(result, "resourceTemplates", "uriTemplate", config);
         }
-    } else if let Some(contents) = result.get_mut("contents").and_then(|c| c.as_array_mut()) {
-        for content in contents {
-            rewrite_uri_keyed_meta(content, "uri", config);
+        ClientMethod::Resources(ResourcesMethod::Read) => {
+            for_each_uri_keyed(result, "contents", "uri", config);
         }
-    } else if let Some(meta) = result.get_mut("_meta") {
-        // tools/call shape: a single `_meta` lives at the top of `result`.
-        rewrite_widget_meta(meta, None, config);
+        _ => return,
     }
 
+    // Safety net: any nested CSP array the targeted walks missed gets
+    // the proxy URL prepended.
     let _ = inject_proxy_into_all_csp(result, config);
+}
+
+/// Walk `result[array_key][]._meta` (existing entries only) and apply
+/// `f` to each. Used for shapes where every entry is already an object
+/// with its own `_meta` site (e.g. `tools/list`).
+fn for_each_meta_in<F>(result: &mut Value, array_key: &str, mut f: F)
+where
+    F: FnMut(&mut Value),
+{
+    let Some(items) = result.get_mut(array_key).and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for item in items {
+        if let Some(meta) = item.get_mut("_meta") {
+            f(meta);
+        }
+    }
+}
+
+/// Walk `result[array_key][]` and rewrite each entry's `_meta`,
+/// synthesising one when only the URI is present. Used for
+/// `resources/list` (`uri`), `resources/templates/list`
+/// (`uriTemplate`), and `resources/read` (`uri`).
+fn for_each_uri_keyed(
+    result: &mut Value,
+    array_key: &str,
+    uri_key: &str,
+    config: &CspRewriteConfig,
+) {
+    let Some(items) = result.get_mut(array_key).and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for item in items {
+        rewrite_uri_keyed_meta(item, uri_key, config);
+    }
 }
 
 /// Synthesise `_meta` when the URI alone marks a container as a widget
@@ -444,9 +500,43 @@ mod tests {
         InnerProxyState::for_tests()
     }
 
-    /// CSP doesn't read the request — an empty context suffices.
-    fn ctx() -> RequestContext {
-        RequestContext::default()
+    /// `RequestContext` mapping id 1 to the given method.
+    fn ctx_for(method: ClientMethod) -> RequestContext {
+        let mut m = std::collections::HashMap::new();
+        m.insert(RequestId::Number(1), method);
+        RequestContext { client_methods: m }
+    }
+
+    fn tools_list_ctx() -> RequestContext {
+        ctx_for(ClientMethod::Tools(ToolsMethod::List))
+    }
+
+    fn tools_call_ctx() -> RequestContext {
+        ctx_for(ClientMethod::Tools(ToolsMethod::Call))
+    }
+
+    fn resources_list_ctx() -> RequestContext {
+        ctx_for(ClientMethod::Resources(ResourcesMethod::List))
+    }
+
+    fn resources_templates_list_ctx() -> RequestContext {
+        ctx_for(ClientMethod::Resources(ResourcesMethod::TemplatesList))
+    }
+
+    fn resources_read_ctx() -> RequestContext {
+        ctx_for(ClientMethod::Resources(ResourcesMethod::Read))
+    }
+
+    /// Context for a batch where every id maps to `tools/list`.
+    fn tools_list_batch_ctx(ids: &[i64]) -> RequestContext {
+        let mut m = std::collections::HashMap::new();
+        for id in ids {
+            m.insert(
+                RequestId::Number(*id),
+                ClientMethod::Tools(ToolsMethod::List),
+            );
+        }
+        RequestContext { client_methods: m }
     }
 
     fn empty_response_parts() -> ResponseParts {
@@ -543,7 +633,7 @@ mod tests {
             .body(Bytes::from_static(b"<html/>"))
             .unwrap();
         let out = stage
-            .process(Response::Http(http), ctx(), state())
+            .process(Response::Http(http), tools_list_ctx(), state())
             .await
             .unwrap();
         let Response::Http(resp) = out else {
@@ -563,7 +653,10 @@ mod tests {
                 data: None,
             }),
         );
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_ctx(), state())
+            .await
+            .unwrap();
         let Response::Mcp(_, JsonRpcResult::Error(e)) = out else {
             panic!("expected error");
         };
@@ -574,7 +667,7 @@ mod tests {
     async fn process__missing_result_is_left_none() {
         let stage = CspRewritter::new(config());
         let out = stage
-            .process(mcp_with_no_result(), ctx(), state())
+            .process(mcp_with_no_result(), tools_list_ctx(), state())
             .await
             .unwrap();
         let Response::Mcp(_, JsonRpcResult::Response(r)) = out else {
@@ -600,7 +693,10 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_ctx(), state())
+            .await
+            .unwrap();
         let meta = &extract_result(&out)["tools"][0]["_meta"];
         assert_eq!(
             meta["openai/widgetDomain"].as_str().unwrap(),
@@ -624,7 +720,10 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_ctx(), state())
+            .await
+            .unwrap();
         let meta = &extract_result(&out)["tools"][0]["_meta"];
         let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
@@ -646,7 +745,10 @@ mod tests {
             }
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_call_ctx(), state())
+            .await
+            .unwrap();
         let meta = &extract_result(&out)["_meta"];
         assert_eq!(
             meta["openai/widgetDomain"].as_str().unwrap(),
@@ -664,7 +766,10 @@ mod tests {
             "_meta": { "requestId": "abc-123" }
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_call_ctx(), state())
+            .await
+            .unwrap();
         let meta = &extract_result(&out)["_meta"];
         assert!(meta.get("openai/widgetCSP").is_none());
         assert!(meta.get("openai/widgetDomain").is_none());
@@ -688,7 +793,10 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
         let meta = &extract_result(&out)["resources"][0]["_meta"];
         let connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         assert_eq!(
@@ -720,7 +828,10 @@ mod tests {
             ]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
         let result = extract_result(&out);
         let pay = as_strs(&result["resources"][0]["_meta"]["openai/widgetCSP"]["connect_domains"]);
         let search =
@@ -736,7 +847,10 @@ mod tests {
             "resources": [{ "name": "malformed" }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
         assert!(extract_result(&out)["resources"][0].get("_meta").is_none());
     }
 
@@ -752,7 +866,10 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, resources_templates_list_ctx(), state())
+            .await
+            .unwrap();
         let resources = as_strs(
             &extract_result(&out)["resourceTemplates"][0]["_meta"]["openai/widgetCSP"]["resource_domains"],
         );
@@ -774,7 +891,10 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, resources_read_ctx(), state())
+            .await
+            .unwrap();
         let entry = &extract_result(&out)["contents"][0];
         assert_eq!(
             entry["text"].as_str().unwrap(),
@@ -803,7 +923,10 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_ctx(), state())
+            .await
+            .unwrap();
         let frames = as_strs(
             &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["frame_domains"],
         );
@@ -824,7 +947,10 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, resources_read_ctx(), state())
+            .await
+            .unwrap();
         let meta = &extract_result(&out)["contents"][0]["_meta"];
         let connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
         assert_eq!(connect, vec!["https://api.external.com"]);
@@ -850,7 +976,10 @@ mod tests {
         };
         let resp = Response::McpBatch(empty_response_parts(), vec![make(1), make(2)]);
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_batch_ctx(&[1, 2]), state())
+            .await
+            .unwrap();
         let Response::McpBatch(_, items) = out else {
             panic!("expected McpBatch");
         };
@@ -883,7 +1012,10 @@ mod tests {
         });
         let resp = Response::McpBatch(empty_response_parts(), vec![ok, err]);
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_batch_ctx(&[1, 2]), state())
+            .await
+            .unwrap();
         let Response::McpBatch(_, items) = out else {
             panic!();
         };
@@ -909,7 +1041,10 @@ mod tests {
                 "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
             }]
         }));
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_ctx(), state())
+            .await
+            .unwrap();
         let connect = as_strs(
             &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
         );
@@ -934,7 +1069,10 @@ mod tests {
                 "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
             }]
         }));
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_ctx(), state())
+            .await
+            .unwrap();
         let connect = as_strs(
             &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
         );
@@ -952,7 +1090,10 @@ mod tests {
             }
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_ctx(), state())
+            .await
+            .unwrap();
         let domains = as_strs(&extract_result(&out)["deeply"]["nested"]["connect_domains"]);
         assert_eq!(
             domains,
@@ -972,7 +1113,10 @@ mod tests {
             }]
         }));
 
-        let out = stage.process(resp, ctx(), state()).await.unwrap();
+        let out = stage
+            .process(resp, tools_list_ctx(), state())
+            .await
+            .unwrap();
         let frames = as_strs(&extract_result(&out)["tools"][0]["_meta"]["deeply"]["frame_domains"]);
         assert_eq!(frames, vec!["https://embed.partner.com"]);
     }
