@@ -6,10 +6,10 @@
 //! `Arc<ChangeSchema>` flow through to the writer by refcount only.
 //!
 //! Only two pieces of context get added at the sink:
-//! - `ts`    — sink-stamped unix milliseconds, since the protocol types
-//!             don't carry one of their own.
+//! - `ts` — sink-stamped unix milliseconds, since the protocol types
+//!   don't carry one of their own.
 //! - `proxy` — sink-injected proxy name, since events are per-proxy and
-//!             the protocol types don't know which proxy emitted them.
+//!   the protocol types don't know which proxy emitted them.
 //!
 //! All extraction (status, kind tag, item key, payload JSON, hash, …)
 //! happens in the writer at SQL bind time, where the prepared statements
