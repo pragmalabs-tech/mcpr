@@ -35,7 +35,7 @@ impl QueryEngine {
             SELECT
                 session_id, client_name, client_version, client_platform,
                 started_at, last_seen_at, ended_at, total_calls, total_errors
-            FROM sessions
+            FROM sessions_view
             WHERE session_id LIKE ?1 || '%'
         ";
 
@@ -74,7 +74,7 @@ impl QueryEngine {
         // Step 2: fetch all requests for this session, oldest first.
         let requests_sql = format!(
             "SELECT {LOG_COLUMNS}
-            FROM requests
+            FROM request_log
             WHERE session_id = ?1
             ORDER BY ts ASC"
         );

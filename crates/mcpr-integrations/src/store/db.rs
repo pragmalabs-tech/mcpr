@@ -1,44 +1,38 @@
-//! SQLite connection management, WAL setup, and schema migrations.
+//! SQLite connection management and one-shot schema bootstrap.
 //!
-//! This module handles the low-level database lifecycle:
-//! - Opening a connection with the right pragmas for performance and safety.
-//! - Running schema migrations on first open or version upgrade.
-//! - Providing separate read-only connections for the query layer.
+//! - Opens a connection with WAL + performance pragmas (used by both
+//!   the writer and the read-only query engine).
+//! - Runs `CREATE_ALL_SQL` once on first open; idempotent on subsequent
+//!   starts via `IF NOT EXISTS`.
+//!
+//! mcpr is pre-1.0 — no migration runner. Schema layout changes happen
+//! by bumping `SCHEMA_VERSION` and dropping/recreating the dev database.
 //!
 //! # WAL mode
 //!
-//! WAL (Write-Ahead Logging) is enabled on every connection. This gives:
-//! - Concurrent readers while the background writer is writing.
-//! - Better write throughput for the batch write pattern.
-//! - Crash safety — no corruption on unclean shutdown.
-//!
-//! # Thread safety
-//!
-//! `rusqlite::Connection` is `!Send`. The writer owns its connection on a
-//! dedicated OS thread. Query commands open their own read-only connections.
+//! WAL (Write-Ahead Logging) is enabled on every connection so the
+//! background writer and read-only CLI queries can run concurrently
+//! without blocking each other.
+
+use std::path::Path;
 
 use rusqlite::Connection;
-use std::path::Path;
 
 use super::schema;
 
 /// Open a SQLite connection with WAL mode and performance pragmas.
 ///
-/// This is used by both the background writer (read-write) and the query
-/// engine (read-only). The pragmas are safe for both use cases.
+/// Used by both the background writer (read-write) and the query engine
+/// (read-only). The pragmas are safe for both.
 ///
 /// # Pragmas
 ///
-/// - `journal_mode = WAL`: enables concurrent reads during writes.
-/// - `synchronous = NORMAL`: safe with WAL, ~3x faster than FULL.
-///   Acceptable durability trade-off for a local request log — at most
-///   one batch (200ms) of events could be lost on OS crash.
-/// - `cache_size = -64000`: 64MB page cache in memory. Improves read
-///   performance for repeated queries (e.g., `--follow` polling).
-/// - `temp_store = MEMORY`: temp tables and indexes in memory, not disk.
-/// - `busy_timeout = 5000`: wait up to 5s for locks instead of failing
-///   immediately. Prevents SQLITE_BUSY errors when CLI queries overlap
-///   with writer flushes.
+/// - `journal_mode = WAL`: concurrent reads during writes.
+/// - `synchronous = NORMAL`: ~3x faster than FULL with WAL; at most one
+///   batch (200ms) of events lost on OS crash.
+/// - `cache_size = -64000`: 64MB page cache.
+/// - `temp_store = MEMORY`: temp tables/indexes in RAM.
+/// - `busy_timeout = 5000`: wait up to 5s for locks before failing.
 pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open(path)?;
 
@@ -53,70 +47,22 @@ pub fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-/// Run schema migrations to bring the database up to the current version.
+/// Create the schema (tables, indexes, view) and stamp the running mcpr
+/// binary version into the `meta` table.
 ///
-/// Checks the `schema_version` in the `meta` table. If the table doesn't
-/// exist (fresh database), runs the full V1 schema. Future versions will
-/// add incremental migrations (V1 → V2, V2 → V3, etc.).
-///
-/// This is called once on `Store::open()` before spawning the writer.
-pub fn run_migrations(conn: &Connection, mcpr_version: &str) -> rusqlite::Result<()> {
-    let version = get_schema_version(conn);
-
-    if version < 1 {
-        conn.execute_batch(schema::V1_SCHEMA)?;
-        conn.execute_batch(schema::V1_META_SEED)?;
-    }
-
-    if version < 2 {
-        conn.execute_batch(schema::V2_SCHEMA)?;
-    }
-
-    if version < 3 {
-        conn.execute_batch(schema::V3_SCHEMA)?;
-    }
-
-    if version < 4 {
-        conn.execute_batch(schema::V4_SCHEMA)?;
-    }
-
-    if version < 5 {
-        conn.execute_batch(schema::V5_SCHEMA)?;
-    }
-
-    // Always update the mcpr binary version on startup.
-    conn.execute(schema::UPSERT_MCPR_VERSION, rusqlite::params![mcpr_version])?;
-
+/// Idempotent: every `CREATE TABLE` / `CREATE INDEX` / `CREATE VIEW`
+/// uses `IF NOT EXISTS`, and the `meta` seeds use `INSERT OR IGNORE`.
+/// Safe to call from both `Store::open` (read-write) and
+/// `QueryEngine::open` (read-only callers may still need the schema if
+/// they hit a fresh database before the writer ran).
+pub fn init_schema(conn: &Connection, mcpr_version: &str) -> rusqlite::Result<()> {
+    conn.execute_batch(schema::CREATE_ALL_SQL)?;
+    conn.execute_batch(schema::META_SEED_SQL)?;
+    conn.execute(
+        schema::UPSERT_MCPR_VERSION_SQL,
+        rusqlite::params![mcpr_version],
+    )?;
     Ok(())
-}
-
-/// Read the current schema version from the `meta` table.
-///
-/// Returns 0 if the `meta` table doesn't exist (fresh database)
-/// or if the `schema_version` key is missing.
-fn get_schema_version(conn: &Connection) -> u32 {
-    // Check if the meta table exists at all.
-    let table_exists: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'meta'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(false);
-
-    if !table_exists {
-        return 0;
-    }
-
-    conn.query_row(
-        "SELECT value FROM meta WHERE key = 'schema_version'",
-        [],
-        |row| {
-            let v: String = row.get(0)?;
-            Ok(v.parse::<u32>().unwrap_or(0))
-        },
-    )
-    .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -125,21 +71,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_migrations__fresh_db() {
+    fn init_schema__fresh_db_creates_all_tables() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
-        run_migrations(&conn, "0.3.0-test").unwrap();
+        init_schema(&conn, "0.3.0-test").unwrap();
 
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('requests', 'sessions', 'meta')",
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table'
+                   AND name IN ('requests','responses','sessions','schema_items','schema_changes','meta')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(count, 6);
+
+        let view_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'view' AND name = 'request_log'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(view_count, 1);
 
         let version: String = conn
             .query_row(
@@ -148,7 +105,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "5");
+        assert_eq!(version, schema::SCHEMA_VERSION);
 
         let mcpr_ver: String = conn
             .query_row(
@@ -161,13 +118,13 @@ mod tests {
     }
 
     #[test]
-    fn run_migrations__idempotent() {
+    fn init_schema__idempotent_on_repeat_call() {
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("test.db");
 
         let conn = open_connection(&db_path).unwrap();
-        run_migrations(&conn, "0.3.0").unwrap();
-        run_migrations(&conn, "0.3.1").unwrap();
+        init_schema(&conn, "0.3.0").unwrap();
+        init_schema(&conn, "0.3.1").unwrap();
 
         let mcpr_ver: String = conn
             .query_row(
@@ -177,177 +134,5 @@ mod tests {
             )
             .unwrap();
         assert_eq!(mcpr_ver, "0.3.1");
-    }
-
-    #[test]
-    fn run_migrations__v3_adds_proxy() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-
-        let conn = open_connection(&db_path).unwrap();
-        run_migrations(&conn, "test").unwrap();
-
-        conn.execute(
-            "INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash)
-             VALUES ('search', 'http://localhost:9000', 'tools/list', '{}', 1000, 'abc')",
-            [],
-        )
-        .unwrap();
-
-        let proxy: String = conn
-            .query_row(
-                "SELECT proxy FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(proxy, "search");
-
-        conn.execute(
-            "INSERT INTO schema_changes (proxy, upstream_url, method, change_type, detected_at)
-             VALUES ('search', 'http://localhost:9000', 'tools/list', 'initial', 1000)",
-            [],
-        )
-        .unwrap();
-
-        let proxy: String = conn
-            .query_row(
-                "SELECT proxy FROM schema_changes WHERE upstream_url = 'http://localhost:9000'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(proxy, "search");
-
-        conn.execute(
-            "INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash)
-             VALUES ('email', 'http://localhost:9000', 'tools/list', '{}', 2000, 'def')",
-            [],
-        )
-        .unwrap();
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM server_schema", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 2);
-    }
-
-    #[test]
-    fn run_migrations__v4_renames_latency() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-
-        let conn = open_connection(&db_path).unwrap();
-        run_migrations(&conn, "test").unwrap();
-
-        conn.execute(
-            "INSERT INTO requests (request_id, ts, proxy, method, latency_us, status)
-             VALUES ('r1', 1000, 'api', 'tools/call', 142000, 'ok')",
-            [],
-        )
-        .unwrap();
-
-        let latency: i64 = conn
-            .query_row(
-                "SELECT latency_us FROM requests WHERE request_id = 'r1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(latency, 142_000);
-    }
-
-    #[test]
-    fn run_migrations__v4_converts_ms_to_us() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-
-        let conn = open_connection(&db_path).unwrap();
-
-        conn.execute_batch(schema::V1_SCHEMA).unwrap();
-        conn.execute_batch(schema::V1_META_SEED).unwrap();
-        conn.execute_batch(schema::V2_SCHEMA).unwrap();
-        conn.execute_batch(schema::V3_SCHEMA).unwrap();
-
-        conn.execute(
-            "INSERT INTO requests (request_id, ts, proxy, method, latency_ms, status)
-             VALUES ('r1', 1000, 'api', 'tools/call', 42, 'ok')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO requests (request_id, ts, proxy, method, latency_ms, status)
-             VALUES ('r2', 2000, 'api', 'tools/call', 1500, 'ok')",
-            [],
-        )
-        .unwrap();
-
-        conn.execute_batch(schema::V4_SCHEMA).unwrap();
-
-        let latency1: i64 = conn
-            .query_row(
-                "SELECT latency_us FROM requests WHERE request_id = 'r1'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(latency1, 42_000);
-
-        let latency2: i64 = conn
-            .query_row(
-                "SELECT latency_us FROM requests WHERE request_id = 'r2'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(latency2, 1_500_000);
-    }
-
-    #[test]
-    fn run_migrations__v4_rebuilds_slow_index() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-
-        let conn = open_connection(&db_path).unwrap();
-        run_migrations(&conn, "test").unwrap();
-
-        let idx_sql: String = conn
-            .query_row(
-                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_requests_slow'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(idx_sql.contains("latency_us"));
-    }
-
-    #[test]
-    fn run_migrations__v3_defaults_proxy() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("test.db");
-
-        let conn = open_connection(&db_path).unwrap();
-
-        conn.execute_batch(super::schema::V1_SCHEMA).unwrap();
-        conn.execute_batch(super::schema::V1_META_SEED).unwrap();
-        conn.execute_batch(super::schema::V2_SCHEMA).unwrap();
-
-        conn.execute(
-            "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash)
-             VALUES ('http://localhost:9000', 'tools/list', '{}', 1000, 'abc')",
-            [],
-        )
-        .unwrap();
-
-        conn.execute_batch(super::schema::V3_SCHEMA).unwrap();
-
-        let proxy: String = conn
-            .query_row(
-                "SELECT proxy FROM server_schema WHERE upstream_url = 'http://localhost:9000'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(proxy, "default");
     }
 }

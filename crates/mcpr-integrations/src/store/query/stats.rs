@@ -69,7 +69,7 @@ impl QueryEngine {
                     / COUNT(*) AS error_pct,
                 COALESCE(SUM(bytes_in), 0) AS total_bytes_in,
                 COALESCE(SUM(bytes_out), 0) AS total_bytes_out
-            FROM requests
+            FROM request_log
             WHERE (?1 IS NULL OR proxy = ?1) AND ts >= ?2
             GROUP BY COALESCE(tool, '<' || method || '>')
             ORDER BY calls DESC
@@ -94,7 +94,7 @@ impl QueryEngine {
         // Step 2: Compute p95 per group by loading latency values into Rust.
         let p95_sql = "
             SELECT latency_us
-            FROM requests
+            FROM request_log
             WHERE (?1 IS NULL OR proxy = ?1) AND ts >= ?2
               AND COALESCE(tool, '<' || method || '>') = ?3
             ORDER BY latency_us

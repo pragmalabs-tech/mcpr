@@ -49,7 +49,7 @@ impl QueryEngine {
                 session_id, client_name, client_version, client_platform,
                 started_at, last_seen_at, ended_at, total_calls, total_errors,
                 (ended_at IS NULL AND last_seen_at > ?1) AS is_active
-            FROM sessions
+            FROM sessions_view
             WHERE (?2 IS NULL OR proxy = ?2)
               AND (?3 IS NULL OR client_name = ?3)
               AND (?4 = 0 OR (ended_at IS NULL AND last_seen_at > ?1))

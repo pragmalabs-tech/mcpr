@@ -71,7 +71,7 @@ impl QueryEngine {
     pub fn logs(&self, params: &LogsParams) -> Result<Vec<LogRow>, rusqlite::Error> {
         let sql = format!(
             "SELECT {LOG_COLUMNS}
-            FROM requests
+            FROM request_log
             WHERE (?1 IS NULL OR proxy = ?1)
               AND (?2 IS NULL OR tool = ?2)
               AND (?3 IS NULL OR status = ?3)
@@ -111,7 +111,7 @@ impl QueryEngine {
     ) -> Result<Vec<LogRow>, rusqlite::Error> {
         let sql = format!(
             "SELECT {LOG_COLUMNS}
-            FROM requests
+            FROM request_log
             WHERE (?1 IS NULL OR proxy = ?1)
               AND (?2 IS NULL OR tool = ?2)
               AND (?3 IS NULL OR status = ?3)

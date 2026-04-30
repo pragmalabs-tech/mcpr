@@ -37,7 +37,7 @@ impl QueryEngine {
     /// caught up yet.
     pub fn open(db_path: &Path) -> Result<Self, rusqlite::Error> {
         let conn = db::open_connection(db_path)?;
-        db::run_migrations(&conn, env!("CARGO_PKG_VERSION"))?;
+        db::init_schema(&conn, env!("CARGO_PKG_VERSION"))?;
         Ok(QueryEngine { conn })
     }
 
@@ -57,167 +57,127 @@ impl QueryEngine {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::store::{db, schema};
+    use crate::store::db;
     use rusqlite::params;
 
-    /// `QueryEngine::open` must migrate a stale DB so users who upgrade the
-    /// binary and run a read command (without restarting the proxy first)
-    /// don't hit "no such column" errors.
-    #[test]
-    fn open__migrates_stale_db_to_current_version() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("stale.db");
-
-        // Build a V4-shaped DB: run migrations through V4 only.
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(schema::V1_SCHEMA).unwrap();
-            conn.execute_batch(schema::V1_META_SEED).unwrap();
-            conn.execute_batch(schema::V2_SCHEMA).unwrap();
-            conn.execute_batch(schema::V3_SCHEMA).unwrap();
-            conn.execute_batch(schema::V4_SCHEMA).unwrap();
-        }
-
-        // Opening the query engine should bump the schema to V5.
-        let _engine = QueryEngine::open(&db_path).unwrap();
-
-        let conn = Connection::open(&db_path).unwrap();
-        let version: String = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'schema_version'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, schema::SCHEMA_VERSION);
-
-        // V5 columns must be queryable.
-        conn.query_row(
-            "SELECT resource_uri, prompt_name FROM requests LIMIT 1",
-            [],
-            |_| Ok(()),
-        )
-        .or_else(|e| {
-            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        })
-        .unwrap();
-    }
-
-    /// Create a test QueryEngine with schema applied and seed data inserted.
+    /// Build a test QueryEngine with the new schema and a fixed seed of
+    /// sessions, requests, and responses. Latencies are encoded as
+    /// `(response_ts - request_ts)` in milliseconds; the `request_log`
+    /// view multiplies by 1000 to expose `latency_us`. Test assertions
+    /// reference the resulting `latency_us` values.
     pub(crate) fn seeded_engine() -> QueryEngine {
         let conn = Connection::open_in_memory().unwrap();
-        db::run_migrations(&conn, "test").unwrap();
+        db::init_schema(&conn, "test").unwrap();
 
-        // Seed sessions
+        // Sessions: s1 active (claude-desktop), s2 closed (cursor).
+        // `state = 'closed'` plus `last_active = 3500` makes the view's
+        // `ended_at` resolve to 3500.
         conn.execute(
-            "INSERT INTO sessions (session_id, proxy, started_at, last_seen_at, client_name, client_version, client_platform, total_calls, total_errors)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params!["s1", "api", 1000, 5000, "claude-desktop", "1.2.0", "claude", 3, 1],
-        ).unwrap();
+            "INSERT INTO sessions (id, proxy, state, client_name, client_version,
+                                   created_at, last_active, request_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                "s1",
+                "api",
+                "active",
+                "claude-desktop",
+                "1.2.0",
+                1000,
+                5000,
+                3
+            ],
+        )
+        .unwrap();
         conn.execute(
-            "INSERT INTO sessions (session_id, proxy, started_at, last_seen_at, ended_at, client_name, client_version, client_platform, total_calls, total_errors)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params!["s2", "api", 2000, 3000, 3500, "cursor", "0.44", "cursor", 2, 0],
-        ).unwrap();
+            "INSERT INTO sessions (id, proxy, state, client_name, client_version,
+                                   created_at, last_active, request_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params!["s2", "api", "closed", "cursor", "0.44", 2000, 3500, 2],
+        )
+        .unwrap();
 
-        // Seed requests
-        let requests = vec![
+        // Requests + paired responses. Order matches the legacy fixture
+        // so existing test assertions over `request_id` keep working.
+        // (req.ts, resp.ts, latency_ms_diff, latency_us_for_assertions):
+        //   r1: 1000, 1142,   142 →   142_000
+        //   r2: 2000, 2891,   891 →   891_000
+        //   r3: 3000, 7201,  4201 → 4_201_000   (error)
+        //   r4: 4000, 4023,    23 →    23_000
+        //   r5: 5000, 5156,   156 →   156_000
+        let requests: &[(&str, i64, Option<&str>, &str, Option<&str>, Option<i64>)] = &[
             (
                 "r1",
-                1000i64,
-                "api",
+                1000,
                 Some("s1"),
                 "tools/call",
                 Some("search"),
-                142i64,
-                "ok",
-                None::<&str>,
-                None::<&str>,
-                Some(256i64),
-                Some(1024i64),
+                Some(256),
             ),
             (
                 "r2",
                 2000,
-                "api",
                 Some("s1"),
                 "tools/call",
                 Some("search"),
-                891,
-                "ok",
-                None,
-                None,
                 Some(256),
-                Some(4096),
             ),
             (
                 "r3",
                 3000,
-                "api",
                 Some("s1"),
                 "tools/call",
                 Some("create_order"),
-                4201,
-                "error",
-                Some("-32600"),
-                Some("timeout"),
                 Some(512),
-                None,
             ),
-            (
-                "r4",
-                4000,
-                "api",
-                Some("s2"),
-                "resources/read",
-                None,
-                23,
-                "ok",
-                None,
-                None,
-                Some(64),
-                Some(2048),
-            ),
+            ("r4", 4000, Some("s2"), "resources/read", None, Some(64)),
             (
                 "r5",
                 5000,
-                "api",
                 Some("s2"),
                 "tools/call",
                 Some("search"),
-                156,
-                "ok",
-                None,
-                None,
                 Some(256),
-                Some(1024),
             ),
         ];
-
-        for (
-            id,
-            ts,
-            proxy,
-            sid,
-            method,
-            tool,
-            latency,
-            status,
-            err_code,
-            err_msg,
-            bytes_in,
-            bytes_out,
-        ) in requests
-        {
+        for (rid, ts, sid, method, tool, bytes_in) in requests {
             conn.execute(
-                "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_us, status, error_code, error_msg, bytes_in, bytes_out)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![id, ts, proxy, sid, method, tool, latency, status, err_code, err_msg, bytes_in, bytes_out],
-            ).unwrap();
+                "INSERT INTO requests (ts, proxy, session_id, request_id, method, tool, bytes_in)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![ts, "api", sid, rid, method, tool, bytes_in],
+            )
+            .unwrap();
+        }
+
+        let responses: &[(
+            &str,
+            i64,
+            Option<&str>,
+            &str,
+            Option<i64>,
+            Option<&str>,
+            Option<i64>,
+        )] = &[
+            ("r1", 1142, Some("s1"), "ok", None, None, Some(1024)),
+            ("r2", 2891, Some("s1"), "ok", None, None, Some(4096)),
+            (
+                "r3",
+                7201,
+                Some("s1"),
+                "error",
+                Some(-32600),
+                Some("timeout"),
+                None,
+            ),
+            ("r4", 4023, Some("s2"), "ok", None, None, Some(2048)),
+            ("r5", 5156, Some("s2"), "ok", None, None, Some(1024)),
+        ];
+        for (rid, ts, sid, status, code, msg, bytes_out) in responses {
+            conn.execute(
+                "INSERT INTO responses (ts, session_id, request_id, status, error_code, error_msg, bytes_out)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![ts, sid, rid, status, code, msg, bytes_out],
+            )
+            .unwrap();
         }
 
         QueryEngine::from_conn(conn)
@@ -463,14 +423,14 @@ mod tests {
             .slow(&super::slow::SlowParams {
                 proxy: Some("api".into()),
                 tool: Some("search".into()),
-                threshold_us: 500,
+                threshold_us: 500_000,
                 since_ts: 0,
                 limit: 100,
             })
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tool.as_deref(), Some("search"));
-        assert_eq!(rows[0].latency_us, 891);
+        assert_eq!(rows[0].latency_us, 891_000);
     }
 
     #[test]
@@ -480,14 +440,14 @@ mod tests {
             .slow(&super::slow::SlowParams {
                 proxy: Some("api".into()),
                 tool: None,
-                threshold_us: 500,
+                threshold_us: 500_000,
                 since_ts: 0,
                 limit: 100,
             })
             .unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].latency_us, 4201);
-        assert_eq!(rows[1].latency_us, 891);
+        assert_eq!(rows[0].latency_us, 4_201_000);
+        assert_eq!(rows[1].latency_us, 891_000);
     }
 
     #[test]
@@ -497,7 +457,7 @@ mod tests {
             .slow(&super::slow::SlowParams {
                 proxy: Some("api".into()),
                 tool: None,
-                threshold_us: 10000,
+                threshold_us: 10_000_000,
                 since_ts: 0,
                 limit: 100,
             })
@@ -512,7 +472,7 @@ mod tests {
         let engine = seeded_engine();
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_us: 500,
+            threshold_us: 500_000,
             since_ts: 0,
             tool: None,
             limit: 100,
@@ -528,7 +488,7 @@ mod tests {
         let engine = seeded_engine();
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_us: 500,
+            threshold_us: 500_000,
             since_ts: 0,
             tool: None,
             limit: 100,
@@ -543,7 +503,7 @@ mod tests {
         let engine = seeded_engine();
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_us: 500,
+            threshold_us: 500_000,
             since_ts: 0,
             tool: None,
             limit: 100,
@@ -557,14 +517,14 @@ mod tests {
         let engine = seeded_engine();
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_us: 1000,
+            threshold_us: 1_000_000,
             since_ts: 0,
             tool: None,
             limit: 100,
         };
         let rows = engine.slow_since(&params, 0).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].latency_us, 4201);
+        assert_eq!(rows[0].latency_us, 4_201_000);
     }
 
     #[test]
@@ -572,7 +532,7 @@ mod tests {
         let engine = seeded_engine();
         let params = super::slow::SlowParams {
             proxy: Some("api".into()),
-            threshold_us: 500,
+            threshold_us: 500_000,
             since_ts: 0,
             tool: Some("search".into()),
             limit: 100,
@@ -580,7 +540,7 @@ mod tests {
         let rows = engine.slow_since(&params, 0).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].tool.as_deref(), Some("search"));
-        assert_eq!(rows[0].latency_us, 891);
+        assert_eq!(rows[0].latency_us, 891_000);
     }
 
     // ── stats ───────────────────────────────────────────────────────────
@@ -624,10 +584,10 @@ mod tests {
             .unwrap();
 
         let search = result.tools.iter().find(|t| t.label == "search").unwrap();
-        assert_eq!(search.min_us, 142);
-        assert_eq!(search.max_us, 891);
-        assert!((search.avg_us - 396.33).abs() < 1.0);
-        assert_eq!(search.p95_us, 891);
+        assert_eq!(search.min_us, 142_000);
+        assert_eq!(search.max_us, 891_000);
+        assert!((search.avg_us - 396_333.33).abs() < 1.0);
+        assert_eq!(search.p95_us, 891_000);
     }
 
     #[test]
@@ -662,9 +622,9 @@ mod tests {
                 error_code: None,
             })
             .unwrap();
-        assert_eq!(rows[0].latency_us, 156);
-        assert_eq!(rows[1].latency_us, 891);
-        assert_eq!(rows[2].latency_us, 142);
+        assert_eq!(rows[0].latency_us, 156_000);
+        assert_eq!(rows[1].latency_us, 891_000);
+        assert_eq!(rows[2].latency_us, 142_000);
     }
 
     #[test]
@@ -694,15 +654,15 @@ mod tests {
             .slow(&super::slow::SlowParams {
                 proxy: Some("api".into()),
                 tool: None,
-                threshold_us: 150,
+                threshold_us: 150_000,
                 since_ts: 0,
                 limit: 100,
             })
             .unwrap();
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].latency_us, 4201);
-        assert_eq!(rows[1].latency_us, 891);
-        assert_eq!(rows[2].latency_us, 156);
+        assert_eq!(rows[0].latency_us, 4_201_000);
+        assert_eq!(rows[1].latency_us, 891_000);
+        assert_eq!(rows[2].latency_us, 156_000);
     }
 
     #[test]
@@ -712,14 +672,14 @@ mod tests {
             .slow(&super::slow::SlowParams {
                 proxy: Some("api".into()),
                 tool: None,
-                threshold_us: 891,
+                threshold_us: 891_000,
                 since_ts: 0,
                 limit: 100,
             })
             .unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].latency_us, 4201);
-        assert_eq!(rows[1].latency_us, 891);
+        assert_eq!(rows[0].latency_us, 4_201_000);
+        assert_eq!(rows[1].latency_us, 891_000);
     }
 
     // ── clients ─────────────────────────────────────────────────────────
@@ -925,235 +885,12 @@ mod tests {
     }
 
     // ── schema ─────────────────────────────────────────────────────────
-
-    fn seed_schema(engine: &QueryEngine) {
-        engine
-            .conn()
-            .execute(
-                "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    "http://localhost:9000",
-                    "initialize",
-                    r#"{"serverInfo":{"name":"test-server","version":"1.0"},"protocolVersion":"2025-03-26","capabilities":{"tools":{}}}"#,
-                    1000i64,
-                    "hash_init"
-                ],
-            )
-            .unwrap();
-        engine
-            .conn()
-            .execute(
-                "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    "http://localhost:9000",
-                    "tools/list",
-                    r#"{"tools":[{"name":"search","description":"search things"}]}"#,
-                    2000i64,
-                    "hash_tools"
-                ],
-            )
-            .unwrap();
-        engine
-            .conn()
-            .execute(
-                "INSERT INTO schema_changes (upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params!["http://localhost:9000", "tools/list", "initial", Option::<String>::None, Option::<String>::None, "hash_tools", 2000i64],
-            )
-            .unwrap();
-    }
-
-    /// Insert one `tools/list` schema row + its "initial" change row under
-    /// the given proxy name and URL.
-    fn seed_schema_for_proxy(engine: &QueryEngine, proxy: &str, upstream: &str) {
-        engine
-            .conn()
-            .execute(
-                "INSERT INTO server_schema (proxy, upstream_url, method, payload, captured_at, schema_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
-                    proxy,
-                    upstream,
-                    "tools/list",
-                    r#"{"tools":[{"name":"search","description":"search things"}]}"#,
-                    1000i64,
-                    format!("hash-{proxy}")
-                ],
-            )
-            .unwrap();
-        engine
-            .conn()
-            .execute(
-                "INSERT INTO schema_changes (proxy, upstream_url, method, change_type, item_name, old_hash, new_hash, detected_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    proxy,
-                    upstream,
-                    "tools/list",
-                    "initial",
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    format!("hash-{proxy}"),
-                    1000i64,
-                ],
-            )
-            .unwrap();
-    }
-
-    #[test]
-    fn schema__returns_all_snapshots() {
-        let engine = seeded_engine();
-        seed_schema(&engine);
-        let rows = engine
-            .schema(&super::schema::SchemaParams {
-                proxy: None,
-                method: None,
-            })
-            .unwrap();
-        assert_eq!(rows.len(), 2);
-    }
-
-    #[test]
-    fn schema__filter_by_method() {
-        let engine = seeded_engine();
-        seed_schema(&engine);
-        let rows = engine
-            .schema(&super::schema::SchemaParams {
-                proxy: None,
-                method: Some("tools/list".into()),
-            })
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].method, "tools/list");
-    }
-
-    #[test]
-    fn schema__filter_by_proxy() {
-        let engine = seeded_engine();
-        seed_schema_for_proxy(&engine, "alpha", "http://a:9000");
-        seed_schema_for_proxy(&engine, "beta", "http://b:9000");
-
-        let alpha = engine
-            .schema(&super::schema::SchemaParams {
-                proxy: Some("alpha".into()),
-                method: None,
-            })
-            .unwrap();
-        assert_eq!(alpha.len(), 1);
-        assert_eq!(alpha[0].upstream_url, "http://a:9000");
-
-        let beta = engine
-            .schema(&super::schema::SchemaParams {
-                proxy: Some("beta".into()),
-                method: None,
-            })
-            .unwrap();
-        assert_eq!(beta.len(), 1);
-        assert_eq!(beta[0].upstream_url, "http://b:9000");
-
-        let missing = engine
-            .schema(&super::schema::SchemaParams {
-                proxy: Some("nonexistent".into()),
-                method: None,
-            })
-            .unwrap();
-        assert!(missing.is_empty());
-    }
-
-    #[test]
-    fn latest_schema_row__returns_row_for_proxy_method() {
-        let engine = seeded_engine();
-        seed_schema_for_proxy(&engine, "alpha", "http://a:9000");
-
-        let row = engine
-            .latest_schema_row("alpha", "tools/list")
-            .unwrap()
-            .expect("row must exist");
-        assert_eq!(row.proxy, "alpha");
-        assert_eq!(row.upstream_url, "http://a:9000");
-        assert_eq!(row.method, "tools/list");
-        assert_eq!(row.schema_hash, "hash-alpha");
-    }
-
-    #[test]
-    fn latest_schema_row__none_when_missing() {
-        let engine = seeded_engine();
-        assert!(
-            engine
-                .latest_schema_row("nonexistent", "tools/list")
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn latest_schema_row__scoped_by_proxy() {
-        let engine = seeded_engine();
-        seed_schema_for_proxy(&engine, "alpha", "http://a:9000");
-        seed_schema_for_proxy(&engine, "beta", "http://b:9000");
-
-        let a = engine
-            .latest_schema_row("alpha", "tools/list")
-            .unwrap()
-            .unwrap();
-        let b = engine
-            .latest_schema_row("beta", "tools/list")
-            .unwrap()
-            .unwrap();
-        assert_eq!(a.schema_hash, "hash-alpha");
-        assert_eq!(b.schema_hash, "hash-beta");
-    }
-
-    #[test]
-    fn schema_changes__returns_history() {
-        let engine = seeded_engine();
-        seed_schema(&engine);
-        let rows = engine
-            .schema_changes(&super::schema::SchemaChangesParams {
-                proxy: None,
-                method: None,
-                limit: 50,
-            })
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].change_type, "initial");
-    }
-
-    #[test]
-    fn schema_changes__filter_by_proxy() {
-        let engine = seeded_engine();
-        seed_schema_for_proxy(&engine, "alpha", "http://a:9000");
-        seed_schema_for_proxy(&engine, "beta", "http://b:9000");
-
-        let alpha = engine
-            .schema_changes(&super::schema::SchemaChangesParams {
-                proxy: Some("alpha".into()),
-                method: None,
-                limit: 50,
-            })
-            .unwrap();
-        assert_eq!(alpha.len(), 1);
-        assert_eq!(alpha[0].upstream_url, "http://a:9000");
-
-        let all = engine
-            .schema_changes(&super::schema::SchemaChangesParams {
-                proxy: None,
-                method: None,
-                limit: 50,
-            })
-            .unwrap();
-        assert_eq!(all.len(), 2);
-    }
-
-    #[test]
-    fn schema_status__complete() {
-        let engine = seeded_engine();
-        seed_schema(&engine);
-        let status = engine.schema_status("http://localhost:9000").unwrap();
-        assert_eq!(status.status, "complete");
-        assert_eq!(status.server_name.as_deref(), Some("test-server"));
-        assert_eq!(status.server_version.as_deref(), Some("1.0"));
-        assert_eq!(status.protocol_version.as_deref(), Some("2025-03-26"));
-        assert!(status.capabilities.contains(&"tools".to_string()));
-        assert_eq!(status.methods_captured.len(), 2);
-    }
+    //
+    // The legacy `server_schema` test suite asserted behavior that the
+    // new event model can't express (per-method payloads, upstream_url
+    // tracking, initialize-derived serverInfo). Those tests were dropped
+    // along with the table. The remaining `schema_status__unknown` test
+    // verifies the new "always unknown" behavior of the stub impl.
 
     #[test]
     fn schema_status__unknown() {
@@ -1161,49 +898,6 @@ mod tests {
         let status = engine.schema_status("http://nonexistent").unwrap();
         assert_eq!(status.status, "unknown");
         assert!(status.methods_captured.is_empty());
-    }
-
-    #[test]
-    fn schema_status__partial() {
-        let engine = seeded_engine();
-        engine
-            .conn()
-            .execute(
-                "INSERT INTO server_schema (upstream_url, method, payload, captured_at, schema_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params!["http://partial", "tools/list", "{}", 1000i64, "h1"],
-            )
-            .unwrap();
-        let status = engine.schema_status("http://partial").unwrap();
-        assert_eq!(status.status, "partial");
-    }
-
-    // ── schema unused ──────────────────────────────────────────────────
-
-    #[test]
-    fn schema_unused__finds_uncalled_tools() {
-        let engine = seeded_engine();
-        seed_schema(&engine);
-
-        engine
-            .conn()
-            .execute(
-                "UPDATE server_schema SET payload = ?1 WHERE method = 'tools/list'",
-                params![r#"{"tools":[{"name":"search","description":"search things"},{"name":"never_used","description":"does nothing"}]}"#],
-            )
-            .unwrap();
-
-        let rows = engine
-            .schema_unused(&super::schema::SchemaUnusedParams {
-                proxy: Some("api".into()),
-                since_ts: 0,
-            })
-            .unwrap();
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].tool_name, "never_used");
-        assert_eq!(rows[0].calls, 0);
-        assert_eq!(rows[1].tool_name, "search");
-        assert!(rows[1].calls > 0);
     }
 
     #[test]
@@ -1218,30 +912,73 @@ mod tests {
         assert!(rows.is_empty());
     }
 
+    #[test]
+    fn latest_schema_row__none_when_missing() {
+        // The new model has no server_schema table; the function always
+        // returns None until a per-kind hydrator is built.
+        let engine = seeded_engine();
+        assert!(
+            engine
+                .latest_schema_row("nonexistent", "tools/list")
+                .unwrap()
+                .is_none()
+        );
+    }
+
     // ── multi-proxy: proxy: None shows all ──────────────────────────────
 
     /// Seed a second proxy ("email") alongside the default "api" proxy.
     fn seeded_multi_proxy_engine() -> QueryEngine {
         let engine = seeded_engine();
 
-        // Add a second proxy's session and requests.
-        engine.conn().execute(
-            "INSERT INTO sessions (session_id, proxy, started_at, last_seen_at, client_name, client_version, client_platform, total_calls, total_errors)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params!["s-email-1", "email", 6000, 7000, "claude-desktop", "1.2.0", "claude", 1, 0],
-        ).unwrap();
+        engine
+            .conn()
+            .execute(
+                "INSERT INTO sessions (id, proxy, state, client_name, client_version,
+                                       created_at, last_active, request_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    "s-email-1",
+                    "email",
+                    "active",
+                    "claude-desktop",
+                    "1.2.0",
+                    6000,
+                    7000,
+                    2,
+                ],
+            )
+            .unwrap();
 
-        engine.conn().execute(
-            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_us, status, error_code, error_msg, bytes_in, bytes_out)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params!["r-email-1", 6000i64, "email", "s-email-1", "tools/call", "send_email", 320i64, "ok", None::<&str>, None::<&str>, Some(512i64), Some(128i64)],
-        ).unwrap();
+        let email_requests: &[(&str, i64, &str)] = &[
+            ("r-email-1", 6000, "send_email"),
+            ("r-email-2", 7000, "send_email"),
+        ];
+        for (rid, ts, tool) in email_requests {
+            engine
+                .conn()
+                .execute(
+                    "INSERT INTO requests (ts, proxy, session_id, request_id, method, tool, bytes_in)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![ts, "email", "s-email-1", rid, "tools/call", tool, 512i64],
+                )
+                .unwrap();
+        }
 
-        engine.conn().execute(
-            "INSERT INTO requests (request_id, ts, proxy, session_id, method, tool, latency_us, status, error_code, error_msg, bytes_in, bytes_out)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params!["r-email-2", 7000i64, "email", "s-email-1", "tools/call", "send_email", 250i64, "ok", None::<&str>, None::<&str>, Some(512i64), Some(128i64)],
-        ).unwrap();
+        // Both email responses arrive 200ms after their requests, giving
+        // latency_us = 200_000 — comfortably above the slow-test threshold
+        // so the multi-proxy "show all" cases see them.
+        let email_responses: &[(&str, i64)] = &[("r-email-1", 6200), ("r-email-2", 7200)];
+        for (rid, ts) in email_responses {
+            engine
+                .conn()
+                .execute(
+                    "INSERT INTO responses (ts, session_id, request_id, status, bytes_out)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![ts, "s-email-1", rid, "ok", 128i64],
+                )
+                .unwrap();
+        }
 
         engine
     }
@@ -1312,12 +1049,14 @@ mod tests {
         let rows = engine
             .slow(&super::slow::SlowParams {
                 proxy: None,
-                threshold_us: 100,
+                threshold_us: 100_000,
                 since_ts: 0,
                 tool: None,
                 limit: 100,
             })
             .unwrap();
+        // 4 of the 5 seeded main-proxy requests have latency_us >= 100_000
+        // (only r4 = 23_000 falls below). Both email rows are at 200_000.
         assert_eq!(rows.len(), 6);
     }
 

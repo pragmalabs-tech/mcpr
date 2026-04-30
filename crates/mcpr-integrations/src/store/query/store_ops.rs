@@ -54,12 +54,15 @@ fn count_matching_requests(
     }
 }
 
-/// Count orphaned sessions matching the vacuum filter.
+/// Count orphaned sessions matching the vacuum filter. A session is
+/// orphaned if it has no remaining requests (we just deleted the old
+/// ones in the same vacuum) and was already closed before `before_ts`.
 fn count_orphaned_sessions(conn: &rusqlite::Connection, before_ts: i64) -> rusqlite::Result<i64> {
     conn.query_row(
         "SELECT COUNT(*) FROM sessions
-         WHERE session_id NOT IN (SELECT DISTINCT session_id FROM requests WHERE session_id IS NOT NULL)
-           AND (ended_at IS NOT NULL AND ended_at < ?1)",
+         WHERE id NOT IN (SELECT DISTINCT session_id FROM requests WHERE session_id IS NOT NULL)
+           AND state = 'closed'
+           AND last_active < ?1",
         params![before_ts],
         |row| row.get(0),
     )
@@ -130,8 +133,9 @@ impl QueryEngine {
         // Delete orphaned sessions.
         let deleted_sessions = self.conn().execute(
             "DELETE FROM sessions
-             WHERE session_id NOT IN (SELECT DISTINCT session_id FROM requests WHERE session_id IS NOT NULL)
-               AND (ended_at IS NOT NULL AND ended_at < ?1)",
+             WHERE id NOT IN (SELECT DISTINCT session_id FROM requests WHERE session_id IS NOT NULL)
+               AND state = 'closed'
+               AND last_active < ?1",
             params![params.before_ts],
         )?;
 
