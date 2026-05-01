@@ -51,6 +51,10 @@ pub struct SchemaTrackingStage;
 
 #[async_trait]
 impl ResponseStage for SchemaTrackingStage {
+    fn name(&self) -> &'static str {
+        "SchemaTrackingStage"
+    }
+
     async fn process(
         &self,
         res: Response,
@@ -148,6 +152,7 @@ mod tests {
     };
     use crate::protocol::schema::ChangeSchema;
     use crate::protocol::session::SessionStore;
+    use crate::proxy2::stage::types::RequestContextInner;
     use crate::proxy2::state::InnerProxyState;
 
     #[derive(Clone, Default)]
@@ -202,10 +207,11 @@ mod tests {
     fn ctx_for(method: ClientMethod) -> RequestContext {
         let mut m = HashMap::new();
         m.insert(RequestId::Number(1), method);
-        RequestContext {
+        RequestContextInner {
             client_methods: m,
             ..Default::default()
         }
+        .into()
     }
 
     fn tools_list_ctx() -> RequestContext {
@@ -396,10 +402,11 @@ mod tests {
             RequestId::Number(3),
             ClientMethod::Resources(ResourcesMethod::List),
         );
-        let ctx = RequestContext {
+        let ctx: RequestContext = RequestContextInner {
             client_methods: methods,
             ..Default::default()
-        };
+        }
+        .into();
 
         SchemaTrackingStage.process(resp, ctx, state).await.unwrap();
         handle.shutdown().await;

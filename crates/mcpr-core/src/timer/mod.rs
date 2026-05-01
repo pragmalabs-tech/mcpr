@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::{sync::Arc, time::Instant};
 
+use uuid::Uuid;
+
 #[derive(Debug, Clone, Default)]
 pub struct Timer {
     items: Arc<Mutex<Vec<TimerItem>>>,
@@ -10,6 +12,7 @@ pub struct Timer {
 
 #[derive(Debug)]
 pub struct TimerItem {
+    id: Uuid,
     name: String,
     started_at: Instant,
     ended_at: Option<Instant>,
@@ -54,8 +57,10 @@ impl Timer {
         }
     }
 
-    pub fn track_start(&mut self, name: &str) {
+    pub fn track_start(&self, name: &str) -> Uuid {
+        let id = Uuid::new_v4();
         let item = TimerItem {
+            id,
             name: name.into(),
             started_at: Instant::now(),
             ended_at: None,
@@ -63,11 +68,13 @@ impl Timer {
 
         let mut lock = self.items.lock().unwrap();
         lock.push(item);
+
+        id
     }
 
-    pub fn track_end(&mut self, name: &str) {
+    pub fn track_end(&self, id: Uuid) {
         let mut lock = self.items.lock().unwrap();
-        if let Some(item) = lock.iter_mut().find(|i| i.name == name) {
+        if let Some(item) = lock.iter_mut().find(|i| i.id == id) {
             item.ended_at = Some(Instant::now());
         }
     }

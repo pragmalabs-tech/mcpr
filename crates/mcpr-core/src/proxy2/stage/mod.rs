@@ -77,10 +77,12 @@ impl StagePipeline {
                 .await?;
         }
 
+        let timer_id = request_ctx.timer.track_start("Router");
         let output = self
             .router_stage
             .process(request, self.state.clone())
             .await?;
+        request_ctx.timer.track_end(timer_id);
 
         match output {
             RouterOutput::Single(mut response) => {
@@ -154,6 +156,10 @@ mod tests {
 
     #[async_trait]
     impl RequestStage for TaggedRequestStage {
+        fn name(&self) -> &'static str {
+            "TaggedRequestStage"
+        }
+
         async fn process(
             &self,
             req: Request,
@@ -172,6 +178,10 @@ mod tests {
 
     #[async_trait]
     impl ResponseStage for TaggedResponseStage {
+        fn name(&self) -> &'static str {
+            "TaggedResponseStage"
+        }
+
         async fn process(
             &self,
             res: Response,
@@ -188,6 +198,10 @@ mod tests {
 
     #[async_trait]
     impl RequestStage for FailingRequestStage {
+        fn name(&self) -> &'static str {
+            "FailingRequestStage"
+        }
+
         async fn process(
             &self,
             _: Request,
