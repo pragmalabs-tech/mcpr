@@ -15,7 +15,9 @@
 //! - [`time`]: Shared time formatting utilities.
 
 pub mod config;
+pub mod env;
 pub mod event;
 pub mod protocol;
 pub mod proxy2;
+pub mod timer;
 pub mod utils;

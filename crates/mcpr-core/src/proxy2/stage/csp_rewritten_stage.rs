@@ -112,6 +112,10 @@ impl CspRewritter {
 
 #[async_trait]
 impl ResponseStage for CspRewritter {
+    fn name(&self) -> &'static str {
+        "CspRewritter"
+    }
+
     async fn process(
         &self,
         mut res: Response,
@@ -457,8 +461,11 @@ mod tests {
         protocol::mcp::{
             JsonRpcError, JsonRpcErrorResponse, JsonRpcResponse, JsonRpcVersion, RequestId,
         },
-        proxy2::csp::{CspConfig, DirectivePolicy, Mode, WidgetScoped},
-        proxy2::state::InnerProxyState,
+        proxy2::{
+            csp::{CspConfig, DirectivePolicy, Mode, WidgetScoped},
+            stage::types::RequestContextInner,
+            state::InnerProxyState,
+        },
     };
     use axum::http::response::Parts as ResponseParts;
     use bytes::Bytes;
@@ -506,10 +513,11 @@ mod tests {
     fn ctx_for(method: ClientMethod) -> RequestContext {
         let mut m = std::collections::HashMap::new();
         m.insert(RequestId::Number(1), method);
-        RequestContext {
+        RequestContextInner {
             client_methods: m,
             ..Default::default()
         }
+        .into()
     }
 
     fn tools_list_ctx() -> RequestContext {
@@ -541,10 +549,11 @@ mod tests {
                 ClientMethod::Tools(ToolsMethod::List),
             );
         }
-        RequestContext {
+        RequestContextInner {
             client_methods: m,
             ..Default::default()
         }
+        .into()
     }
 
     fn empty_response_parts() -> ResponseParts {

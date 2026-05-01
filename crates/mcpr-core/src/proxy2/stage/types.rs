@@ -9,6 +9,8 @@
 //! that don't ignore it.
 
 use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::http::Method;
@@ -20,12 +22,24 @@ use crate::{
         session::{SessionId, session_id_from_headers},
     },
     proxy2::state::ProxyState,
+    timer::Timer,
 };
 
 /// Per-request metadata threaded through both stage chains. Cheap to
-/// clone; populated once by [`Self::from_request`] and read by stages.
+/// clone (one `Arc` bump) and passed by value to stages.
+///
+/// The fields live on [`RequestContextInner`] behind a shared `Arc` so
+/// stages can hold or move the context without re-allocating the
+/// `client_methods` map or duplicating the timer.
 #[derive(Clone, Debug, Default)]
 pub struct RequestContext {
+    inner: Arc<RequestContextInner>,
+}
+
+/// Underlying per-request state. Field access on [`RequestContext`]
+/// goes through `Deref` to this struct, so call sites stay ergonomic.
+#[derive(Debug, Default)]
+pub struct RequestContextInner {
     /// `RequestId → ClientMethod` map. 1 entry for single MCP requests,
     /// N entries for batches, empty for HTTP.
     pub client_methods: HashMap<RequestId, ClientMethod>,
@@ -38,17 +52,49 @@ pub struct RequestContext {
     /// with the real client metadata at the moment the server returns
     /// `mcp-session-id`.
     pub initialize: Option<(RequestId, ClientInfo)>,
-    /// Inbound was an HTTP `DELETE` carrying a session id — the spec's
+    /// Inbound was an HTTP `DELETE` carrying a session id - the spec's
     /// session-close signal. Triggers `end_session` when its response
     /// comes back.
     pub is_session_close: bool,
+    /// Proxy-internal request id. UUID minted at pipeline entry, used
+    /// to correlate logs and metrics across stages and the upstream
+    /// call. Distinct from any MCP `RequestId`, which is client-supplied.
+    pub request_id: String,
+    /// Per-stage timing recorder. Stages call `track_start` /
+    /// `track_end` to mark spans; the pipeline can dump it after the
+    /// response comes back to attribute latency to specific stages.
+    pub timer: Timer,
+}
+
+impl Deref for RequestContext {
+    type Target = RequestContextInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl From<RequestContextInner> for RequestContext {
+    fn from(inner: RequestContextInner) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
 }
 
 impl RequestContext {
-    /// Build a context from a parsed `Request`. HTTP requests carry no
-    /// MCP method, so the method map is empty.
+    /// Build a context from a parsed `Request` with a fresh timer. Use
+    /// [`Self::with_timer`] when the caller already has a timer that
+    /// should accumulate spans across pre/post-pipeline work.
     pub fn from_request(request: &Request) -> Self {
-        match request {
+        Self::with_timer(request, Timer::new())
+    }
+
+    /// Build a context from a parsed `Request`, reusing the provided
+    /// timer so spans tracked outside the pipeline (e.g. parse / encode
+    /// in the HTTP entry point) land in the same dump as the stage spans.
+    pub fn with_timer(request: &Request, timer: Timer) -> Self {
+        let inner = match request {
             Request::Mcp(parts, rpc) => {
                 let mut client_methods = HashMap::with_capacity(1);
                 client_methods.insert(rpc.id.clone(), rpc.method.clone());
@@ -60,31 +106,38 @@ impl RequestContext {
                 } else {
                     None
                 };
-                Self {
+                RequestContextInner {
                     client_methods,
                     session_id: session_id_from_headers(&parts.headers),
                     initialize,
                     is_session_close: false,
+                    request_id: new_request_id(),
+                    timer,
                 }
             }
-            Request::McpBatch(parts, rpcs) => Self {
+            Request::McpBatch(parts, rpcs) => RequestContextInner {
                 client_methods: rpcs
                     .iter()
                     .map(|r| (r.id.clone(), r.method.clone()))
                     .collect(),
                 session_id: session_id_from_headers(&parts.headers),
-                // Batches can't carry initialize per spec — the lifecycle
+                // Batches can't carry initialize per spec - the lifecycle
                 // request is single-shot. Skip the scan.
                 initialize: None,
                 is_session_close: false,
+                request_id: new_request_id(),
+                timer,
             },
-            Request::Http(http) => Self {
+            Request::Http(http) => RequestContextInner {
                 client_methods: HashMap::new(),
                 session_id: session_id_from_headers(http.headers()),
                 initialize: None,
                 is_session_close: http.method() == Method::DELETE,
+                request_id: new_request_id(),
+                timer,
             },
-        }
+        };
+        inner.into()
     }
 
     pub fn get_method(&self, request_id: &RequestId) -> Option<&ClientMethod> {
@@ -92,22 +145,62 @@ impl RequestContext {
     }
 }
 
+fn new_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[async_trait]
 pub trait RequestStage: Send + Sync {
+    /// Stable name used as the timer label in `process_with_timer` and
+    /// for log/metric correlation. Method (not associated const) so the
+    /// trait stays dyn-compatible for `Box<dyn RequestStage>` storage.
+    fn name(&self) -> &'static str;
+
     async fn process(
         &self,
         request: Request,
         request_ctx: RequestContext,
         state: ProxyState,
     ) -> anyhow::Result<Request>;
+
+    async fn process_with_timer(
+        &self,
+        request: Request,
+        request_ctx: RequestContext,
+        state: ProxyState,
+    ) -> anyhow::Result<Request> {
+        let timer_id = request_ctx.timer.track_start(self.name());
+        let result = self.process(request, request_ctx.clone(), state).await;
+        request_ctx.timer.track_end(timer_id);
+
+        result
+    }
 }
 
 #[async_trait]
 pub trait ResponseStage: Send + Sync {
+    /// Stable name used as the timer label in `process_with_timer` and
+    /// for log/metric correlation. Method (not associated const) so the
+    /// trait stays dyn-compatible for `Box<dyn ResponseStage>` storage.
+    fn name(&self) -> &'static str;
+
     async fn process(
         &self,
         response: Response,
         request_ctx: RequestContext,
         state: ProxyState,
     ) -> anyhow::Result<Response>;
+
+    async fn process_with_timer(
+        &self,
+        response: Response,
+        request_ctx: RequestContext,
+        state: ProxyState,
+    ) -> anyhow::Result<Response> {
+        let timer_id = request_ctx.timer.track_start(self.name());
+        let result = self.process(response, request_ctx.clone(), state).await;
+        request_ctx.timer.track_end(timer_id);
+
+        result
+    }
 }

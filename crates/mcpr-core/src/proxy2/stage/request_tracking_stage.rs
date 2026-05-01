@@ -16,6 +16,10 @@ pub struct RequestLogStage;
 
 #[async_trait]
 impl RequestStage for RequestLogStage {
+    fn name(&self) -> &'static str {
+        "RequestLogStage"
+    }
+
     async fn process(
         &self,
         request: Request,
@@ -34,6 +38,10 @@ pub struct ResponseLogStage;
 
 #[async_trait]
 impl ResponseStage for ResponseLogStage {
+    fn name(&self) -> &'static str {
+        "ResponseLogStage"
+    }
+
     async fn process(
         &self,
         res: Response,

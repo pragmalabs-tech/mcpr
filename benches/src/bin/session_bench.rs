@@ -56,6 +56,11 @@ struct Args {
     /// Optional label printed in the report header.
     #[arg(long)]
     label: Option<String>,
+
+    /// If set, write one latency sample (µs) per line to this path.
+    /// Used to compare percentiles across runs at equal sample counts.
+    #[arg(long)]
+    samples_out: Option<String>,
 }
 
 fn parse_duration(s: &str) -> Result<Duration, String> {
@@ -105,6 +110,15 @@ async fn main() -> Result<()> {
         if let Ok(mut v) = res {
             samples.append(&mut v);
         }
+    }
+
+    if let Some(path) = args.samples_out.as_deref() {
+        let mut buf = String::with_capacity(samples.len() * 8);
+        for s in &samples {
+            buf.push_str(&s.to_string());
+            buf.push('\n');
+        }
+        std::fs::write(path, buf).context("write --samples-out")?;
     }
 
     print_report(

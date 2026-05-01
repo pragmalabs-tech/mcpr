@@ -37,6 +37,10 @@ pub struct SessionTrackingStage;
 
 #[async_trait]
 impl ResponseStage for SessionTrackingStage {
+    fn name(&self) -> &'static str {
+        "SessionTrackingStage"
+    }
+
     async fn process(
         &self,
         response: Response,
