@@ -27,13 +27,15 @@ use crate::{
             StagePipeline,
             csp_rewritten_stage::{CspRewriteConfig, CspRewritter},
             log_stage::{RequestLogStage, ResponseLogStage},
-            router_stage::RouterStage,
+            router_stage::{RouterOutput, RouterStage},
             schema_tracking_stage::SchemaTrackingStage,
             types::{RequestStage, ResponseStage},
         },
         state::InnerProxyState,
     },
 };
+use bytes::Bytes;
+use futures_util::stream::{BoxStream, StreamExt};
 
 /// Build an axum app that runs a single proxy from `cfg`. Every request
 /// flows: axum → `Request::from_axum` → `StagePipeline::process` → axum
@@ -86,7 +88,14 @@ async fn handle_request(
     }
 }
 
-fn to_axum_response(resp: Response) -> AxumResponse {
+fn to_axum_response(output: RouterOutput) -> AxumResponse {
+    match output {
+        RouterOutput::Single(resp) => encode_single(resp),
+        RouterOutput::Stream(stream) => encode_stream(stream),
+    }
+}
+
+fn encode_single(resp: Response) -> AxumResponse {
     match resp {
         Response::Mcp(parts, result) => encode_mcp(parts, vec![result]),
         Response::McpBatch(parts, results) => encode_mcp(parts, results),
@@ -95,6 +104,28 @@ fn to_axum_response(resp: Response) -> AxumResponse {
             AxumResponse::from_parts(parts, axum::body::Body::from(bytes))
         }
     }
+}
+
+/// Stream JSON-RPC results back to the client as SSE: one frame per
+/// yielded `Response::Mcp`, no buffering. Items that aren't `Mcp`
+/// (router shouldn't produce any in a stream) become an io::Error,
+/// which axum surfaces as a stream error and closes the body.
+fn encode_stream(stream: BoxStream<'static, anyhow::Result<Response>>) -> AxumResponse {
+    let body_stream = stream.map(|item| -> Result<Bytes, std::io::Error> {
+        match item {
+            Ok(Response::Mcp(_, result)) => Ok(sse::encode_one(&result)),
+            Ok(_) => Err(std::io::Error::other("stream yielded non-Mcp Response")),
+            Err(e) => Err(std::io::Error::other(e.to_string())),
+        }
+    });
+    let body = axum::body::Body::from_stream(body_stream);
+    let mut resp = AxumResponse::new(body);
+    *resp.status_mut() = axum::http::StatusCode::OK;
+    resp.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+    resp
 }
 
 /// Re-emit MCP results to the client in the wire format upstream chose: SSE
@@ -171,7 +202,10 @@ mod tests {
 
     #[tokio::test]
     async fn to_axum_response__json_upstream_returns_application_json() {
-        let resp = to_axum_response(Response::Mcp(parts_with("application/json"), rpc_result(1)));
+        let resp = to_axum_response(RouterOutput::Single(Response::Mcp(
+            parts_with("application/json"),
+            rpc_result(1),
+        )));
         assert_eq!(resp.headers()["content-type"], "application/json");
         let body = body_string(resp).await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -180,10 +214,10 @@ mod tests {
 
     #[tokio::test]
     async fn to_axum_response__json_upstream_batch_emits_array() {
-        let resp = to_axum_response(Response::McpBatch(
+        let resp = to_axum_response(RouterOutput::Single(Response::McpBatch(
             parts_with("application/json"),
             vec![rpc_result(1), rpc_result(2)],
-        ));
+        )));
         assert_eq!(resp.headers()["content-type"], "application/json");
         let body = body_string(resp).await;
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -193,10 +227,10 @@ mod tests {
 
     #[tokio::test]
     async fn to_axum_response__sse_upstream_returns_event_stream() {
-        let resp = to_axum_response(Response::Mcp(
+        let resp = to_axum_response(RouterOutput::Single(Response::Mcp(
             parts_with("text/event-stream"),
             rpc_result(1),
-        ));
+        )));
         assert_eq!(resp.headers()["content-type"], "text/event-stream");
         let body = body_string(resp).await;
         assert!(body.starts_with("event: message\ndata: "));
@@ -206,10 +240,10 @@ mod tests {
 
     #[tokio::test]
     async fn to_axum_response__sse_upstream_batch_emits_one_frame_per_result() {
-        let resp = to_axum_response(Response::McpBatch(
+        let resp = to_axum_response(RouterOutput::Single(Response::McpBatch(
             parts_with("text/event-stream"),
             vec![rpc_result(1), rpc_result(2), rpc_result(3)],
-        ));
+        )));
         assert_eq!(resp.headers()["content-type"], "text/event-stream");
         let body = body_string(resp).await;
         assert_eq!(body.matches("event: message\n").count(), 3);
@@ -219,10 +253,10 @@ mod tests {
     #[tokio::test]
     async fn to_axum_response__sse_upstream_roundtrips_through_decoder() {
         let original = vec![rpc_result(1), rpc_result(2)];
-        let resp = to_axum_response(Response::McpBatch(
+        let resp = to_axum_response(RouterOutput::Single(Response::McpBatch(
             parts_with("text/event-stream"),
             original.clone(),
-        ));
+        )));
         let body = body_string(resp).await;
         let frames = sse::decode_frames(body.as_bytes());
         assert_eq!(frames.len(), original.len());
@@ -244,7 +278,7 @@ mod tests {
         parts
             .headers
             .insert("transfer-encoding", HeaderValue::from_static("chunked"));
-        let resp = to_axum_response(Response::Mcp(parts, rpc_result(1)));
+        let resp = to_axum_response(RouterOutput::Single(Response::Mcp(parts, rpc_result(1))));
         assert!(!resp.headers().contains_key("transfer-encoding"));
         let cl = resp
             .headers()
@@ -260,7 +294,54 @@ mod tests {
         parts
             .headers
             .insert("mcp-session-id", HeaderValue::from_static("sess-xyz"));
-        let resp = to_axum_response(Response::Mcp(parts, rpc_result(1)));
+        let resp = to_axum_response(RouterOutput::Single(Response::Mcp(parts, rpc_result(1))));
         assert_eq!(resp.headers()["mcp-session-id"], "sess-xyz");
+    }
+
+    // ── RouterOutput::Stream encoding ─────────────────────────
+
+    /// Build a `RouterOutput::Stream` from a fixed list of `JsonRpcResult`s.
+    fn stream_output(results: Vec<JsonRpcResult>) -> RouterOutput {
+        let parts = parts_with("text/event-stream");
+        let stream = futures_util::stream::iter(
+            results
+                .into_iter()
+                .map(move |r| Ok(Response::Mcp(parts.clone(), r))),
+        );
+        RouterOutput::Stream(Box::pin(stream))
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__stream_emits_text_event_stream() {
+        let resp = to_axum_response(stream_output(vec![rpc_result(1)]));
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__stream_emits_one_frame_per_yielded_item() {
+        let resp = to_axum_response(stream_output(vec![
+            rpc_result(1),
+            rpc_result(2),
+            rpc_result(3),
+        ]));
+        let body = body_string(resp).await;
+        assert_eq!(body.matches("event: message\n").count(), 3);
+        assert_eq!(body.matches("\n\n").count(), 3);
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__stream_roundtrips_through_decoder() {
+        let original = vec![rpc_result(1), rpc_result(2)];
+        let resp = to_axum_response(stream_output(original.clone()));
+        let body = body_string(resp).await;
+        let frames = sse::decode_frames(body.as_bytes());
+        assert_eq!(frames.len(), original.len());
+        for (frame, expected) in frames.iter().zip(&original) {
+            let parsed: JsonRpcResult = serde_json::from_slice(frame).unwrap();
+            assert_eq!(
+                serde_json::to_value(&parsed).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
     }
 }
