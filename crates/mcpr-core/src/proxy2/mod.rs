@@ -15,9 +15,11 @@ use axum::{
 use tower_http::cors::CorsLayer;
 
 use crate::{
+    env::Environment,
     event::EventBus,
     protocol::{Request, Response, is_event_stream, mcp::JsonRpcResult, sse},
     proxy2::stage::session_tracking_stage::SessionTrackingStage,
+    timer::Timer,
 };
 use crate::{
     protocol::session::SessionStore,
@@ -86,20 +88,34 @@ async fn handle_request(
         };
     }
 
+    let timer = Timer::new();
+
+    let parse_id = timer.track_start("Parse");
     let parsed = match Request::from_axum(req).await {
         Ok(r) => r,
         Err(e) => {
             return (axum::http::StatusCode::BAD_REQUEST, format!("parse: {e}")).into_response();
         }
     };
-    match pipeline.process(parsed).await {
-        Ok(resp) => to_axum_response(resp),
+    timer.track_end(parse_id);
+
+    let result = pipeline.process(parsed, timer.clone()).await;
+
+    let encode_id = timer.track_start("Encode");
+    let resp = match result {
+        Ok(out) => to_axum_response(out),
         Err(e) => (
             axum::http::StatusCode::BAD_GATEWAY,
             format!("upstream: {e}"),
         )
             .into_response(),
+    };
+    timer.track_end(encode_id);
+
+    if Environment::debug() {
+        eprintln!("[mcpr] timer:\n{}", timer);
     }
+    resp
 }
 
 fn to_axum_response(output: RouterOutput) -> AxumResponse {

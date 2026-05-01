@@ -83,9 +83,17 @@ impl From<RequestContextInner> for RequestContext {
 }
 
 impl RequestContext {
-    /// Build a context from a parsed `Request`. HTTP requests carry no
-    /// MCP method, so the method map is empty.
+    /// Build a context from a parsed `Request` with a fresh timer. Use
+    /// [`Self::with_timer`] when the caller already has a timer that
+    /// should accumulate spans across pre/post-pipeline work.
     pub fn from_request(request: &Request) -> Self {
+        Self::with_timer(request, Timer::new())
+    }
+
+    /// Build a context from a parsed `Request`, reusing the provided
+    /// timer so spans tracked outside the pipeline (e.g. parse / encode
+    /// in the HTTP entry point) land in the same dump as the stage spans.
+    pub fn with_timer(request: &Request, timer: Timer) -> Self {
         let inner = match request {
             Request::Mcp(parts, rpc) => {
                 let mut client_methods = HashMap::with_capacity(1);
@@ -104,7 +112,7 @@ impl RequestContext {
                     initialize,
                     is_session_close: false,
                     request_id: new_request_id(),
-                    timer: Timer::new(),
+                    timer,
                 }
             }
             Request::McpBatch(parts, rpcs) => RequestContextInner {
@@ -118,7 +126,7 @@ impl RequestContext {
                 initialize: None,
                 is_session_close: false,
                 request_id: new_request_id(),
-                timer: Timer::new(),
+                timer,
             },
             Request::Http(http) => RequestContextInner {
                 client_methods: HashMap::new(),
@@ -126,7 +134,7 @@ impl RequestContext {
                 initialize: None,
                 is_session_close: http.method() == Method::DELETE,
                 request_id: new_request_id(),
-                timer: Timer::new(),
+                timer,
             },
         };
         inner.into()

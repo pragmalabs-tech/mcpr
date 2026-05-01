@@ -36,6 +36,7 @@ use crate::{
         },
         state::ProxyState,
     },
+    timer::Timer,
 };
 
 pub struct StagePipeline {
@@ -62,18 +63,22 @@ impl StagePipeline {
 
     /// Entry point after the axum body has been parsed into `Request`.
     ///
-    /// Builds the `RequestContext` once from the parsed request and
-    /// hands a clone to every stage so they can dispatch on the
-    /// originating MCP method without re-parsing. For
+    /// The caller's [`Timer`] becomes the context's timer, so spans
+    /// tracked outside the pipeline (parse, encode) and the per-stage
+    /// spans tracked inside it land in the same dump. For
     /// [`RouterOutput::Stream`], wraps each yielded `Response::Mcp` with
     /// the response stage chain. Stages keep their existing trait and
     /// never see the `Stream` itself.
-    pub async fn process(&self, mut request: Request) -> anyhow::Result<RouterOutput> {
-        let request_ctx = RequestContext::from_request(&request);
+    pub async fn process(
+        &self,
+        mut request: Request,
+        timer: Timer,
+    ) -> anyhow::Result<RouterOutput> {
+        let request_ctx = RequestContext::with_timer(&request, timer);
 
         for stage in &self.request_stages {
             request = stage
-                .process(request, request_ctx.clone(), self.state.clone())
+                .process_with_timer(request, request_ctx.clone(), self.state.clone())
                 .await?;
         }
 
@@ -88,7 +93,7 @@ impl StagePipeline {
             RouterOutput::Single(mut response) => {
                 for stage in self.response_stages.iter() {
                     response = stage
-                        .process(response, request_ctx.clone(), self.state.clone())
+                        .process_with_timer(response, request_ctx.clone(), self.state.clone())
                         .await?;
                 }
                 Ok(RouterOutput::Single(response))
@@ -104,7 +109,9 @@ impl StagePipeline {
                     async move {
                         let mut response = item?;
                         for stage in stages.iter() {
-                            response = stage.process(response, ctx.clone(), state.clone()).await?;
+                            response = stage
+                                .process_with_timer(response, ctx.clone(), state.clone())
+                                .await?;
                         }
                         Ok(response)
                     }
@@ -282,7 +289,7 @@ mod tests {
             state(),
         );
 
-        let resp = pipeline.process(mcp_request()).await.unwrap();
+        let resp = pipeline.process(mcp_request(), Timer::new()).await.unwrap();
         let RouterOutput::Single(resp) = resp else {
             panic!("expected Single");
         };
@@ -310,7 +317,7 @@ mod tests {
             state(),
         );
 
-        pipeline.process(mcp_request()).await.unwrap();
+        pipeline.process(mcp_request(), Timer::new()).await.unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["first", "second"]);
     }
 
@@ -335,7 +342,7 @@ mod tests {
             state(),
         );
 
-        pipeline.process(mcp_request()).await.unwrap();
+        pipeline.process(mcp_request(), Timer::new()).await.unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["first", "second"]);
     }
 
@@ -350,7 +357,7 @@ mod tests {
             state(),
         );
 
-        let err = match pipeline.process(mcp_request()).await {
+        let err = match pipeline.process(mcp_request(), Timer::new()).await {
             Ok(_) => panic!("expected request stage to short-circuit"),
             Err(e) => e,
         };
@@ -401,7 +408,7 @@ mod tests {
             state(),
         );
 
-        let output = pipeline.process(mcp_request()).await.unwrap();
+        let output = pipeline.process(mcp_request(), Timer::new()).await.unwrap();
         let RouterOutput::Stream(_, stream) = output else {
             panic!("expected Stream");
         };

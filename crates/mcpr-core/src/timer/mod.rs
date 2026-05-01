@@ -18,6 +18,16 @@ pub struct TimerItem {
     ended_at: Option<Instant>,
 }
 
+impl fmt::Display for Timer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let lock = self.items.lock().unwrap();
+        for item in lock.iter() {
+            writeln!(f, "  {}", item)?;
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for TimerItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.ended_at {
