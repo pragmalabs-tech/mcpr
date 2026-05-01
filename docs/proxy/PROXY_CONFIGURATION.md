@@ -262,6 +262,3 @@ The new grouped format is recommended for new configs. See [`config_examples/`](
 ## Related docs
 
 - [CSP](CSP.md) -- widget CSP: directives, modes, per-widget overrides
-- [Deploy Relay Server](DEPLOY_RELAY_SERVER.md) -- VPS setup, DNS, TLS, nginx/Caddy
-- [Static Tokens](STATIC_TOKENS.md) -- practical guide for static token auth (team setup, CI/CD, demos)
-- [Auth Provider](AUTH_PROVIDER.md) -- building an external auth provider API
