@@ -227,6 +227,7 @@ mod tests {
                 name: "test-client".into(),
                 version: Some("0.1".into()),
             }),
+            server_info: None,
             created_at: now,
             last_active: now,
             request_count: 1,

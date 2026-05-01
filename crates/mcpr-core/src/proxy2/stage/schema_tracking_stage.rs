@@ -202,7 +202,10 @@ mod tests {
     fn ctx_for(method: ClientMethod) -> RequestContext {
         let mut m = HashMap::new();
         m.insert(RequestId::Number(1), method);
-        RequestContext { client_methods: m }
+        RequestContext {
+            client_methods: m,
+            ..Default::default()
+        }
     }
 
     fn tools_list_ctx() -> RequestContext {
@@ -395,6 +398,7 @@ mod tests {
         );
         let ctx = RequestContext {
             client_methods: methods,
+            ..Default::default()
         };
 
         SchemaTrackingStage.process(resp, ctx, state).await.unwrap();

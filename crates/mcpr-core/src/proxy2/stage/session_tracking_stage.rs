@@ -1,16 +1,34 @@
+//! Session lifecycle observer. Runs on the response side so it sees
+//! both the inbound request context and the upstream response — the
+//! only point where every fact about a session is known at once:
+//!
+//! - the `initialize` request id and `client_info`, captured into the
+//!   context at pipeline entry,
+//! - the `mcp-session-id` issued by the server in the response headers,
+//! - the `serverInfo` from the response result.
+//!
+//! Behavior:
+//! - Initialize response: `start_session` with all four fields, emit `Active`.
+//! - Any other JSON-RPC response carrying a known `mcp-session-id`:
+//!   `track_request`, bumps activity (auto-creates a stub if the proxy
+//!   started mid-conversation).
+//! - HTTP response to a `DELETE` carrying a session id: `end_session`,
+//!   emit `Closed`.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::http::Method;
-use axum::http::request::Parts as RequestParts;
+use axum::http::response::Parts as ResponseParts;
 
 use crate::{
     event::ProxyEvent,
     protocol::{
-        Request, http_request::HttpRequest, mcp::JsonRpcRequest, session::session_id_from_headers,
+        Response,
+        mcp::{JsonRpcResponse, JsonRpcResult},
+        session::{SessionId, session_id_from_headers},
     },
     proxy2::{
-        stage::types::{RequestContext, RequestStage},
+        stage::types::{RequestContext, ResponseStage},
         state::ProxyState,
     },
 };
@@ -18,66 +36,92 @@ use crate::{
 pub struct SessionTrackingStage;
 
 #[async_trait]
-impl RequestStage for SessionTrackingStage {
+impl ResponseStage for SessionTrackingStage {
     async fn process(
         &self,
-        request: Request,
-        _request_ctx: RequestContext,
+        response: Response,
+        request_ctx: RequestContext,
         state: ProxyState,
-    ) -> anyhow::Result<Request> {
-        match &request {
-            Request::Mcp(parts, rpc) => {
-                track_mcp_request(parts, rpc, &state);
+    ) -> anyhow::Result<Response> {
+        match &response {
+            Response::Mcp(parts, result) => {
+                handle_mcp_result(parts, result, &request_ctx, &state);
             }
-            Request::McpBatch(parts, rpcs) => {
-                for rpc in rpcs {
-                    track_mcp_request(parts, rpc, &state);
+            Response::McpBatch(parts, results) => {
+                for r in results {
+                    handle_mcp_result(parts, r, &request_ctx, &state);
                 }
             }
-            Request::Http(http) => {
-                end_http_session(http, &state);
+            Response::Http(_) => {
+                end_session_if_close(&request_ctx, &state);
             }
         }
-
-        Ok(request)
+        Ok(response)
     }
 }
 
-/// Observe a single MCP request: extract `(session_id, request_id, client_info)`
-/// and forward to the store. Returns `Some` on a state change worth emitting,
-/// `None` when there's no session header yet (e.g. the `initialize` request,
-/// which gets its session from the response) or the request id is a duplicate.
-fn track_mcp_request(
-    parts: &RequestParts,
-    request: &JsonRpcRequest,
+/// Dispatch a single JSON-RPC result: initialize gets the
+/// register-the-new-session path; anything else just bumps activity on
+/// the session keyed by the inbound `mcp-session-id`.
+fn handle_mcp_result(
+    parts: &ResponseParts,
+    result: &JsonRpcResult,
+    ctx: &RequestContext,
     state: &ProxyState,
 ) -> Option<()> {
-    let session_id = session_id_from_headers(&parts.headers)?;
-    let new_change = state.sessions.track_request(
-        session_id,
-        request.id.clone(),
-        request.parse_client_info(),
-    )?;
+    let response = match result {
+        JsonRpcResult::Response(r) => r,
+        JsonRpcResult::Error(_) => return None,
+    };
 
+    if let Some((init_id, _)) = &ctx.initialize
+        && init_id == &response.id
+    {
+        return start_session(parts, response, ctx, state);
+    }
+
+    let session_id = ctx.session_id.as_ref()?;
+    let new_change = state
+        .sessions
+        .track_request(session_id.clone(), response.id.clone())?;
     state
         .event_bus
         .emit(ProxyEvent::Session(Arc::new(new_change)));
-
     Some(())
 }
 
-/// Observe an HTTP request: if it's a `DELETE` carrying `mcp-session-id`,
-/// the client is ending the session — drop our local record and emit a
-/// final event with `state = Closed`. Returns `None` otherwise.
-fn end_http_session(http: &HttpRequest, state: &ProxyState) -> Option<()> {
-    if http.method() != Method::DELETE {
+/// Register a session at the moment the `initialize` response carries
+/// the server-issued `mcp-session-id`. Captures client info (from the
+/// request) and server info (from the response) so subsequent requests
+/// don't re-register.
+fn start_session(
+    parts: &ResponseParts,
+    response: &JsonRpcResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+) -> Option<()> {
+    let session_id: SessionId = session_id_from_headers(&parts.headers)?;
+    let client_info = ctx.initialize.as_ref().map(|(_, ci)| ci.clone());
+    let server_info = response.parse_server_info();
+
+    let info =
+        state
+            .sessions
+            .start_session(session_id, response.id.clone(), client_info, server_info)?;
+    state.event_bus.emit(ProxyEvent::Session(Arc::new(info)));
+    Some(())
+}
+
+/// Spec session close: client `DELETE`s with the session id. Hooked on
+/// the response side so we observe the close only when the server
+/// accepted the DELETE.
+fn end_session_if_close(ctx: &RequestContext, state: &ProxyState) -> Option<()> {
+    if !ctx.is_session_close {
         return None;
     }
-    let session_id = session_id_from_headers(http.headers())?;
-    let closed = state.sessions.end_session(&session_id)?;
-
+    let session_id = ctx.session_id.as_ref()?;
+    let closed = state.sessions.end_session(session_id)?;
     state.event_bus.emit(ProxyEvent::Session(Arc::new(closed)));
-
     Some(())
 }
 
@@ -88,10 +132,15 @@ mod tests {
 
     use std::sync::{Arc, Mutex};
 
-    use axum::http::Request as HttpReq;
+    use axum::http::{HeaderValue, Method, Request as HttpReq};
 
     use crate::event::{EventBusHandle, EventManager, EventSink};
-    use crate::protocol::mcp::{ClientMethod, JsonRpcVersion, RequestId, ToolsMethod};
+    use crate::protocol::Request;
+    use crate::protocol::http_request::HttpRequest;
+    use crate::protocol::mcp::{
+        ClientMethod, JsonRpcRequest, JsonRpcResponse, JsonRpcVersion, LifecycleMethod, RequestId,
+        ToolsMethod,
+    };
     use crate::protocol::session::{SessionState, SessionStore};
     use crate::proxy2::state::InnerProxyState;
 
@@ -127,119 +176,254 @@ mod tests {
         (state, sink, handle)
     }
 
-    fn parts_with(headers: &[(&str, &str)]) -> RequestParts {
-        let mut builder = HttpReq::builder().method("POST").uri("/");
-        for (k, v) in headers {
-            builder = builder.header(*k, *v);
-        }
-        builder.body(()).unwrap().into_parts().0
+    fn initialize_request_with_client_info() -> Request {
+        let parts = HttpReq::builder()
+            .method("POST")
+            .uri("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let rpc = JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(0),
+            method: ClientMethod::Lifecycle(LifecycleMethod::Initialize),
+            params: Some(
+                serde_json::from_value(serde_json::json!({
+                    "clientInfo": { "name": "inspector-client", "version": "0.21.2" },
+                    "protocolVersion": "2025-11-25",
+                }))
+                .unwrap(),
+            ),
+        };
+        Request::Mcp(parts, rpc)
     }
 
-    fn tools_list_request() -> JsonRpcRequest {
-        JsonRpcRequest {
+    fn tools_list_request_with_session(session_id: &str) -> Request {
+        let parts = HttpReq::builder()
+            .method("POST")
+            .uri("/")
+            .header("mcp-session-id", session_id)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let rpc = JsonRpcRequest {
             jsonrpc: JsonRpcVersion,
             id: RequestId::Number(1),
             method: ClientMethod::Tools(ToolsMethod::List),
             params: None,
-        }
+        };
+        Request::Mcp(parts, rpc)
     }
 
-    fn http_request_with(method: Method, headers: &[(&str, &str)]) -> HttpRequest {
-        let mut builder = HttpReq::builder().method(method).uri("/");
+    fn delete_request_with_session(session_id: &str) -> Request {
+        let http: HttpRequest = HttpReq::builder()
+            .method(Method::DELETE)
+            .uri("/")
+            .header("mcp-session-id", session_id)
+            .body(axum::body::Bytes::new())
+            .unwrap();
+        Request::Http(http)
+    }
+
+    fn response_parts_with(headers: &[(&str, &str)]) -> ResponseParts {
+        let mut builder = axum::http::Response::builder();
         for (k, v) in headers {
-            builder = builder.header(*k, *v);
+            builder = builder.header(*k, HeaderValue::from_str(v).unwrap());
         }
-        builder.body(axum::body::Bytes::new()).unwrap()
+        builder.body(()).unwrap().into_parts().0
     }
 
+    fn initialize_response_result(id: i64) -> JsonRpcResult {
+        JsonRpcResult::Response(JsonRpcResponse {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(id),
+            result: Some(serde_json::json!({
+                "capabilities": {},
+                "protocolVersion": "2025-11-25",
+                "serverInfo": { "name": "weather-app", "version": "1.0.0" },
+            })),
+        })
+    }
+
+    fn tools_list_result(id: i64) -> JsonRpcResult {
+        JsonRpcResult::Response(JsonRpcResponse {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(id),
+            result: Some(serde_json::json!({"tools": []})),
+        })
+    }
+
+    fn http_response_204() -> Response {
+        let resp = axum::http::Response::builder()
+            .status(204)
+            .body(axum::body::Bytes::new())
+            .unwrap();
+        Response::Http(resp)
+    }
+
+    // ── initialize: response side creates session with full metadata ──
+
     #[tokio::test]
-    async fn track_mcp_request__forwards_session_header_and_emits() {
+    async fn initialize_response__creates_session_with_client_and_server_info() {
         let (state, sink, handle) = state_with_sink();
-        let parts = parts_with(&[("mcp-session-id", "sess-1")]);
+        let req = initialize_request_with_client_info();
+        let ctx = RequestContext::from_request(&req);
+        let parts = response_parts_with(&[("mcp-session-id", "sess-xyz")]);
+        let response = Response::Mcp(parts, initialize_response_result(0));
 
-        assert!(track_mcp_request(&parts, &tools_list_request(), &state).is_some());
+        SessionTrackingStage
+            .process(response, ctx, state.clone())
+            .await
+            .unwrap();
 
-        let info = state.sessions.get_session("sess-1").unwrap();
+        let info = state.sessions.get_session("sess-xyz").unwrap();
+        let ci = info.client_info.unwrap();
+        assert_eq!(ci.name, "inspector-client");
+        assert_eq!(ci.version.as_deref(), Some("0.21.2"));
+        let si = info.server_info.unwrap();
+        assert_eq!(si.name, "weather-app");
+        assert_eq!(si.version.as_deref(), Some("1.0.0"));
         assert_eq!(info.request_count, 1);
+        assert_eq!(info.request_ids, vec![RequestId::Number(0)]);
 
         handle.shutdown().await;
-        let events = sink.snapshot();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(events[0], ProxyEvent::Session(_)));
+        assert!(matches!(
+            sink.snapshot().first(),
+            Some(ProxyEvent::Session(_))
+        ));
     }
 
     #[tokio::test]
-    async fn track_mcp_request__missing_session_header_skips_store_and_emit() {
+    async fn initialize_response__without_session_header_is_noop() {
         let (state, sink, handle) = state_with_sink();
-        let parts = parts_with(&[]);
+        let req = initialize_request_with_client_info();
+        let ctx = RequestContext::from_request(&req);
+        let parts = response_parts_with(&[]);
+        let response = Response::Mcp(parts, initialize_response_result(0));
 
-        assert!(track_mcp_request(&parts, &tools_list_request(), &state).is_none());
+        SessionTrackingStage
+            .process(response, ctx, state.clone())
+            .await
+            .unwrap();
+
         assert!(state.sessions.list_sessions().is_empty());
-
         handle.shutdown().await;
         assert!(sink.snapshot().is_empty());
     }
 
-    #[tokio::test]
-    async fn end_http_session__delete_with_known_session_removes_and_emits_closed() {
-        let (state, sink, handle) = state_with_sink();
-        state
-            .sessions
-            .track_request("sess-1".into(), RequestId::Number(1), None);
-        let http = http_request_with(Method::DELETE, &[("mcp-session-id", "sess-1")]);
+    // ── follow-up requests bump activity, don't reset metadata ────
 
-        assert!(end_http_session(&http, &state).is_some());
-        assert!(state.sessions.get_session("sess-1").is_none());
+    #[tokio::test]
+    async fn followup_request__bumps_activity_keeps_initialize_metadata() {
+        let (state, sink, handle) = state_with_sink();
+
+        // Step 1: initialize creates the session.
+        let init_req = initialize_request_with_client_info();
+        let init_ctx = RequestContext::from_request(&init_req);
+        let init_resp = Response::Mcp(
+            response_parts_with(&[("mcp-session-id", "sess-xyz")]),
+            initialize_response_result(0),
+        );
+        SessionTrackingStage
+            .process(init_resp, init_ctx, state.clone())
+            .await
+            .unwrap();
+
+        // Step 2: tools/list with the same session id.
+        let req2 = tools_list_request_with_session("sess-xyz");
+        let ctx2 = RequestContext::from_request(&req2);
+        let resp2 = Response::Mcp(response_parts_with(&[]), tools_list_result(1));
+        SessionTrackingStage
+            .process(resp2, ctx2, state.clone())
+            .await
+            .unwrap();
+
+        let info = state.sessions.get_session("sess-xyz").unwrap();
+        assert_eq!(info.request_count, 2);
+        assert_eq!(
+            info.request_ids,
+            vec![RequestId::Number(0), RequestId::Number(1)]
+        );
+        assert_eq!(info.client_info.unwrap().name, "inspector-client");
+        assert_eq!(info.server_info.unwrap().name, "weather-app");
 
         handle.shutdown().await;
-        let closed = sink.snapshot().into_iter().find_map(|e| match e {
-            ProxyEvent::Session(s) if s.id == "sess-1" && s.state == SessionState::Closed => {
-                Some(s)
-            }
-            _ => None,
-        });
-        assert!(closed.is_some());
+        let session_events = sink
+            .snapshot()
+            .into_iter()
+            .filter(|e| matches!(e, ProxyEvent::Session(_)))
+            .count();
+        assert_eq!(session_events, 2);
     }
 
     #[tokio::test]
-    async fn end_http_session__delete_unknown_session_is_noop() {
-        let (state, sink, handle) = state_with_sink();
-        let http = http_request_with(Method::DELETE, &[("mcp-session-id", "never-existed")]);
+    async fn followup_request__without_existing_session_creates_stub() {
+        // Edge: client sends a request with a session id we never saw initialize for
+        // (e.g. proxy started mid-conversation). track_request creates a stub entry
+        // with no client/server metadata so the session still surfaces.
+        let (state, _sink, handle) = state_with_sink();
+        let req = tools_list_request_with_session("sess-orphan");
+        let ctx = RequestContext::from_request(&req);
+        let resp = Response::Mcp(response_parts_with(&[]), tools_list_result(1));
+        SessionTrackingStage
+            .process(resp, ctx, state.clone())
+            .await
+            .unwrap();
 
-        assert!(end_http_session(&http, &state).is_none());
-
+        let info = state.sessions.get_session("sess-orphan").unwrap();
+        assert!(info.client_info.is_none());
+        assert!(info.server_info.is_none());
+        assert_eq!(info.request_count, 1);
         handle.shutdown().await;
-        assert!(sink.snapshot().is_empty());
     }
 
+    // ── DELETE closes the session at response time ────────────────
+
     #[tokio::test]
-    async fn end_http_session__non_delete_is_noop() {
+    async fn delete_response__ends_known_session() {
         let (state, sink, handle) = state_with_sink();
         state
             .sessions
-            .track_request("sess-1".into(), RequestId::Number(1), None);
-        let http = http_request_with(Method::POST, &[("mcp-session-id", "sess-1")]);
+            .start_session("sess-xyz".into(), RequestId::Number(0), None, None);
 
-        assert!(end_http_session(&http, &state).is_none());
-        assert!(state.sessions.get_session("sess-1").is_some());
+        let del_req = delete_request_with_session("sess-xyz");
+        let ctx = RequestContext::from_request(&del_req);
+        SessionTrackingStage
+            .process(http_response_204(), ctx, state.clone())
+            .await
+            .unwrap();
 
+        assert!(state.sessions.get_session("sess-xyz").is_none());
         handle.shutdown().await;
-        // The track_request above emits one Session event; no Closed should follow.
         let saw_closed = sink
             .snapshot()
-            .iter()
+            .into_iter()
             .any(|e| matches!(e, ProxyEvent::Session(s) if s.state == SessionState::Closed));
-        assert!(!saw_closed);
+        assert!(saw_closed);
     }
 
     #[tokio::test]
-    async fn end_http_session__delete_without_session_header_is_noop() {
-        let (state, sink, handle) = state_with_sink();
-        let http = http_request_with(Method::DELETE, &[]);
+    async fn non_delete_http_response__does_not_close() {
+        let (state, _sink, handle) = state_with_sink();
+        state
+            .sessions
+            .start_session("sess-xyz".into(), RequestId::Number(0), None, None);
 
-        assert!(end_http_session(&http, &state).is_none());
+        let http: HttpRequest = HttpReq::builder()
+            .method(Method::POST)
+            .uri("/")
+            .header("mcp-session-id", "sess-xyz")
+            .body(axum::body::Bytes::new())
+            .unwrap();
+        let ctx = RequestContext::from_request(&Request::Http(http));
+        SessionTrackingStage
+            .process(http_response_204(), ctx, state.clone())
+            .await
+            .unwrap();
 
+        assert!(state.sessions.get_session("sess-xyz").is_some());
         handle.shutdown().await;
-        assert!(sink.snapshot().is_empty());
     }
 }

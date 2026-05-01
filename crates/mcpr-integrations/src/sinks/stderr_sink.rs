@@ -80,6 +80,8 @@ fn format_json(event: &ProxyEvent) -> String {
             "state": format!("{:?}", info.state),
             "client_name": info.client_info.as_ref().map(|c| c.name.clone()),
             "client_version": info.client_info.as_ref().and_then(|c| c.version.clone()),
+            "server_name": info.server_info.as_ref().map(|s| s.name.clone()),
+            "server_version": info.server_info.as_ref().and_then(|s| s.version.clone()),
             "request_count": info.request_count,
         }),
         ProxyEvent::Schema(change) => match change.as_ref() {

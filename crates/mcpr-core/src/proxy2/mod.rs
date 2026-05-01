@@ -47,9 +47,9 @@ pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<R
     // Build Stages
     let csp_rewritter = CspRewritter::new(CspRewriteConfig::from_proxy_config(&cfg));
     let router_stage = RouterStage::new(cfg)?;
-    let request_stages: Vec<Box<dyn RequestStage>> =
-        vec![Box::new(RequestLogStage), Box::new(SessionTrackingStage)];
+    let request_stages: Vec<Box<dyn RequestStage>> = vec![Box::new(RequestLogStage)];
     let response_stages: Vec<Box<dyn ResponseStage>> = vec![
+        Box::new(SessionTrackingStage),
         Box::new(SchemaTrackingStage),
         Box::new(csp_rewritter),
         Box::new(ResponseLogStage),

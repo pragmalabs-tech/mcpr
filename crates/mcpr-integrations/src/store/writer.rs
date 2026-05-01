@@ -504,6 +504,7 @@ mod tests {
                 name: "claude-desktop".into(),
                 version: Some("1.0.0".into()),
             }),
+            server_info: None,
             created_at: now,
             last_active: now,
             request_count: count,
