@@ -23,10 +23,12 @@ pub mod types;
 
 use std::sync::Arc;
 
+use axum::http::request::Parts as RequestParts;
+use axum::response::Response as AxumResponse;
 use futures_util::StreamExt;
 
 use crate::{
-    protocol::Request,
+    protocol::{Request, session::session_id_from_headers},
     proxy2::{
         stage::{
             router_stage::{RouterOutput, RouterStage},
@@ -108,6 +110,20 @@ impl StagePipeline {
                 Ok(RouterOutput::Stream(parts, Box::pin(mapped)))
             }
         }
+    }
+
+    /// Entry point for `GET` requests with `Accept: text/event-stream`:
+    /// open a long-lived upstream SSE channel for this session and stream
+    /// it back to the client unmodified. Logs the attach for observability
+    /// and skips both stage chains — server-initiated notifications and
+    /// `sampling/createMessage` requests don't fit `JsonRpcResult`, and
+    /// running existing stages over them would only no-op or misclassify.
+    pub async fn process_get_sse(&self, parts: RequestParts) -> anyhow::Result<AxumResponse> {
+        match session_id_from_headers(&parts.headers) {
+            Some(id) => tracing::info!(session_id = %id, "GET SSE opened"),
+            None => tracing::warn!("GET SSE opened without mcp-session-id header"),
+        }
+        self.router_stage.open_get_sse(parts).await
     }
 }
 
