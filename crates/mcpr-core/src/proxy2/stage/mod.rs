@@ -89,7 +89,7 @@ impl StagePipeline {
                 }
                 Ok(RouterOutput::Single(response))
             }
-            RouterOutput::Stream(stream) => {
+            RouterOutput::Stream(parts, stream) => {
                 let stages = Arc::clone(&self.response_stages);
                 let ctx = request_ctx;
                 let state = self.state.clone();
@@ -100,14 +100,12 @@ impl StagePipeline {
                     async move {
                         let mut response = item?;
                         for stage in stages.iter() {
-                            response = stage
-                                .process(response, ctx.clone(), state.clone())
-                                .await?;
+                            response = stage.process(response, ctx.clone(), state.clone()).await?;
                         }
                         Ok(response)
                     }
                 });
-                Ok(RouterOutput::Stream(Box::pin(mapped)))
+                Ok(RouterOutput::Stream(parts, Box::pin(mapped)))
             }
         }
     }
@@ -341,9 +339,8 @@ mod tests {
             }))
             .unwrap();
             // Two frames so the test can assert per-item iteration.
-            let body = format!(
-                "event: message\ndata: {result}\n\nevent: message\ndata: {result}\n\n"
-            );
+            let body =
+                format!("event: message\ndata: {result}\n\nevent: message\ndata: {result}\n\n");
             axum::response::Response::builder()
                 .status(200)
                 .header("content-type", "text/event-stream")
@@ -375,7 +372,7 @@ mod tests {
         );
 
         let output = pipeline.process(mcp_request()).await.unwrap();
-        let RouterOutput::Stream(stream) = output else {
+        let RouterOutput::Stream(_, stream) = output else {
             panic!("expected Stream");
         };
         let mut count = 0;

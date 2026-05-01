@@ -91,7 +91,7 @@ async fn handle_request(
 fn to_axum_response(output: RouterOutput) -> AxumResponse {
     match output {
         RouterOutput::Single(resp) => encode_single(resp),
-        RouterOutput::Stream(stream) => encode_stream(stream),
+        RouterOutput::Stream(parts, stream) => encode_stream(parts, stream),
     }
 }
 
@@ -109,8 +109,21 @@ fn encode_single(resp: Response) -> AxumResponse {
 /// Stream JSON-RPC results back to the client as SSE: one frame per
 /// yielded `Response::Mcp`, no buffering. Items that aren't `Mcp`
 /// (router shouldn't produce any in a stream) become an io::Error,
-/// which axum surfaces as a stream error and closes the body.
-fn encode_stream(stream: BoxStream<'static, anyhow::Result<Response>>) -> AxumResponse {
+/// which axum surfaces as a stream error and closes the body. Forwards
+/// the upstream's response headers (`mcp-session-id`, `Set-Cookie`,
+/// status, etc.) without waiting for the first frame, so session
+/// negotiation works on the initial response.
+fn encode_stream(
+    mut parts: axum::http::response::Parts,
+    stream: BoxStream<'static, anyhow::Result<Response>>,
+) -> AxumResponse {
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    parts.headers.remove(axum::http::header::TRANSFER_ENCODING);
+    parts.headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream"),
+    );
+
     let body_stream = stream.map(|item| -> Result<Bytes, std::io::Error> {
         match item {
             Ok(Response::Mcp(_, result)) => Ok(sse::encode_one(&result)),
@@ -119,12 +132,13 @@ fn encode_stream(stream: BoxStream<'static, anyhow::Result<Response>>) -> AxumRe
         }
     });
     let body = axum::body::Body::from_stream(body_stream);
+
     let mut resp = AxumResponse::new(body);
-    *resp.status_mut() = axum::http::StatusCode::OK;
-    resp.headers_mut().insert(
-        axum::http::header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("text/event-stream"),
-    );
+    *resp.status_mut() = parts.status;
+    let resp_headers = resp.headers_mut();
+    for (name, value) in parts.headers.iter() {
+        resp_headers.insert(name, value.clone());
+    }
     resp
 }
 
@@ -302,13 +316,20 @@ mod tests {
 
     /// Build a `RouterOutput::Stream` from a fixed list of `JsonRpcResult`s.
     fn stream_output(results: Vec<JsonRpcResult>) -> RouterOutput {
-        let parts = parts_with("text/event-stream");
+        stream_output_with_parts(parts_with("text/event-stream"), results)
+    }
+
+    fn stream_output_with_parts(
+        parts: axum::http::response::Parts,
+        results: Vec<JsonRpcResult>,
+    ) -> RouterOutput {
+        let parts_for_items = parts.clone();
         let stream = futures_util::stream::iter(
             results
                 .into_iter()
-                .map(move |r| Ok(Response::Mcp(parts.clone(), r))),
+                .map(move |r| Ok(Response::Mcp(parts_for_items.clone(), r))),
         );
-        RouterOutput::Stream(Box::pin(stream))
+        RouterOutput::Stream(parts, Box::pin(stream))
     }
 
     #[tokio::test]
@@ -343,5 +364,44 @@ mod tests {
                 serde_json::to_value(expected).unwrap()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__stream_preserves_mcp_session_id() {
+        // Regression: the Inspector observed "No valid session ID" because
+        // the stream encoder was dropping upstream response headers. The
+        // encoder must forward `mcp-session-id` (and other negotiation
+        // headers) before the first frame so subsequent client requests
+        // can use the session.
+        let mut parts = parts_with("text/event-stream");
+        parts
+            .headers
+            .insert("mcp-session-id", HeaderValue::from_static("sess-xyz"));
+        parts
+            .headers
+            .insert("set-cookie", HeaderValue::from_static("k=v; Path=/"));
+        let resp = to_axum_response(stream_output_with_parts(parts, vec![rpc_result(1)]));
+        assert_eq!(resp.headers()["mcp-session-id"], "sess-xyz");
+        assert_eq!(resp.headers()["set-cookie"], "k=v; Path=/");
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    }
+
+    #[tokio::test]
+    async fn to_axum_response__stream_strips_content_length_and_transfer_encoding() {
+        let mut parts = parts_with("text/event-stream");
+        parts
+            .headers
+            .insert("content-length", HeaderValue::from_static("999"));
+        parts
+            .headers
+            .insert("transfer-encoding", HeaderValue::from_static("chunked"));
+        let resp = to_axum_response(stream_output_with_parts(parts, vec![rpc_result(1)]));
+        assert!(!resp.headers().contains_key("transfer-encoding"));
+        let cl = resp
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<usize>().ok());
+        assert_ne!(cl, Some(999));
     }
 }

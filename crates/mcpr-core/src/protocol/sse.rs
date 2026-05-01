@@ -169,7 +169,8 @@ impl FrameParser {
         match field {
             b"event" => {
                 self.event.clear();
-                self.event.push_str(std::str::from_utf8(value).unwrap_or(""));
+                self.event
+                    .push_str(std::str::from_utf8(value).unwrap_or(""));
             }
             b"data" => {
                 if self.data_seen {
