@@ -18,4 +18,5 @@ pub mod config;
 pub mod event;
 pub mod protocol;
 pub mod proxy2;
+pub mod timer;
 pub mod utils;

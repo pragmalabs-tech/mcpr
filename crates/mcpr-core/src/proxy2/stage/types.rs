@@ -20,6 +20,7 @@ use crate::{
         session::{SessionId, session_id_from_headers},
     },
     proxy2::state::ProxyState,
+    timer::Timer,
 };
 
 /// Per-request metadata threaded through both stage chains. Cheap to
@@ -38,10 +39,18 @@ pub struct RequestContext {
     /// with the real client metadata at the moment the server returns
     /// `mcp-session-id`.
     pub initialize: Option<(RequestId, ClientInfo)>,
-    /// Inbound was an HTTP `DELETE` carrying a session id — the spec's
+    /// Inbound was an HTTP `DELETE` carrying a session id - the spec's
     /// session-close signal. Triggers `end_session` when its response
     /// comes back.
     pub is_session_close: bool,
+    /// Proxy-internal request id. UUID minted at pipeline entry, used
+    /// to correlate logs and metrics across stages and the upstream
+    /// call. Distinct from any MCP `RequestId`, which is client-supplied.
+    pub request_id: String,
+    /// Per-stage timing recorder. Stages call `track_start` /
+    /// `track_end` to mark spans; the pipeline can dump it after the
+    /// response comes back to attribute latency to specific stages.
+    pub timer: Timer,
 }
 
 impl RequestContext {
@@ -65,6 +74,8 @@ impl RequestContext {
                     session_id: session_id_from_headers(&parts.headers),
                     initialize,
                     is_session_close: false,
+                    request_id: new_request_id(),
+                    timer: Timer::new(),
                 }
             }
             Request::McpBatch(parts, rpcs) => Self {
@@ -73,16 +84,20 @@ impl RequestContext {
                     .map(|r| (r.id.clone(), r.method.clone()))
                     .collect(),
                 session_id: session_id_from_headers(&parts.headers),
-                // Batches can't carry initialize per spec — the lifecycle
+                // Batches can't carry initialize per spec - the lifecycle
                 // request is single-shot. Skip the scan.
                 initialize: None,
                 is_session_close: false,
+                request_id: new_request_id(),
+                timer: Timer::new(),
             },
             Request::Http(http) => Self {
                 client_methods: HashMap::new(),
                 session_id: session_id_from_headers(http.headers()),
                 initialize: None,
                 is_session_close: http.method() == Method::DELETE,
+                request_id: new_request_id(),
+                timer: Timer::new(),
             },
         }
     }
@@ -90,6 +105,10 @@ impl RequestContext {
     pub fn get_method(&self, request_id: &RequestId) -> Option<&ClientMethod> {
         self.client_methods.get(request_id)
     }
+}
+
+fn new_request_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 #[async_trait]
