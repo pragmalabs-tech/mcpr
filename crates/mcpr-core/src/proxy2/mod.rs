@@ -72,6 +72,20 @@ async fn handle_request(
     State(pipeline): State<Arc<StagePipeline>>,
     req: AxumRequest,
 ) -> AxumResponse {
+    if req.method() == axum::http::Method::GET
+        && is_event_stream(req.headers().get(axum::http::header::ACCEPT))
+    {
+        let (parts, _body) = req.into_parts();
+        return match pipeline.process_get_sse(parts).await {
+            Ok(resp) => resp,
+            Err(e) => (
+                axum::http::StatusCode::BAD_GATEWAY,
+                format!("upstream: {e}"),
+            )
+                .into_response(),
+        };
+    }
+
     let parsed = match Request::from_axum(req).await {
         Ok(r) => r,
         Err(e) => {
@@ -403,5 +417,116 @@ mod tests {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<usize>().ok());
         assert_ne!(cl, Some(999));
+    }
+
+    // ── handle_request: GET SSE branching ─────────────────────
+
+    use crate::event::EventBus;
+    use crate::proxy2::csp::CspConfig;
+    use crate::proxy2::stage::router_stage::RouterStage;
+    use axum::extract::{Request as AxumRequestExtract, State as AxumState};
+    use axum::routing::get as axum_get;
+
+    fn pipeline_for(url: &str) -> Arc<StagePipeline> {
+        let cfg = Arc::new(ProxyConfig {
+            name: "test".into(),
+            mcp: url.to_string(),
+            port: None,
+            csp: CspConfig::default(),
+            max_request_body_size: None,
+            max_response_body_size: None,
+            max_concurrent_upstream: None,
+            connect_timeout: None,
+            request_timeout: None,
+        });
+        Arc::new(StagePipeline::new(
+            vec![],
+            vec![],
+            RouterStage::new(cfg).unwrap(),
+            Arc::new(InnerProxyState::new(
+                EventBus::for_tests(),
+                SessionStore::new(),
+            )),
+        ))
+    }
+
+    async fn spawn_upstream(router: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn get_request(uri: &str, accept: Option<&str>) -> AxumRequestExtract {
+        let mut builder = axum::http::Request::builder().method("GET").uri(uri);
+        if let Some(a) = accept {
+            builder = builder.header("accept", a);
+        }
+        builder.body(axum::body::Body::empty()).unwrap()
+    }
+
+    async fn spawn_get_sse_upstream() -> String {
+        async fn handler() -> AxumResponse {
+            let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\n";
+            AxumResponse::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        }
+        spawn_upstream(Router::new().route("/", axum_get(handler))).await
+    }
+
+    #[tokio::test]
+    async fn handle_request__get_with_event_stream_accept_opens_sse() {
+        let url = spawn_get_sse_upstream().await;
+        let pipeline = pipeline_for(&url);
+
+        let req = get_request("/", Some("text/event-stream"));
+        let resp = handle_request(AxumState(pipeline), req).await;
+
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+        let body = body_string(resp).await;
+        assert!(body.contains("notifications/tools/list_changed"));
+    }
+
+    #[tokio::test]
+    async fn handle_request__plain_get_falls_back_to_http_path() {
+        // Plain GET (no SSE Accept) goes through Request::from_axum →
+        // Request::Http → handle_http_request, which forwards verbatim.
+        // Upstream returns plain text; if the SSE branch had taken it,
+        // content-type would be text/event-stream.
+        async fn handler() -> AxumResponse {
+            AxumResponse::builder()
+                .status(200)
+                .header("content-type", "text/plain")
+                .body(axum::body::Body::from("hello"))
+                .unwrap()
+        }
+        let url = spawn_upstream(Router::new().route("/", axum_get(handler))).await;
+        let pipeline = pipeline_for(&url);
+
+        let req = get_request("/", None);
+        let resp = handle_request(AxumState(pipeline), req).await;
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["content-type"], "text/plain");
+        assert_eq!(body_string(resp).await, "hello");
+    }
+
+    #[tokio::test]
+    async fn handle_request__get_sse_is_path_agnostic() {
+        // Inbound URI path is irrelevant — dispatch is method + Accept.
+        // Upstream URL determines where the proxy sends; the inbound path
+        // is not inspected.
+        let url = spawn_get_sse_upstream().await;
+        let pipeline = pipeline_for(&url);
+
+        let req = get_request("/anything/at/all", Some("text/event-stream"));
+        let resp = handle_request(AxumState(pipeline), req).await;
+
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
     }
 }

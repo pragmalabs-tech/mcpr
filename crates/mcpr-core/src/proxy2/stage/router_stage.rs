@@ -12,13 +12,15 @@
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::body::Body as AxumBody;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts as RequestParts;
 use axum::http::response::Parts as ResponseParts;
+use axum::response::Response as AxumResponse;
 use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
 use http::{HeaderMap, HeaderName};
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use http_body_util::{BodyDataStream, BodyExt, Full, combinators::BoxBody};
 use hyper::Method;
 
 use crate::{
@@ -27,6 +29,7 @@ use crate::{
         http_request::HttpRequest,
         is_event_stream,
         mcp::{JsonRpcRequest, JsonRpcResult},
+        session::session_id_from_headers,
         sse,
     },
     proxy2::{proxy_config::ProxyConfig, state::ProxyState, upstream::pool::UpstreamPool},
@@ -93,6 +96,61 @@ impl RouterStage {
             Request::Http(req) => handle_http_request(req, &state, &self.pool).await,
         }
     }
+
+    /// Open an upstream `GET` SSE stream for the inbound `mcp-session-id`
+    /// and pipe its body straight back to the client. Bypasses the
+    /// `Response` enum and the response stage chain: notifications and
+    /// server-initiated requests don't fit `JsonRpcResult`, so frames flow
+    /// as raw bytes. Sharded by session id (or a per-stream UUID if the
+    /// header is absent) so all traffic for a session rides one H2
+    /// connection.
+    pub async fn open_get_sse(&self, parts: RequestParts) -> anyhow::Result<AxumResponse> {
+        let session_id = session_id_from_headers(&parts.headers)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+        let mut builder = hyper::Request::builder()
+            .method(Method::GET)
+            .uri(self.pool.upstream().url.as_str())
+            .header(hyper::header::ACCEPT, "text/event-stream");
+        builder = forward_request_headers(builder, &parts.headers);
+        let upstream_req = builder.body(box_full(Bytes::new()))?;
+
+        let resp = self
+            .pool
+            .pick(session_id.as_str())
+            .request(upstream_req)
+            .await?;
+        Ok(passthrough_sse(resp))
+    }
+}
+
+/// Forward an upstream SSE response body through to the client. Strips
+/// hop-by-hop headers (notably `connection: close`, which would make the
+/// client tear down its socket after headers) and `content-length` (axum
+/// sets framing itself for streaming bodies). Status and remaining headers
+/// — `content-type`, `mcp-session-id`, `set-cookie`, `cache-control` — flow
+/// through unchanged.
+fn passthrough_sse(resp: hyper::Response<hyper::body::Incoming>) -> AxumResponse {
+    let (mut parts, body) = resp.into_parts();
+    let to_remove: Vec<HeaderName> = parts
+        .headers
+        .keys()
+        .filter(|name| is_hop_by_hop(name))
+        .cloned()
+        .collect();
+    for name in to_remove {
+        parts.headers.remove(&name);
+    }
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+
+    let body_stream = BodyDataStream::new(body)
+        .map(|chunk| chunk.map_err(|e| std::io::Error::other(e.to_string())));
+    let body = AxumBody::from_stream(body_stream);
+
+    let mut resp = AxumResponse::new(body);
+    *resp.status_mut() = parts.status;
+    *resp.headers_mut() = parts.headers;
+    resp
 }
 
 async fn handle_mcp_requests(
@@ -278,7 +336,12 @@ mod tests {
         proxy2::state::InnerProxyState,
     };
     use axum::{
-        Router, body::Bytes as AxumBytes, http::HeaderMap, response::IntoResponse, routing::post,
+        Router,
+        body::Bytes as AxumBytes,
+        extract::State as AxumState,
+        http::HeaderMap,
+        response::IntoResponse,
+        routing::{get as axum_get, post},
     };
     use serde_json::{Value, json};
     use std::sync::{Arc, Mutex};
@@ -684,5 +747,179 @@ mod tests {
         let (parts, _) = drain_stream(classify_upstream(resp).await.unwrap()).await;
         assert_eq!(parts.headers["mcp-session-id"], "sess-xyz");
         assert_eq!(parts.headers["set-cookie"], "k=v; Path=/");
+    }
+
+    // ── GET SSE ───────────────────────────────────────────────
+
+    fn get_request_parts(headers: &[(&str, &str)]) -> RequestParts {
+        let mut builder = axum::http::Request::builder().method("GET").uri("/");
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        builder.body(()).unwrap().into_parts().0
+    }
+
+    async fn drain_axum_body(resp: AxumResponse) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// Two server-initiated notifications — neither parses as
+    /// `JsonRpcResult`. The whole point of GET SSE is to forward these,
+    /// so the test body uses them instead of result-shaped frames.
+    async fn spawn_get_sse_notifications() -> String {
+        async fn handler() -> AxumResponse {
+            let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\"}}\n\n";
+            AxumResponse::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        }
+        spawn_upstream(Router::new().route("/", axum_get(handler))).await
+    }
+
+    #[tokio::test]
+    async fn open_get_sse__forwards_notifications_unmodified() {
+        let url = spawn_get_sse_notifications().await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let resp = stage
+            .open_get_sse(get_request_parts(&[("mcp-session-id", "sess-1")]))
+            .await
+            .unwrap();
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+
+        let body = drain_axum_body(resp).await;
+        assert!(body.contains("notifications/tools/list_changed"));
+        assert!(body.contains("notifications/message"));
+        assert_eq!(body.matches("event: message").count(), 2);
+    }
+
+    #[tokio::test]
+    async fn open_get_sse__forwards_session_and_last_event_id_headers() {
+        async fn handler(
+            AxumState(captured): AxumState<Arc<Mutex<HeaderMap>>>,
+            headers: HeaderMap,
+        ) -> AxumResponse {
+            *captured.lock().unwrap() = headers;
+            AxumResponse::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from("event: message\ndata: {}\n\n"))
+                .unwrap()
+        }
+        let captured = Arc::new(Mutex::new(HeaderMap::new()));
+        let app = Router::new()
+            .route("/", axum_get(handler))
+            .with_state(captured.clone());
+        let url = spawn_upstream(app).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        stage
+            .open_get_sse(get_request_parts(&[
+                ("mcp-session-id", "sess-xyz"),
+                ("last-event-id", "42"),
+                ("authorization", "Bearer abc"),
+            ]))
+            .await
+            .unwrap();
+
+        let h = captured.lock().unwrap();
+        assert_eq!(h["mcp-session-id"], "sess-xyz");
+        assert_eq!(h["last-event-id"], "42");
+        assert_eq!(h["authorization"], "Bearer abc");
+        assert_eq!(h["accept"], "text/event-stream");
+    }
+
+    #[tokio::test]
+    async fn open_get_sse__preserves_upstream_status_and_headers() {
+        async fn handler() -> AxumResponse {
+            AxumResponse::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .header("mcp-session-id", "sess-xyz")
+                .header("set-cookie", "k=v; Path=/")
+                .body(axum::body::Body::from("event: message\ndata: {}\n\n"))
+                .unwrap()
+        }
+        let url = spawn_upstream(Router::new().route("/", axum_get(handler))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let resp = stage.open_get_sse(get_request_parts(&[])).await.unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["mcp-session-id"], "sess-xyz");
+        assert_eq!(resp.headers()["set-cookie"], "k=v; Path=/");
+        assert!(!resp.headers().contains_key("transfer-encoding"));
+    }
+
+    #[tokio::test]
+    async fn open_get_sse__upstream_405_passes_through() {
+        async fn handler() -> AxumResponse {
+            AxumResponse::builder()
+                .status(405)
+                .body(axum::body::Body::from(""))
+                .unwrap()
+        }
+        let url = spawn_upstream(Router::new().route("/", axum_get(handler))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let resp = stage.open_get_sse(get_request_parts(&[])).await.unwrap();
+        assert_eq!(resp.status(), 405);
+    }
+
+    /// Mirrors the real Inspector scenario: upstream responds with SSE
+    /// headers immediately, then idles indefinitely waiting for events.
+    /// The proxy must return the response (with headers) without waiting
+    /// for the first body frame.
+    #[tokio::test]
+    async fn open_get_sse__returns_headers_before_first_frame() {
+        async fn handler() -> AxumResponse {
+            let stream = futures_util::stream::pending::<Result<bytes::Bytes, std::io::Error>>();
+            AxumResponse::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from_stream(stream))
+                .unwrap()
+        }
+        let url = spawn_upstream(Router::new().route("/", axum_get(handler))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stage.open_get_sse(get_request_parts(&[("mcp-session-id", "sess-1")])),
+        )
+        .await
+        .expect("response headers should arrive without waiting on body")
+        .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    }
+
+    /// Hop-by-hop headers (e.g. `connection: close`) from upstream must
+    /// not leak through — they cause clients to tear down the socket
+    /// after the response head, which surfaces as ECONNRESET.
+    #[tokio::test]
+    async fn open_get_sse__strips_upstream_hop_by_hop_headers() {
+        async fn handler() -> AxumResponse {
+            AxumResponse::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .header("connection", "close")
+                .header("keep-alive", "timeout=5")
+                .body(axum::body::Body::from("event: message\ndata: {}\n\n"))
+                .unwrap()
+        }
+        let url = spawn_upstream(Router::new().route("/", axum_get(handler))).await;
+        let stage = RouterStage::new(config_for(&url)).unwrap();
+
+        let resp = stage.open_get_sse(get_request_parts(&[])).await.unwrap();
+        assert!(!resp.headers().contains_key("connection"));
+        assert!(!resp.headers().contains_key("keep-alive"));
+        assert_eq!(resp.headers()["content-type"], "text/event-stream");
     }
 }
