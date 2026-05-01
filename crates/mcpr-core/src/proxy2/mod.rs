@@ -17,7 +17,7 @@ use tower_http::cors::CorsLayer;
 use crate::{
     event::EventBus,
     protocol::{Request, Response, is_event_stream, mcp::JsonRpcResult, sse},
-    proxy2::stage::session_stage::SessionStage,
+    proxy2::stage::session_tracking_stage::SessionTrackingStage,
 };
 use crate::{
     protocol::session::SessionStore,
@@ -26,7 +26,7 @@ use crate::{
         stage::{
             StagePipeline,
             csp_rewritten_stage::{CspRewriteConfig, CspRewritter},
-            log_stage::{RequestLogStage, ResponseLogStage},
+            request_tracking_stage::{RequestLogStage, ResponseLogStage},
             router_stage::{RouterOutput, RouterStage},
             schema_tracking_stage::SchemaTrackingStage,
             types::{RequestStage, ResponseStage},
@@ -48,7 +48,7 @@ pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<R
     let csp_rewritter = CspRewritter::new(CspRewriteConfig::from_proxy_config(&cfg));
     let router_stage = RouterStage::new(cfg)?;
     let request_stages: Vec<Box<dyn RequestStage>> =
-        vec![Box::new(RequestLogStage), Box::new(SessionStage)];
+        vec![Box::new(RequestLogStage), Box::new(SessionTrackingStage)];
     let response_stages: Vec<Box<dyn ResponseStage>> = vec![
         Box::new(SchemaTrackingStage),
         Box::new(csp_rewritter),

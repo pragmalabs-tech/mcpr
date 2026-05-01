@@ -15,10 +15,10 @@ use crate::{
     },
 };
 
-pub struct SessionStage;
+pub struct SessionTrackingStage;
 
 #[async_trait]
-impl RequestStage for SessionStage {
+impl RequestStage for SessionTrackingStage {
     async fn process(
         &self,
         request: Request,
