@@ -20,30 +20,74 @@ scripts/bench-weather.sh
 Results land in `results/` (gitignored). Commit a snapshot in `reports/`
 if the numbers are worth keeping.
 
-## What it measures
+## Flow
 
-One real rmcp session per worker:
+```
+                       bench-weather.sh
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+  start_weather_app     start_proxy            session-bench
+  (lib.sh)              (lib.sh)               (Rust binary)
+        │                     │                     │
+        ▼                     ▼                     ▼
+   tsx server.ts         mcpr proxy run         reqwest POST loop
+   :9001/mcp             :9100 -> :9001         direct, then proxied
+```
 
-1. `initialize` (handled automatically by `rmcp::ServiceExt::serve`).
-2. Loop `tools/call get_weather { "city": "Tokyo" }` until the deadline.
+1. **`start_weather_app`** runs `examples/weather-app/server.ts` via
+   `tsx`. The captured PID is the Node server itself (not an `npm`
+   wrapper) so teardown kills it cleanly. Probes `/health` until ready.
+2. **`start_proxy`** clears any leftover `bench` lock, then runs
+   `mcpr proxy run configs/bench.toml` backgrounded. Probes
+   `:9100/mcp` with a `ping` POST until the proxy answers.
+3. **`session-bench`** is invoked twice: once with `--url :9001/mcp`
+   (direct), once with `--url :9100/mcp` (proxied). Per worker:
+    - POST `initialize`, capture `mcp-session-id` response header.
+    - POST `notifications/initialized` (best-effort, expects `202`).
+    - Loop POST `tools/call get_weather { "city": "Tokyo" }` with that
+      session ID until the deadline. Record elapsed µs per call.
+4. **Teardown** runs on `EXIT`/`INT`/`TERM`: kills mcpr, kills tsx,
+   `mcpr proxy stop bench` to clear the lockfile.
 
-Per-call latency samples are taken after the warmup window. The script
-runs the loop twice: once against the weather-app directly
-(`:9001/mcp`), once through mcpr (`:9100/mcp`). Both reports are written
-to `results/`.
+The Rust binary is plain `reqwest` over HTTP — no `rmcp` client, no SSE
+state machine. That keeps the bench resilient to client-library quirks
+and isolates the measurement to wire-level round-trip cost.
+
+## Measurement window
+
+Two timestamps gate each loop:
+
+```
+deadline           = now + warmup + duration
+measurement_start  = now + warmup
+```
+
+Calls before `measurement_start` count toward `total ops` but are
+dropped from the latency samples. Defaults: 2 s warmup, 10 s window.
+
+Per side the report is:
+
+```
+samples         number of latency samples (post-warmup)
+total ops       attempted requests (warmup + window)
+errors          non-2xx or transport failures
+req/s (window)  samples / window
+p50/p95/p99     latency in microseconds, by index over sorted samples
+```
 
 ## Knobs
 
-| Var           | Default              | Notes                                |
-|---------------|----------------------|--------------------------------------|
-| `MCPR_BIN`    | `mcpr` (PATH)        | Set to `target/release/mcpr` for dev |
-| `CONNECTIONS` | `1`                  | Concurrent rmcp sessions             |
-| `DURATION`    | `10s`                | Measurement window per side          |
-| `WARMUP`      | `2s`                 | Skipped before sampling              |
-| `TOOL`        | `get_weather`        | Tool name to invoke                  |
-| `ARGS`        | `{"city":"Tokyo"}`   | JSON arguments object                |
-| `UPSTREAM_PORT` | `9001`             | Weather-app port                     |
-| `PROXY_PORT`  | `9100`               | mcpr port                            |
+| Var             | Default              | Notes                                |
+|-----------------|----------------------|--------------------------------------|
+| `MCPR_BIN`      | `mcpr` (PATH)        | Set via `eval "$(scripts/use-local.sh)"` for dev builds |
+| `CONNECTIONS`   | `1`                  | Concurrent sessions; each opens its own |
+| `DURATION`      | `10s`                | Measurement window per side          |
+| `WARMUP`        | `2s`                 | Skipped before sampling              |
+| `TOOL`          | `get_weather`        | Tool name to invoke                  |
+| `ARGS`          | `{"city":"Tokyo"}`   | JSON arguments object                |
+| `UPSTREAM_PORT` | `9001`               | Weather-app port                     |
+| `PROXY_PORT`    | `9100`               | mcpr port                            |
 
 ## Rules for honest numbers
 
@@ -57,7 +101,7 @@ to `results/`.
 ## Layout
 
 ```
-src/bin/session_bench.rs   rmcp client: initialize + tools/call loop
+src/bin/session_bench.rs   reqwest-based HTTP load driver
 scripts/bench-weather.sh   single bench scenario (direct vs proxied)
 scripts/lib.sh             shared start/wait/teardown plumbing
 scripts/use-local.sh       cargo build + export MCPR_BIN
@@ -66,5 +110,6 @@ reports/                   committed reference runs
 results/                   per-run output (gitignored)
 ```
 
-The upstream is the actual `examples/weather-app` server. `bench-weather.sh`
-runs `npm install` once and `npm start` automatically.
+The upstream is the actual `examples/weather-app` server.
+`start_weather_app` runs `npm install` once on first invocation, then
+launches `tsx server.ts` directly on every run.

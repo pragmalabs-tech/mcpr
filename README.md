@@ -8,15 +8,36 @@
 [![codecov](https://codecov.io/gh/pragmalabs-tech/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/pragmalabs-tech/mcpr)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**Observability-first proxy for MCP servers.** Per-tool metrics, session capture, and schema tracking in a single Rust binary — with [~1ms p99](benches/reports/v0.4.42-post-refactor.md) overhead. Sits in front of your MCP app and records every JSON-RPC call to a local SQLite store.
-
-<img src="docs/assets/mcpr-demo.gif" alt="mcpr proxy status showing per-tool metrics" />
+**Observability-first proxy for MCP servers.** A single Rust binary that sits in front of your MCP app and records every JSON-RPC call to a local SQLite store: per-tool latency, session traces, schema diffs, client breakdowns. 
 
 </div>
 
 ## Quickstart
 
-Run mcpr in front of an MCP server with Docker:
+### Install
+
+```bash
+curl -fsSL https://mcpr.app/install.sh | sh
+```
+
+Detects your OS and architecture, downloads the latest release from GitHub, installs to `$HOME/.local/bin/mcpr`, and adds that directory to your shell PATH. Override the destination with `MCPR_INSTALL_DIR=/usr/local/bin` if you prefer. Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon) are supported. Manual tarballs are attached to every [GitHub release](https://github.com/pragmalabs-tech/mcpr/releases).
+
+### Run
+
+```bash
+cat > mcpr.toml <<'EOF'
+mcp = "http://localhost:9000"
+port = 3000
+EOF
+
+mcpr proxy run mcpr.toml
+```
+
+Traffic flows through `http://localhost:3000`. `mcpr proxy run` is a foreground process: your supervisor (systemd, Docker, `child_process.spawn`) owns the lifecycle. SIGTERM drains gracefully.
+
+To stream events into the cloud dashboard, run `mcpr proxy setup` once.
+
+### Docker
 
 ```bash
 cat > mcpr.toml <<'EOF'
@@ -31,13 +52,7 @@ docker run -d --name mcpr \
   ghcr.io/pragmalabs-tech/mcpr:latest
 ```
 
-Traffic flows through `http://localhost:3000`. See [docs/DOCKER.md](docs/DOCKER.md) for volumes, environment variables, and compose / Kubernetes examples, and [`docker-compose.yml`](docker-compose.yml) for the sidecar pattern.
-
-To stream logs and metrics into the cloud dashboard, run `docker exec mcpr mcpr proxy setup` after the container is up.
-
-### Native binary
-
-Prebuilt binaries for Linux and macOS are attached to every [GitHub release](https://github.com/pragmalabs-tech/mcpr/releases). Download the archive for your target, extract `mcpr`, and put it on `$PATH`. Then run `mcpr proxy run mcpr.toml` directly.
+See [docs/DOCKER.md](docs/DOCKER.md) for volumes, environment variables, and compose / Kubernetes examples, and [`docker-compose.yml`](docker-compose.yml) for the sidecar pattern.
 
 ---
 
@@ -55,84 +70,18 @@ Running in front of [mcp.usestudykit.com/mcp](https://mcp.usestudykit.com/mcp) t
 
 ## Observe
 
-mcpr capture all mcp request — tool name, latency, status, error code, request/response size, session ID. All `mcpr proxy` query commands read from this store directly — no long-lived process required. Use `mcpr proxy help` to see all observe supporting commands.
+Every JSON-RPC request that flows through mcpr lands in `~/.mcpr/store.db`: tool name, latency, status, error code, request/response size, session ID, server/client info captured on `initialize`, and full `tools/list` / `resources/list` / `prompts/list` responses for schema tracking.
 
-### Per-tool metrics
+### Local SQLite
 
-```bash
-$ mcpr proxy status
-STATUS — localhost-9000 — last 1h
-
-  Total requests:    1,284
-  Error rate:        2.3%
-  Sessions:          12 total   3 active
-
-  TOOL                  CALLS      AVG      P95      MAX   ERRORS   BYTES IN  BYTES OUT
-  get_weather             412    45ms    120ms    340ms      0%     48.2 KB    196.8 KB
-  search_docs             389    82ms    210ms    890ms     1.5%    92.1 KB    1.2 MB
-  run_query               156   240ms    890ms   2.40s      8.3%   128.4 KB    2.8 MB
-```
-
-### Request logs
+The store at `~/.mcpr/store.db` is the source of truth. Inspect it directly with the `sqlite3` CLI for ad-hoc analysis, or use:
 
 ```bash
-mcpr proxy logs --tool search_docs --status error    # failed calls to search_docs
-mcpr proxy logs --follow                             # live tail (polls every 500ms)
-mcpr proxy logs --session abc123                     # filter by session (prefix match)
-mcpr proxy logs --method tools/call                  # filter by MCP method
-mcpr proxy logs --since 30m --tail 100               # last 30 minutes, 100 rows
+mcpr store stats             # row counts, oldest/newest events, db size
+mcpr store vacuum            # delete old records and reclaim disk
 ```
 
-### Slow calls
-
-```bash
-$ mcpr proxy slow --threshold 500ms
-  TOOL              LATENCY    TIME                   STATUS
-  run_query          2.40s     2025-04-10 14:20:12    ok
-  run_query          1.80s     2025-04-10 14:18:45    ok
-  search_docs         890ms    2025-04-10 14:15:33    error
-```
-
-### Schema capture
-
-mcpr intercepts `tools/list`, `resources/list`, and `prompts/list` responses as they pass through. It stores the server's schema and records each change.
-
-```bash
-$ mcpr proxy schema
-Server: my-mcp-server v1.2.0 (MCP 2025-03-26)
-Capabilities: tools, resources
-Schema: complete
-Last captured: 2026-04-12 14:30:00
-
-── tools/list ──
-  Tools (3):
-    search_products  —  Search the product catalog by keyword
-    get_product      —  Get product details by ID
-    create_order     —  Create a new order
-```
-
-```bash
-$ mcpr proxy schema --changes
-  TIME                  METHOD        CHANGE           ITEM
-  2026-04-12 14:30:00   tools/list    tool_added       send_email
-  2026-04-10 09:15:00   tools/list    tool_modified    search_products
-```
-
-`mcpr proxy schema --unused` compares listed tools against actual call logs to find tools that are registered but never called.
-
-### Sessions and clients
-
-```bash
-$ mcpr proxy sessions
-  SESSION    CLIENT                 STARTED         CALLS   ERRS
-  a1b2c3d4   claude-desktop 1.2.0   Apr 10 14:20      45      2
-  e5f6g7h8   cursor 0.48.0          Apr 10 14:15      23      0
-
-$ mcpr proxy clients
-  CLIENT              VERSION    PLATFORM   SESSIONS    CALLS   ERRORS
-  claude-desktop      1.2.0      claude           12    4,201        8
-  cursor              0.44.1     cursor            3      891        0
-```
+Schema is documented in [docs/CLI.md](docs/CLI.md).
 
 ---
 
@@ -148,30 +97,30 @@ To proxy multiple MCP servers, write one `mcpr.toml` per upstream and launch eac
 
 ### Widget CSP
 
-mcpr applies widget CSP in both shapes — the legacy OpenAI per-widget format and the current MCP standard — so a single config block works for both Claude and ChatGPT.
+mcpr applies widget CSP in both shapes (the legacy OpenAI per-widget format and the current MCP standard), so a single config block works for both Claude and ChatGPT.
 
 ```toml
 [csp]
-# Public host the proxy is reachable on — written into the OpenAI
+# Public host the proxy is reachable on. Written into the OpenAI
 # `widgetDomain` field. `_meta.ui.domain` is left to Claude, which
 # derives that field from the proxy URL itself and rejects values
 # supplied by anything in front of it.
 domain = "widgets.example.com"
 
-# Lands in `connect-src` — fetch / WebSocket / EventSource targets.
+# Lands in `connect-src` (fetch / WebSocket / EventSource targets).
 # `extend` merges with whatever the upstream MCP server declared;
 # `replace` ignores upstream.
 [csp.connectDomains]
 domains = ["api.example.com"]
 mode    = "extend"
 
-# Lands in `script-src`, `style-src`, `img-src`, `font-src`, `media-src`
-# — one bucket for everything the widget loads. Same merge semantics.
+# Lands in `script-src`, `style-src`, `img-src`, `font-src`, `media-src`:
+# one bucket for everything the widget loads. Same merge semantics.
 [csp.resourceDomains]
 domains = ["cdn.example.com"]
 mode    = "extend"
 
-# Lands in `frame-src` — nested iframes. Defaults to `replace` so
+# Lands in `frame-src` (nested iframes). Defaults to `replace` so
 # upstream cannot silently widen this directive.
 [csp.frameDomains]
 domains = []
@@ -197,25 +146,16 @@ mode = "oauth2.1"           # or "api_key"
 provider = "google"         # google, github, bring-your-own
 ```
 
-Track progress in the [Auth roadmap](#roadmap) below. Open an issue if your provider isn't covered.
-
----
-
-## mcpr cloud dashboard (Optional)
-
-For a shared web UI instead of CLI access, [cloud.mcpr.app](https://cloud.mcpr.app) ingests events from your proxies — metadata only (tool name, latency, status, sizes). We don't sync request and response bodies.
-
-Data flows one way: proxy → cloud, pushed via a project token from `mcpr proxy setup`. Your local SQLite remains the source of truth.
-
-![mcpr cloud dashboard](docs/assets/cloud-dashboard.png)
+Track progress in the [Roadmap](#roadmap) below. Open an issue if your provider isn't covered.
 
 ---
 
 ## Reference
 
-- Configuration — [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) (upstream URL, port, tunnel, CSP, cloud sync, logging, limits)
-- CLI — [docs/CLI.md](docs/CLI.md) (proxies, relay, and SQLite queries)
-- Docker — [docs/DOCKER.md](docs/DOCKER.md) (volumes, health probes, compose/Kubernetes)
+- Configuration: [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) (upstream URL, port, tunnel, CSP, cloud sync, logging, limits)
+- CLI: [docs/CLI.md](docs/CLI.md) (`proxy run/stop/list/delete/setup`, `store stats/vacuum`, `relay`)
+- Docker: [docs/DOCKER.md](docs/DOCKER.md) (volumes, health probes, compose/Kubernetes)
+- Bench harness: [benches/README.md](benches/README.md) (initialize + tools/call latency, direct vs proxied)
 
 ---
 
