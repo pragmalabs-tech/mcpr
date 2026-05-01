@@ -2,13 +2,13 @@
 //! inbound traffic in order, `RouterStage` talks to upstream, response
 //! stages mutate outbound traffic in order on the way back.
 //!
-//! TODO: vision is 1 request (has batch mcp requests) → N responses (streaming).
+//! TODO: vision is 1 request (has batch mcp requests) -> N responses (streaming).
 //!  Today `ResponseStage` is invoked once per HTTP response and receives the
 //! whole `Response` (`Mcp` / `McpBatch` / `Http`); every stage that
 //! cares about individual results has to manually match the variant
 //! and iterate. Refactor to per-message: change the trait to
 //! `on_message(JsonRpcResult) -> JsonRpcResult` and have the pipeline
-//! iterate — `Mcp` runs stages once, `McpBatch` runs them N times,
+//! iterate. `Mcp` runs stages once, `McpBatch` runs them N times,
 //! and a future `Response::Stream` runs them per frame as it arrives.
 //! That removes the batch-handling boilerplate, makes per-result
 //! encoding natural, and lets streaming drop in without touching
@@ -21,11 +21,15 @@ pub mod schema_tracking_stage;
 pub mod session_stage;
 pub mod types;
 
+use std::sync::Arc;
+
+use futures_util::StreamExt;
+
 use crate::{
-    protocol::{Request, Response},
+    protocol::Request,
     proxy2::{
         stage::{
-            router_stage::RouterStage,
+            router_stage::{RouterOutput, RouterStage},
             types::{RequestContext, RequestStage, ResponseStage},
         },
         state::ProxyState,
@@ -34,7 +38,7 @@ use crate::{
 
 pub struct StagePipeline {
     request_stages: Vec<Box<dyn RequestStage>>,
-    response_stages: Vec<Box<dyn ResponseStage>>,
+    response_stages: Arc<Vec<Box<dyn ResponseStage>>>,
     router_stage: RouterStage,
     state: ProxyState,
 }
@@ -48,7 +52,7 @@ impl StagePipeline {
     ) -> Self {
         Self {
             request_stages,
-            response_stages,
+            response_stages: Arc::new(response_stages),
             router_stage,
             state,
         }
@@ -58,8 +62,11 @@ impl StagePipeline {
     ///
     /// Builds the `RequestContext` once from the parsed request and
     /// hands a clone to every stage so they can dispatch on the
-    /// originating MCP method without re-parsing.
-    pub async fn process(&self, mut request: Request) -> anyhow::Result<Response> {
+    /// originating MCP method without re-parsing. For
+    /// [`RouterOutput::Stream`], wraps each yielded `Response::Mcp` with
+    /// the response stage chain. Stages keep their existing trait and
+    /// never see the `Stream` itself.
+    pub async fn process(&self, mut request: Request) -> anyhow::Result<RouterOutput> {
         let request_ctx = RequestContext::from_request(&request);
 
         for stage in &self.request_stages {
@@ -68,18 +75,39 @@ impl StagePipeline {
                 .await?;
         }
 
-        let mut response = self
+        let output = self
             .router_stage
             .process(request, self.state.clone())
             .await?;
 
-        for stage in &self.response_stages {
-            response = stage
-                .process(response, request_ctx.clone(), self.state.clone())
-                .await?;
+        match output {
+            RouterOutput::Single(mut response) => {
+                for stage in self.response_stages.iter() {
+                    response = stage
+                        .process(response, request_ctx.clone(), self.state.clone())
+                        .await?;
+                }
+                Ok(RouterOutput::Single(response))
+            }
+            RouterOutput::Stream(parts, stream) => {
+                let stages = Arc::clone(&self.response_stages);
+                let ctx = request_ctx;
+                let state = self.state.clone();
+                let mapped = stream.then(move |item| {
+                    let stages = Arc::clone(&stages);
+                    let ctx = ctx.clone();
+                    let state = state.clone();
+                    async move {
+                        let mut response = item?;
+                        for stage in stages.iter() {
+                            response = stage.process(response, ctx.clone(), state.clone()).await?;
+                        }
+                        Ok(response)
+                    }
+                });
+                Ok(RouterOutput::Stream(parts, Box::pin(mapped)))
+            }
         }
-
-        Ok(response)
     }
 }
 
@@ -88,6 +116,7 @@ impl StagePipeline {
 mod tests {
     use super::*;
     use crate::{
+        protocol::Response,
         protocol::mcp::{
             ClientMethod, JsonRpcRequest, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
         },
@@ -224,6 +253,9 @@ mod tests {
         );
 
         let resp = pipeline.process(mcp_request()).await.unwrap();
+        let RouterOutput::Single(resp) = resp else {
+            panic!("expected Single");
+        };
         assert!(matches!(resp, Response::Mcp(_, JsonRpcResult::Response(_))));
     }
 
@@ -293,5 +325,64 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.to_string().contains("nope"));
+    }
+
+    /// Upstream that returns SSE so RouterOutput::Stream flows through.
+    async fn spawn_sse_upstream() -> String {
+        async fn sse_handler(body: AxumBytes) -> axum::response::Response {
+            let req: Value = serde_json::from_slice(&body).unwrap();
+            let id = req.get("id").cloned().unwrap_or(Value::Null);
+            let result = serde_json::to_string(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {"ok": true},
+            }))
+            .unwrap();
+            // Two frames so the test can assert per-item iteration.
+            let body =
+                format!("event: message\ndata: {result}\n\nevent: message\ndata: {result}\n\n");
+            axum::response::Response::builder()
+                .status(200)
+                .header("content-type", "text/event-stream")
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        }
+        let app = Router::new().route("/", post(sse_handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn process__stream_response_runs_stages_per_yielded_item() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let url = spawn_sse_upstream().await;
+        let stages: Vec<Box<dyn ResponseStage>> = vec![Box::new(TaggedResponseStage {
+            log: log.clone(),
+            tag: "stage",
+        })];
+        let pipeline = StagePipeline::new(
+            vec![],
+            stages,
+            RouterStage::new(config_for(&url)).unwrap(),
+            state(),
+        );
+
+        let output = pipeline.process(mcp_request()).await.unwrap();
+        let RouterOutput::Stream(_, stream) = output else {
+            panic!("expected Stream");
+        };
+        let mut count = 0;
+        futures_util::pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            item.unwrap();
+            count += 1;
+        }
+        assert_eq!(count, 2);
+        // Stage ran once per yielded item.
+        assert_eq!(*log.lock().unwrap(), vec!["stage", "stage"]);
     }
 }

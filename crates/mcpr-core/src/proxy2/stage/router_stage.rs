@@ -1,14 +1,22 @@
 //! Terminal stage: forwards `Request` to upstream via the sharded
-//! HTTP/2 client pool and turns the upstream answer into `Response`.
+//! HTTP/2 client pool and turns the upstream answer into a
+//! [`RouterOutput`]: either a `Single(Response)` (JSON / non-SSE
+//! upstreams, batches, raw HTTP) or a `Stream` of `Response::Mcp`
+//! frames (SSE upstreams). The pipeline runs response stages on the
+//! `Single` value or per yielded item on the `Stream`; `to_axum_response`
+//! encodes accordingly.
+//!
 //! MCP requests are sharded by JSON-RPC id; raw HTTP requests pick a
 //! random shard since they have no session identity.
 
 use std::convert::Infallible;
 use std::sync::Arc;
 
+use axum::http::header::CONTENT_TYPE;
 use axum::http::request::Parts as RequestParts;
 use axum::http::response::Parts as ResponseParts;
 use bytes::Bytes;
+use futures_util::stream::{BoxStream, StreamExt};
 use http::{HeaderMap, HeaderName};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::Method;
@@ -17,10 +25,24 @@ use crate::{
     protocol::{
         Request, Response,
         http_request::HttpRequest,
+        is_event_stream,
         mcp::{JsonRpcRequest, JsonRpcResult},
+        sse,
     },
     proxy2::{proxy_config::ProxyConfig, state::ProxyState, upstream::pool::UpstreamPool},
 };
+
+/// Shape of an upstream response after `RouterStage` decides whether to
+/// buffer it or stream it. `Single` carries a fully-collected
+/// [`Response`]; `Stream` carries a chunked-passthrough sequence of
+/// `Response::Mcp(parts, result)` items, one per dispatched
+/// `event: message` SSE frame, plus the upstream `ResponseParts` so the
+/// encoder can forward response headers (`mcp-session-id`, `Set-Cookie`,
+/// status, etc.) without waiting for the first frame.
+pub enum RouterOutput {
+    Single(Response),
+    Stream(ResponseParts, BoxStream<'static, anyhow::Result<Response>>),
+}
 
 /// Hop-by-hop headers (RFC 7230 §6.1) that must not cross the proxy boundary.
 const HOP_BY_HOP: &[&str] = &[
@@ -58,7 +80,11 @@ impl RouterStage {
 }
 
 impl RouterStage {
-    pub async fn process(&self, request: Request, state: ProxyState) -> anyhow::Result<Response> {
+    pub async fn process(
+        &self,
+        request: Request,
+        state: ProxyState,
+    ) -> anyhow::Result<RouterOutput> {
         match request {
             Request::Mcp(parts, req) => handle_mcp_request(parts, req, &state, &self.pool).await,
             Request::McpBatch(parts, reqs) => {
@@ -72,62 +98,113 @@ impl RouterStage {
 async fn handle_mcp_requests(
     parts: RequestParts,
     requests: Vec<JsonRpcRequest>,
-    state: &ProxyState,
+    _state: &ProxyState,
     pool: &UpstreamPool,
-) -> anyhow::Result<Response> {
+) -> anyhow::Result<RouterOutput> {
+    // JSON-RPC batches map to a JSON array on the wire. SSE upstreams
+    // are rejected per item: a stream doesn't fit array semantics.
     let mut results = Vec::with_capacity(requests.len());
     let mut last_parts: Option<ResponseParts> = None;
 
     for request in requests {
-        let (rp, result) = process_mcp_request(&parts.headers, request, state, pool).await?;
+        let upstream_req = build_mcp_upstream_request(pool, &parts.headers, &request)?;
+        let resp = pool.pick(&request.id).request(upstream_req).await?;
+        let (rp, result) = match Response::from_hyper(resp).await? {
+            Response::Mcp(parts, result) => (parts, result),
+            Response::McpBatch(_, _) => {
+                return Err(anyhow::anyhow!(
+                    "upstream returned a JSON-RPC batch for a single MCP request"
+                ));
+            }
+            Response::Http(http) => {
+                return Err(anyhow::anyhow!(
+                    "upstream returned non-JSON-RPC body (status {})",
+                    http.status()
+                ));
+            }
+        };
         results.push(result);
         last_parts = Some(rp);
     }
 
-    // Use the last upstream response's parts as the batch envelope. Batches
-    // share a single HTTP response, so this is the best approximation.
     let envelope = last_parts.unwrap_or_else(empty_response_parts);
-    Ok(Response::McpBatch(envelope, results))
+    Ok(RouterOutput::Single(Response::McpBatch(envelope, results)))
 }
 
 async fn handle_mcp_request(
     parts: RequestParts,
     request: JsonRpcRequest,
-    state: &ProxyState,
-    pool: &UpstreamPool,
-) -> anyhow::Result<Response> {
-    let (rp, result) = process_mcp_request(&parts.headers, request, state, pool).await?;
-    Ok(Response::Mcp(rp, result))
-}
-
-async fn process_mcp_request(
-    inbound_headers: &HeaderMap,
-    request: JsonRpcRequest,
     _state: &ProxyState,
     pool: &UpstreamPool,
-) -> anyhow::Result<(ResponseParts, JsonRpcResult)> {
-    let body = Bytes::from(serde_json::to_vec(&request)?);
+) -> anyhow::Result<RouterOutput> {
+    let upstream_req = build_mcp_upstream_request(pool, &parts.headers, &request)?;
+    let resp = pool.pick(&request.id).request(upstream_req).await?;
+    let output = classify_upstream(resp).await?;
+    // Upstream returning a batch for a single-MCP request is malformed.
+    if let RouterOutput::Single(Response::McpBatch(_, _)) = &output {
+        return Err(anyhow::anyhow!(
+            "upstream returned a JSON-RPC batch for a single MCP request"
+        ));
+    }
+    if let RouterOutput::Single(Response::Http(http)) = &output {
+        return Err(anyhow::anyhow!(
+            "upstream returned non-JSON-RPC body (status {})",
+            http.status()
+        ));
+    }
+    Ok(output)
+}
 
+fn build_mcp_upstream_request(
+    pool: &UpstreamPool,
+    inbound_headers: &HeaderMap,
+    request: &JsonRpcRequest,
+) -> anyhow::Result<hyper::Request<BoxBody<Bytes, hyper::Error>>> {
+    let body = Bytes::from(serde_json::to_vec(request)?);
     let mut builder = hyper::Request::builder()
         .method(Method::POST)
         .uri(pool.upstream().url.as_str())
         .header(hyper::header::CONTENT_TYPE, "application/json")
         .header(hyper::header::ACCEPT, "application/json, text/event-stream");
     builder = forward_request_headers(builder, inbound_headers);
-    let upstream_req = builder.body(box_full(body))?;
+    Ok(builder.body(box_full(body))?)
+}
 
-    let resp = pool.pick(&request.id).request(upstream_req).await?;
+/// Classify an upstream HTTP response. SSE upstreams return
+/// [`RouterOutput::Stream`] without buffering, so frames flow as upstream
+/// emits them. Everything else collects via [`Response::from_hyper`] and
+/// returns [`RouterOutput::Single`].
+///
+/// SSE frames that don't deserialize as `JsonRpcResult` (notifications,
+/// server-initiated requests) are dropped via `filter_map`. TODO:
+/// preserve them once we add `Response::Notification` /
+/// `Response::ServerRequest` variants.
+async fn classify_upstream<B>(resp: hyper::Response<B>) -> anyhow::Result<RouterOutput>
+where
+    B: hyper::body::Body<Data = Bytes> + Send + Unpin + 'static,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    let (parts, body) = resp.into_parts();
 
-    match Response::from_hyper(resp).await? {
-        Response::Mcp(parts, result) => Ok((parts, result)),
-        Response::McpBatch(_, _) => Err(anyhow::anyhow!(
-            "upstream returned a JSON-RPC batch for a single MCP request"
-        )),
-        Response::Http(http) => Err(anyhow::anyhow!(
-            "upstream returned non-JSON-RPC body (status {})",
-            http.status()
-        )),
+    if is_event_stream(parts.headers.get(CONTENT_TYPE)) {
+        let parts_for_items = parts.clone();
+        let frame_stream = sse::decode_frame_stream(body);
+        let response_stream = frame_stream.filter_map(move |frame_or_err| {
+            let parts = parts_for_items.clone();
+            async move {
+                match frame_or_err {
+                    Ok(bytes) => serde_json::from_slice::<JsonRpcResult>(&bytes)
+                        .ok()
+                        .map(|result| Ok(Response::Mcp(parts, result))),
+                    Err(e) => Some(Err(anyhow::anyhow!("upstream stream error: {e}"))),
+                }
+            }
+        });
+        return Ok(RouterOutput::Stream(parts, Box::pin(response_stream)));
     }
+
+    let resp = hyper::Response::from_parts(parts, body);
+    Ok(RouterOutput::Single(Response::from_hyper(resp).await?))
 }
 
 /// Copy inbound headers onto the upstream request, skipping hop-by-hop and
@@ -154,7 +231,7 @@ async fn handle_http_request(
     request: HttpRequest,
     _state: &ProxyState,
     pool: &UpstreamPool,
-) -> anyhow::Result<Response> {
+) -> anyhow::Result<RouterOutput> {
     let shard_id = uuid::Uuid::new_v4();
 
     let (parts, body) = request.into_parts();
@@ -180,7 +257,7 @@ async fn handle_http_request(
 
     let upstream_req = builder.body(box_full(body))?;
     let resp = pool.pick(&shard_id).request(upstream_req).await?;
-    Ok(Response::from_hyper(resp).await?)
+    Ok(RouterOutput::Single(Response::from_hyper(resp).await?))
 }
 
 fn box_full(bytes: Bytes) -> BoxBody<Bytes, hyper::Error> {
@@ -259,6 +336,27 @@ mod tests {
         )
     }
 
+    /// Tests that expect a buffered response unwrap `RouterOutput::Single`.
+    /// Streaming variant tests use a separate helper to drain the stream.
+    fn expect_single(output: RouterOutput) -> Response {
+        match output {
+            RouterOutput::Single(r) => r,
+            RouterOutput::Stream(..) => panic!("expected Single, got Stream"),
+        }
+    }
+
+    async fn drain_stream(output: RouterOutput) -> (ResponseParts, Vec<Response>) {
+        let RouterOutput::Stream(parts, stream) = output else {
+            panic!("expected Stream");
+        };
+        let mut out = Vec::new();
+        futures_util::pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            out.push(item.unwrap());
+        }
+        (parts, out)
+    }
+
     /// Spawn an axum router on a random local port and return its base URL.
     /// The server task is dropped when the test completes — fine for tests.
     async fn spawn_upstream(router: Router) -> String {
@@ -289,7 +387,7 @@ mod tests {
         let url = spawn_upstream(Router::new().route("/", post(echo_jsonrpc))).await;
         let stage = RouterStage::new(config_for(&url)).unwrap();
 
-        let resp = stage.process(mcp_req(42), state()).await.unwrap();
+        let resp = expect_single(stage.process(mcp_req(42), state()).await.unwrap());
 
         let Response::Mcp(_, JsonRpcResult::Response(r)) = resp else {
             panic!("expected Response::Mcp(JsonRpcResult::Response)");
@@ -303,7 +401,7 @@ mod tests {
         let url = spawn_upstream(Router::new().route("/", post(echo_jsonrpc))).await;
         let stage = RouterStage::new(config_for(&url)).unwrap();
 
-        let resp = stage.process(mcp_batch(&[1, 2, 3]), state()).await.unwrap();
+        let resp = expect_single(stage.process(mcp_batch(&[1, 2, 3]), state()).await.unwrap());
 
         let Response::McpBatch(_, items) = resp else {
             panic!("expected Response::McpBatch");
@@ -325,7 +423,7 @@ mod tests {
         let url = spawn_upstream(Router::new().route("/", post(err_handler))).await;
         let stage = RouterStage::new(config_for(&url)).unwrap();
 
-        let resp = stage.process(mcp_req(1), state()).await.unwrap();
+        let resp = expect_single(stage.process(mcp_req(1), state()).await.unwrap());
 
         let Response::Mcp(_, JsonRpcResult::Error(e)) = resp else {
             panic!("expected JsonRpcResult::Error");
@@ -420,7 +518,7 @@ mod tests {
         let url = spawn_upstream(app).await;
         let stage = RouterStage::new(config_for(&url)).unwrap();
 
-        let resp = stage.process(mcp_req(1), state()).await.unwrap();
+        let resp = expect_single(stage.process(mcp_req(1), state()).await.unwrap());
         let Response::Mcp(parts, _) = resp else {
             panic!("expected Mcp");
         };
@@ -441,7 +539,7 @@ mod tests {
                 .body(Bytes::from_static(b"client body"))
                 .unwrap(),
         );
-        let resp = stage.process(req, state()).await.unwrap();
+        let resp = expect_single(stage.process(req, state()).await.unwrap());
 
         let Response::Http(http) = resp else {
             panic!("expected Response::Http");
@@ -478,5 +576,105 @@ mod tests {
         let _ = stage.process(req, state()).await.unwrap();
 
         assert_eq!(captured.lock().unwrap().as_deref(), Some("Bearer xyz"));
+    }
+
+    // ── classify_upstream ─────────────────────────────────────
+
+    fn rpc_result_str(id: i64) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"ok":true}}}}"#)
+    }
+
+    fn buffered_resp(
+        content_type: &str,
+        body: &str,
+    ) -> hyper::Response<http_body_util::Full<Bytes>> {
+        hyper::Response::builder()
+            .status(200)
+            .header("content-type", content_type)
+            .body(http_body_util::Full::new(Bytes::copy_from_slice(
+                body.as_bytes(),
+            )))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn classify_upstream__json_returns_single_mcp() {
+        let resp = buffered_resp("application/json", &rpc_result_str(1));
+        let output = classify_upstream(resp).await.unwrap();
+        let resp = expect_single(output);
+        assert!(matches!(resp, Response::Mcp(_, JsonRpcResult::Response(_))));
+    }
+
+    #[tokio::test]
+    async fn classify_upstream__sse_returns_stream() {
+        let body = format!("event: message\ndata: {}\n\n", rpc_result_str(1));
+        let resp = buffered_resp("text/event-stream", &body);
+        let output = classify_upstream(resp).await.unwrap();
+        assert!(matches!(output, RouterOutput::Stream(..)));
+    }
+
+    #[tokio::test]
+    async fn classify_upstream__sse_stream_yields_each_message_frame() {
+        let body = format!(
+            "data: {}\n\ndata: {}\n\n",
+            rpc_result_str(1),
+            rpc_result_str(2)
+        );
+        let resp = buffered_resp("text/event-stream", &body);
+        let (_, items) = drain_stream(classify_upstream(resp).await.unwrap()).await;
+        assert_eq!(items.len(), 2);
+        for item in &items {
+            assert!(matches!(item, Response::Mcp(_, _)));
+        }
+    }
+
+    #[tokio::test]
+    async fn classify_upstream__sse_drops_non_message_and_unparseable_frames() {
+        let body = format!(
+            "event: notifications/progress\ndata: {{\"x\":1}}\n\ndata: not-json\n\nevent: message\ndata: {}\n\n",
+            rpc_result_str(7)
+        );
+        let resp = buffered_resp("text/event-stream", &body);
+        let (_, items) = drain_stream(classify_upstream(resp).await.unwrap()).await;
+        assert_eq!(items.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn classify_upstream__sse_preserves_upstream_headers_on_stream_items() {
+        let body = format!("data: {}\n\n", rpc_result_str(1));
+        let resp = hyper::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .header("mcp-session-id", "sess-xyz")
+            .body(http_body_util::Full::new(Bytes::copy_from_slice(
+                body.as_bytes(),
+            )))
+            .unwrap();
+        let (_, items) = drain_stream(classify_upstream(resp).await.unwrap()).await;
+        assert_eq!(items.len(), 1);
+        let Response::Mcp(parts, _) = &items[0] else {
+            panic!("expected Mcp");
+        };
+        assert_eq!(parts.headers["mcp-session-id"], "sess-xyz");
+    }
+
+    #[tokio::test]
+    async fn classify_upstream__sse_carries_envelope_parts_on_router_output() {
+        // Regression: encode_stream must see upstream `mcp-session-id`
+        // before the first frame, otherwise session negotiation breaks
+        // (Inspector observed "No valid session ID" loop).
+        let body = format!("data: {}\n\n", rpc_result_str(1));
+        let resp = hyper::Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .header("mcp-session-id", "sess-xyz")
+            .header("set-cookie", "k=v; Path=/")
+            .body(http_body_util::Full::new(Bytes::copy_from_slice(
+                body.as_bytes(),
+            )))
+            .unwrap();
+        let (parts, _) = drain_stream(classify_upstream(resp).await.unwrap()).await;
+        assert_eq!(parts.headers["mcp-session-id"], "sess-xyz");
+        assert_eq!(parts.headers["set-cookie"], "k=v; Path=/");
     }
 }

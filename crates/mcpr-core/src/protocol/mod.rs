@@ -120,13 +120,13 @@ impl Response {
         // result. Non-result frames (e.g. intermediate notifications) don't
         // parse and are dropped here.
         //
-        // TODO: true streaming passthrough — forward upstream frames to the
-        // client as they arrive (no `body.collect().await`), preserve
-        // server-initiated notifications (`notifications/progress`, etc.),
-        // and byte-for-byte match upstream. Requires a `Response::Stream`
-        // variant and a streaming `to_axum_response`. Deferred: the buffered
-        // path is fine for the common request/response shape; only matters
-        // for long-running tool calls that emit live notifications.
+        // SSE upstream: decode each `event: message` frame as a JSON-RPC
+        // result. Non-result frames (e.g. intermediate notifications)
+        // don't parse and are dropped here. The streaming path now lives
+        // in `proxy2/stage/router_stage::classify_upstream`; this branch
+        // is the buffered fallback for callers that go through
+        // `Response::from_hyper` directly (e.g. the batch handler, which
+        // forbids SSE anyway).
         if is_event_stream(parts.headers.get(CONTENT_TYPE)) {
             let frames = sse::decode_frames(&bytes);
             let results: Vec<mcp::JsonRpcResult> = frames
