@@ -81,24 +81,6 @@ async fn async_main(action: CliAction) {
         CliAction::Version => {
             render::version_info();
         }
-        CliAction::Update => {
-            eprintln!("Updating mcpr to the latest version...");
-            let status = std::process::Command::new("sh")
-                .args(["-c", "curl -fsSL https://mcpr.app/install.sh | sh"])
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    eprintln!(
-                        "Updated. Restart any running proxies via your supervisor (systemd / Docker / Node)."
-                    );
-                }
-                Ok(s) => std::process::exit(s.code().unwrap_or(1)),
-                Err(e) => {
-                    eprintln!("update failed: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
         CliAction::ProxySetup { cloud_url, output } => {
             if let Err(e) = cmd::setup::run_setup(&cloud_url, output.as_deref()).await {
                 eprintln!("error: {e}");

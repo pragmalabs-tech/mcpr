@@ -16,17 +16,28 @@
 
 ## Quickstart
 
-Install and run:
+Run mcpr in front of an MCP server with Docker:
 
 ```bash
-# Install
-curl -fsSL https://mcpr.app/install.sh | sh
+cat > mcpr.toml <<'EOF'
+mcp = "http://host.docker.internal:9000"
+port = 3000
+EOF
 
-# Onboarding - help you to setup
-mcpr proxy setup
+docker run -d --name mcpr \
+  -v "$(pwd)/mcpr.toml:/etc/mcpr/mcpr.toml:ro" \
+  -v mcpr-state:/var/lib/mcpr \
+  -p 3000:3000 \
+  ghcr.io/pragmalabs-tech/mcpr:latest
 ```
 
-Docker is in beta — see [docs/DOCKER.md](docs/DOCKER.md) for volumes, health probes, and compose/Kubernetes examples.
+Traffic flows through `http://localhost:3000`. See [docs/DOCKER.md](docs/DOCKER.md) for volumes, environment variables, and compose / Kubernetes examples, and [`docker-compose.yml`](docker-compose.yml) for the sidecar pattern.
+
+To stream logs and metrics into the cloud dashboard, run `docker exec mcpr mcpr proxy setup` after the container is up.
+
+### Native binary
+
+Prebuilt binaries for Linux and macOS are attached to every [GitHub release](https://github.com/pragmalabs-tech/mcpr/releases). Download the archive for your target, extract `mcpr`, and put it on `$PATH`. Then run `mcpr proxy run mcpr.toml` directly.
 
 ---
 

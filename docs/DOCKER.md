@@ -4,8 +4,8 @@ mcpr publishes a multi-arch Linux image to GitHub Container Registry on every re
 
 ```
 ghcr.io/pragmalabs-tech/mcpr:latest       # latest release
-ghcr.io/pragmalabs-tech/mcpr:0.4.33       # pinned semver
-ghcr.io/pragmalabs-tech/mcpr:0.4          # latest 0.4.x
+ghcr.io/pragmalabs-tech/mcpr:0.5.0        # pinned semver
+ghcr.io/pragmalabs-tech/mcpr:0.5          # latest 0.5.x
 ```
 
 Platforms: `linux/amd64`, `linux/arm64`.
@@ -16,9 +16,6 @@ Platforms: `linux/amd64`, `linux/arm64`.
 cat > mcpr.toml <<'EOF'
 mcp = "http://host.docker.internal:9000"
 port = 3000
-
-[runtime]
-admin_bind = "127.0.0.1:9901"
 EOF
 
 docker run -d --name mcpr \
@@ -47,9 +44,6 @@ Because `mcpr proxy run` is foreground by default, `docker stop` translates to a
 | Port | Purpose | Default bind |
 |---|---|---|
 | `3000` | Proxy listener — set by `port` in `mcpr.toml` | `0.0.0.0` (override in config) |
-| `9901` | Proxy admin API — `/healthz`, `/ready`, `/version` | `127.0.0.1` |
-
-The admin port defaults to localhost. To expose it to Docker health probes from outside the container or to Kubernetes liveness/readiness probes, set `admin_bind = "0.0.0.0:9901"` in `[runtime]`.
 
 ## Volumes
 
@@ -68,33 +62,6 @@ State resolves via the `HOME` environment variable, which the image sets to `/va
 | `HOME` | `/var/lib/mcpr` | Parent directory for `.mcpr/` state |
 | `MCPR_DB` | — | Overrides the SQLite file path (normally `$HOME/.mcpr/store.db`) |
 | `MCPR_NO_TUI` | `1` | Disables the interactive TUI. Leave set in non-tty environments. |
-
-## Health probes
-
-The proxy admin server exposes two endpoints:
-
-- `GET /healthz` — returns `200 {"status":"ok"}`. Returns `503` during shutdown drain.
-- `GET /ready` — returns `200 {"status":"ready"}` when the upstream MCP server is reachable. Returns `503` while draining or when the upstream is disconnected.
-
-The image includes a `HEALTHCHECK` that curls `/healthz` every 30 seconds. Container health appears in `docker ps`:
-
-```bash
-$ docker ps --format '{{.Names}} {{.Status}}'
-mcpr  Up 45 seconds (healthy)
-```
-
-For Kubernetes, use separate probes:
-
-```yaml
-livenessProbe:
-  httpGet: { path: /healthz, port: 9901 }
-  initialDelaySeconds: 15
-readinessProbe:
-  httpGet: { path: /ready, port: 9901 }
-  initialDelaySeconds: 5
-```
-
-Kubernetes probes run against the pod IP, not `127.0.0.1`, so set `admin_bind = "0.0.0.0:9901"` in the config.
 
 ## Signals
 
@@ -117,7 +84,7 @@ Any argument passed to `docker run` is forwarded to `mcpr`:
 
 ```bash
 docker run --rm ghcr.io/pragmalabs-tech/mcpr:latest version
-# → {"target":"unknown","version":"0.4.33"}
+# → {"target":"unknown","version":"0.5.0"}
 
 docker run --rm -v "$(pwd)/mcpr.toml:/etc/mcpr/mcpr.toml:ro" \
   ghcr.io/pragmalabs-tech/mcpr:latest validate -c /etc/mcpr/mcpr.toml
@@ -165,8 +132,8 @@ mcp = "http://host.docker.internal:9000"
 Release CI pushes four tags per release:
 
 - `latest` — the most recent release
-- `X.Y.Z` — exact version (e.g. `0.4.33`)
-- `X.Y` — latest patch of a minor line (e.g. `0.4`)
+- `X.Y.Z` — exact version (e.g. `0.5.0`)
+- `X.Y` — latest patch of a minor line (e.g. `0.5`)
 - `sha-<short>` — the commit hash (for reproducible pulls)
 
 Pin to `X.Y.Z` in production. `latest` is for evaluation.
@@ -174,6 +141,5 @@ Pin to `X.Y.Z` in production. `latest` is for evaluation.
 ## Gotchas
 
 - **`mcpr proxy run` takes the config file as a positional argument.** Both inside and outside the container, the form is `mcpr proxy run /path/mcpr.toml`. Omit the path to default to `mcpr.toml` in the working directory.
-- **The default `admin_bind` is `127.0.0.1:9901`.** The built-in `HEALTHCHECK` works (it runs inside the container), but external probes need `admin_bind = "0.0.0.0:9901"`.
 - **State lives at `/var/lib/mcpr/.mcpr/`, not `/var/lib/mcpr/`.** The `.mcpr` subdirectory is appended by mcpr. The volume mount point is the parent, not the state directory itself.
 - **No `procps` in the image.** `docker exec ... ps` fails. Use `mcpr proxy list` and `mcpr proxy status` for process information.

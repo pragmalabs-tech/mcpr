@@ -1,0 +1,10 @@
+target/
+benches/target/
+benches/results/
+.git/
+.github/
+docs/
+examples/
+logs/
+*.md
+!README.md

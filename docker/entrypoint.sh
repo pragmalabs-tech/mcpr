@@ -13,8 +13,6 @@
 #                                        entrypoint override)
 #
 # Config path: $MCPR_CONFIG, falling back to /etc/mcpr/mcpr.toml.
-# Container readiness: hit the proxy's /healthz / /ready admin endpoints
-# (see DOCKER.md) instead of polling for daemon status — the daemon is gone.
 
 set -eu
 

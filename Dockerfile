@@ -5,8 +5,8 @@ ARG TARGETARCH
 ARG VERSION
 
 # ca-certificates: TLS to upstream MCP servers and cloud sync.
-# curl: fetches the release binary; also used by HEALTHCHECK.
-# tini: PID 1 — forwards SIGTERM, reaps zombies from double-forked proxies.
+# curl: fetches the release binary at image build time.
+# tini: PID 1, forwards SIGTERM and reaps zombies from double-forked proxies.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl tini \
  && rm -rf /var/lib/apt/lists/*
@@ -31,16 +31,10 @@ ENV HOME=/var/lib/mcpr \
 VOLUME ["/var/lib/mcpr"]
 
 # 3000: default proxy listen port (override in mcpr.toml).
-# 9901: proxy admin endpoint (/healthz, /ready, /version).
-EXPOSE 3000 9901
+EXPOSE 3000
 
 USER mcpr
 WORKDIR /var/lib/mcpr
-
-# Health probe hits the proxy admin server. Start period covers daemon boot
-# plus the proxy double-fork + bind. Returns unhealthy if no proxy is running.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:9901/healthz || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 

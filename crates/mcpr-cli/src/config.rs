@@ -19,8 +19,6 @@ pub enum Mode {
 pub enum CliAction {
     Validate(ValidateArgs),
     Version,
-    /// Update mcpr to the latest version.
-    Update,
     /// Read-only query against the store — no server needed.
     Proxy(ProxyCommand),
     /// Run a proxy in the foreground. The launching process owns the PID
@@ -73,8 +71,6 @@ enum Commands {
     Validate(ValidateArgs),
     /// Print version information and exit
     Version,
-    /// Update mcpr to the latest version
-    Update,
     /// Run and manage proxies (run, stop, list, delete, setup)
     Proxy(ProxyArgs),
     /// Storage maintenance (stats, vacuum)
@@ -411,7 +407,6 @@ pub fn load() -> CliAction {
     match cli.command {
         Some(Commands::Validate(args)) => CliAction::Validate(args),
         Some(Commands::Version) => CliAction::Version,
-        Some(Commands::Update) => CliAction::Update,
         Some(Commands::Proxy(ProxyArgs {
             command: ProxyCommand::Run(run_args),
         })) => {
