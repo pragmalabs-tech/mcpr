@@ -506,7 +506,10 @@ mod tests {
     fn ctx_for(method: ClientMethod) -> RequestContext {
         let mut m = std::collections::HashMap::new();
         m.insert(RequestId::Number(1), method);
-        RequestContext { client_methods: m }
+        RequestContext {
+            client_methods: m,
+            ..Default::default()
+        }
     }
 
     fn tools_list_ctx() -> RequestContext {
@@ -538,7 +541,10 @@ mod tests {
                 ClientMethod::Tools(ToolsMethod::List),
             );
         }
-        RequestContext { client_methods: m }
+        RequestContext {
+            client_methods: m,
+            ..Default::default()
+        }
     }
 
     fn empty_response_parts() -> ResponseParts {

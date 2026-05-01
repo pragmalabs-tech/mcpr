@@ -73,6 +73,13 @@ pub struct ClientInfo {
     pub version: Option<String>,
 }
 
+/// Server identity extracted from the MCP `initialize` response's `serverInfo` field.
+#[derive(Debug, Clone)]
+pub struct ServerInfo {
+    pub name: String,
+    pub version: Option<String>,
+}
+
 /// JSON-RPC error. `data` is kept raw — middlewares skip parsing it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcError {
@@ -140,6 +147,19 @@ pub struct JsonRpcResponse {
     pub id: RequestId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+}
+
+impl JsonRpcResponse {
+    /// Extract `serverInfo` from MCP initialize response result.
+    pub fn parse_server_info(&self) -> Option<ServerInfo> {
+        let server_info = self.result.as_ref()?.get("serverInfo")?;
+        let name = server_info.get("name")?.as_str()?.to_string();
+        let version = server_info
+            .get("version")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        Some(ServerInfo { name, version })
+    }
 }
 
 /// Wire envelope for a JSON-RPC error response: `{jsonrpc, id, error}`.

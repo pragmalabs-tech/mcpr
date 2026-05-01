@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 
-use crate::protocol::mcp::{ClientInfo, RequestId};
+use crate::protocol::mcp::{ClientInfo, RequestId, ServerInfo};
 
 pub type SessionId = String;
 
@@ -22,6 +22,7 @@ pub struct SessionInfo {
     pub id: SessionId,
     pub state: SessionState,
     pub client_info: Option<ClientInfo>,
+    pub server_info: Option<ServerInfo>,
     pub created_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
     pub request_count: u64,
@@ -35,6 +36,7 @@ impl SessionInfo {
             id,
             state: SessionState::Active,
             client_info,
+            server_info: None,
             created_at: now,
             last_active: now,
             request_count: 1,
@@ -81,16 +83,39 @@ impl SessionStore {
         }
     }
 
-    /// Add a request to session store.
-    /// Can be used to create a new session if one doesn't exist.
-    ///
-    /// Returns `Some(info)` when state changed (new session or new request) so
-    /// callers can emit. Returns `None` when the request was already tracked.
-    pub fn track_request(
+    /// Register a session at the moment it is created — typically when
+    /// the MCP `initialize` response carries the server-issued
+    /// `mcp-session-id`. Captures both client and server identity in one
+    /// call so subsequent `track_request` bumps don't need to know about
+    /// metadata. First-call-wins: if a session already exists with this
+    /// id, returns `None` and leaves the existing entry untouched.
+    pub fn start_session(
         &self,
         session_id: SessionId,
         request_id: RequestId,
         client_info: Option<ClientInfo>,
+        server_info: Option<ServerInfo>,
+    ) -> Option<SessionInfo> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.sessions.contains_key(&session_id) {
+            return None;
+        }
+        let mut info = SessionInfo::new(session_id.clone(), client_info, request_id.clone());
+        info.server_info = server_info;
+        inner.sessions.insert(session_id.clone(), info.clone());
+        inner.request_ids.insert(request_id, session_id);
+        Some(info)
+    }
+
+    /// Bump activity for a session. If the session is unknown (proxy
+    /// started mid-conversation, or this is the first request before
+    /// `start_session` ran), creates a stub entry with no metadata so
+    /// the session still surfaces in dashboards. Returns `None` only
+    /// when the request id has already been recorded — duplicate work.
+    pub fn track_request(
+        &self,
+        session_id: SessionId,
+        request_id: RequestId,
     ) -> Option<SessionInfo> {
         let mut inner = self.inner.lock().unwrap();
 
@@ -106,8 +131,7 @@ impl SessionStore {
                 existing.clone()
             }
             None => {
-                let new_info =
-                    SessionInfo::new(session_id.clone(), client_info, request_id.clone());
+                let new_info = SessionInfo::new(session_id.clone(), None, request_id.clone());
                 inner.sessions.insert(session_id.clone(), new_info.clone());
                 new_info
             }
@@ -222,25 +246,31 @@ mod tests {
         assert_eq!(a.request_ids, vec![req_num(1)]);
     }
 
+    fn server(name: &str) -> ServerInfo {
+        ServerInfo {
+            name: name.to_string(),
+            version: None,
+        }
+    }
+
     // ── track_request ──────────────────────────────────────────
 
     #[test]
-    fn track_request__creates_session_when_missing() {
+    fn track_request__creates_session_when_missing_with_no_metadata() {
         let store = SessionStore::new();
-        let info = store
-            .track_request("s1".into(), req_num(1), Some(client("cursor")))
-            .unwrap();
+        let info = store.track_request("s1".into(), req_num(1)).unwrap();
         assert_eq!(info.id, "s1");
         assert_eq!(info.request_count, 1);
         assert_eq!(info.request_ids, vec![req_num(1)]);
-        assert_eq!(info.client_info.as_ref().unwrap().name, "cursor");
+        assert!(info.client_info.is_none());
+        assert!(info.server_info.is_none());
     }
 
     #[test]
     fn track_request__appends_to_existing_session() {
         let store = SessionStore::new();
-        store.track_request("s1".into(), req_num(1), None);
-        let info = store.track_request("s1".into(), req_num(2), None).unwrap();
+        store.track_request("s1".into(), req_num(1));
+        let info = store.track_request("s1".into(), req_num(2)).unwrap();
         assert_eq!(info.request_count, 2);
         assert_eq!(info.request_ids, vec![req_num(1), req_num(2)]);
     }
@@ -248,8 +278,8 @@ mod tests {
     #[test]
     fn track_request__duplicate_request_returns_none() {
         let store = SessionStore::new();
-        store.track_request("s1".into(), req_num(1), None);
-        let again = store.track_request("s1".into(), req_num(1), None);
+        store.track_request("s1".into(), req_num(1));
+        let again = store.track_request("s1".into(), req_num(1));
         assert!(again.is_none());
         let info = store.get_session("s1").unwrap();
         assert_eq!(info.request_count, 1);
@@ -258,8 +288,8 @@ mod tests {
     #[test]
     fn track_request__duplicate_request_across_sessions_returns_none() {
         let store = SessionStore::new();
-        store.track_request("s1".into(), req_num(1), None);
-        let again = store.track_request("s2".into(), req_num(1), None);
+        store.track_request("s1".into(), req_num(1));
+        let again = store.track_request("s2".into(), req_num(1));
         assert!(again.is_none());
         assert!(store.get_session("s2").is_none());
     }
@@ -267,7 +297,7 @@ mod tests {
     #[test]
     fn track_request__writes_reverse_index() {
         let store = SessionStore::new();
-        store.track_request("s1".into(), req_num(7), None);
+        store.track_request("s1".into(), req_num(7));
         let found = store.get_session_by_request(&req_num(7)).unwrap();
         assert_eq!(found.id, "s1");
     }
@@ -275,20 +305,66 @@ mod tests {
     #[test]
     fn track_request__updates_last_active() {
         let store = SessionStore::new();
-        let created = store.track_request("s1".into(), req_num(1), None).unwrap();
+        let created = store.track_request("s1".into(), req_num(1)).unwrap();
         sleep(Duration::from_millis(2));
-        let after = store.track_request("s1".into(), req_num(2), None).unwrap();
+        let after = store.track_request("s1".into(), req_num(2)).unwrap();
         assert!(after.last_active > created.last_active);
         assert_eq!(after.created_at, created.created_at);
     }
 
     #[test]
-    fn track_request__keeps_initial_client_info_on_append() {
+    fn track_request__after_start_session_keeps_initial_metadata() {
         let store = SessionStore::new();
-        store.track_request("s1".into(), req_num(1), Some(client("cursor")));
-        store.track_request("s1".into(), req_num(2), Some(client("other")));
+        store.start_session(
+            "s1".into(),
+            req_num(0),
+            Some(client("cursor")),
+            Some(server("weather-app")),
+        );
+        store.track_request("s1".into(), req_num(1));
         let info = store.get_session("s1").unwrap();
         assert_eq!(info.client_info.as_ref().unwrap().name, "cursor");
+        assert_eq!(info.server_info.as_ref().unwrap().name, "weather-app");
+        assert_eq!(info.request_count, 2);
+        assert_eq!(info.request_ids, vec![req_num(0), req_num(1)]);
+    }
+
+    // ── start_session ──────────────────────────────────────────
+
+    #[test]
+    fn start_session__creates_with_client_and_server_info() {
+        let store = SessionStore::new();
+        let info = store
+            .start_session(
+                "s1".into(),
+                req_num(0),
+                Some(client("cursor")),
+                Some(server("weather-app")),
+            )
+            .unwrap();
+        assert_eq!(info.id, "s1");
+        assert_eq!(info.request_count, 1);
+        assert_eq!(info.request_ids, vec![req_num(0)]);
+        assert_eq!(info.client_info.as_ref().unwrap().name, "cursor");
+        assert_eq!(info.server_info.as_ref().unwrap().name, "weather-app");
+    }
+
+    #[test]
+    fn start_session__second_call_for_same_id_is_noop() {
+        let store = SessionStore::new();
+        store.start_session("s1".into(), req_num(0), Some(client("cursor")), None);
+        let again = store.start_session("s1".into(), req_num(99), Some(client("other")), None);
+        assert!(again.is_none());
+        let info = store.get_session("s1").unwrap();
+        assert_eq!(info.client_info.as_ref().unwrap().name, "cursor");
+        assert_eq!(info.request_count, 1);
+    }
+
+    #[test]
+    fn start_session__writes_reverse_index() {
+        let store = SessionStore::new();
+        store.start_session("s1".into(), req_num(0), None, None);
+        assert_eq!(store.get_session_by_request(&req_num(0)).unwrap().id, "s1");
     }
 
     // ── end_session ────────────────────────────────────────────
@@ -296,8 +372,8 @@ mod tests {
     #[test]
     fn end_session__removes_session_and_reverse_entries() {
         let store = SessionStore::new();
-        store.track_request("s1".into(), req_num(1), None);
-        store.track_request("s1".into(), req_num(2), None);
+        store.track_request("s1".into(), req_num(1));
+        store.track_request("s1".into(), req_num(2));
 
         store.end_session("s1");
 
@@ -309,8 +385,8 @@ mod tests {
     #[test]
     fn end_session__leaves_other_sessions_intact() {
         let store = SessionStore::new();
-        store.track_request("s1".into(), req_num(1), None);
-        store.track_request("s2".into(), req_num(2), None);
+        store.track_request("s1".into(), req_num(1));
+        store.track_request("s2".into(), req_num(2));
 
         store.end_session("s1");
 
@@ -336,11 +412,11 @@ mod tests {
     #[test]
     fn list_sessions__sorted_by_last_active_desc() {
         let store = SessionStore::new();
-        store.track_request("oldest".into(), req_num(1), None);
+        store.track_request("oldest".into(), req_num(1));
         sleep(Duration::from_millis(2));
-        store.track_request("middle".into(), req_num(2), None);
+        store.track_request("middle".into(), req_num(2));
         sleep(Duration::from_millis(2));
-        store.track_request("newest".into(), req_num(3), None);
+        store.track_request("newest".into(), req_num(3));
 
         let ids: Vec<_> = store.list_sessions().into_iter().map(|s| s.id).collect();
         assert_eq!(ids, vec!["newest", "middle", "oldest"]);
@@ -349,11 +425,11 @@ mod tests {
     #[test]
     fn list_sessions__track_request_promotes_session() {
         let store = SessionStore::new();
-        store.track_request("a".into(), req_num(1), None);
+        store.track_request("a".into(), req_num(1));
         sleep(Duration::from_millis(2));
-        store.track_request("b".into(), req_num(2), None);
+        store.track_request("b".into(), req_num(2));
         sleep(Duration::from_millis(2));
-        store.track_request("a".into(), req_num(3), None);
+        store.track_request("a".into(), req_num(3));
 
         let ids: Vec<_> = store.list_sessions().into_iter().map(|s| s.id).collect();
         assert_eq!(ids, vec!["a", "b"]);
@@ -379,7 +455,7 @@ mod tests {
     fn get_session_by_request__string_request_id() {
         let store = SessionStore::new();
         let rid = RequestId::String("req-abc".into());
-        store.track_request("s1".into(), rid.clone(), None);
+        store.track_request("s1".into(), rid.clone());
         assert_eq!(store.get_session_by_request(&rid).unwrap().id, "s1");
     }
 
