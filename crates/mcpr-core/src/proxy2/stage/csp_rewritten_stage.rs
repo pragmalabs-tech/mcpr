@@ -454,7 +454,9 @@ fn ensure_meta(container: &mut Value) -> Option<&mut Value> {
 mod tests {
     use super::*;
     use crate::{
-        protocol::mcp::{JsonRpcError, JsonRpcResponse, JsonRpcVersion, RequestId},
+        protocol::mcp::{
+            JsonRpcError, JsonRpcErrorResponse, JsonRpcResponse, JsonRpcVersion, RequestId,
+        },
         proxy2::csp::{CspConfig, DirectivePolicy, Mode, WidgetScoped},
         proxy2::state::InnerProxyState,
     };
@@ -647,10 +649,14 @@ mod tests {
         let stage = CspRewritter::new(config());
         let resp = Response::Mcp(
             empty_response_parts(),
-            JsonRpcResult::Error(JsonRpcError {
-                code: -32603,
-                message: "boom".into(),
-                data: None,
+            JsonRpcResult::Error(JsonRpcErrorResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                error: JsonRpcError {
+                    code: -32603,
+                    message: "boom".into(),
+                    data: None,
+                },
             }),
         );
         let out = stage
@@ -660,7 +666,7 @@ mod tests {
         let Response::Mcp(_, JsonRpcResult::Error(e)) = out else {
             panic!("expected error");
         };
-        assert_eq!(e.code, -32603);
+        assert_eq!(e.error.code, -32603);
     }
 
     #[tokio::test]
@@ -1005,10 +1011,14 @@ mod tests {
                 "tools": [{ "name": "t", "_meta": { "openai/widgetCSP": { "connect_domains": [] } } }]
             })),
         });
-        let err = JsonRpcResult::Error(JsonRpcError {
-            code: -32603,
-            message: "boom".into(),
-            data: None,
+        let err = JsonRpcResult::Error(JsonRpcErrorResponse {
+            jsonrpc: JsonRpcVersion,
+            id: RequestId::Number(2),
+            error: JsonRpcError {
+                code: -32603,
+                message: "boom".into(),
+                data: None,
+            },
         });
         let resp = Response::McpBatch(empty_response_parts(), vec![ok, err]);
 

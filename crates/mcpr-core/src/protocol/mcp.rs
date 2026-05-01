@@ -8,12 +8,41 @@ use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use strum::{EnumString, IntoStaticStr};
 
-/// JSON-RPC request id.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(untagged)]
+/// JSON-RPC request id. Per JSON-RPC 2.0, this is `Number | String | Null`.
+/// `Null` shows up on error responses where the server couldn't parse the
+/// request id (e.g. parse error, invalid request envelope).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RequestId {
     Number(i64),
     String(String),
+    Null,
+}
+
+impl Serialize for RequestId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            RequestId::Number(n) => s.serialize_i64(*n),
+            RequestId::String(v) => s.serialize_str(v),
+            RequestId::Null => s.serialize_unit(),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RequestId {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = Value::deserialize(d)?;
+        match v {
+            Value::Number(n) => n
+                .as_i64()
+                .map(RequestId::Number)
+                .ok_or_else(|| serde::de::Error::custom("request id: expected integer")),
+            Value::String(s) => Ok(RequestId::String(s)),
+            Value::Null => Ok(RequestId::Null),
+            _ => Err(serde::de::Error::custom(
+                "request id: expected number, string, or null",
+            )),
+        }
+    }
 }
 
 /// `"2.0"` literal — rejects anything else on the wire.
@@ -105,6 +134,7 @@ impl JsonRpcRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct JsonRpcResponse {
     pub jsonrpc: JsonRpcVersion,
     pub id: RequestId,
@@ -112,11 +142,25 @@ pub struct JsonRpcResponse {
     pub result: Option<Value>,
 }
 
+/// Wire envelope for a JSON-RPC error response: `{jsonrpc, id, error}`.
+/// Per spec, `id` may be `Null` when the server couldn't determine the
+/// request id (parse error, invalid request).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JsonRpcErrorResponse {
+    pub jsonrpc: JsonRpcVersion,
+    pub id: RequestId,
+    pub error: JsonRpcError,
+}
+
+/// Untagged dispatch: presence of `result` vs `error` decides the variant.
+/// `deny_unknown_fields` on each struct prevents the wrong shape from
+/// silently matching with the other field ignored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum JsonRpcResult {
     Response(JsonRpcResponse),
-    Error(JsonRpcError),
+    Error(JsonRpcErrorResponse),
 }
 
 /// Envelope + direction/method classification.
@@ -758,10 +802,59 @@ mod tests {
     }
 
     #[test]
-    fn jsonrpc_result__parses_error_shape() {
-        let v = json!({"code": -32000, "message": "boom"});
+    fn jsonrpc_result__parses_error_envelope_shape() {
+        let v = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {"code": -32000, "message": "boom"},
+        });
         let r: JsonRpcResult = serde_json::from_value(v).unwrap();
-        assert!(matches!(r, JsonRpcResult::Error(_)));
+        let JsonRpcResult::Error(envelope) = r else {
+            panic!("expected JsonRpcResult::Error");
+        };
+        assert_eq!(envelope.id, RequestId::Number(1));
+        assert_eq!(envelope.error.code, -32000);
+        assert_eq!(envelope.error.message, "boom");
+    }
+
+    #[test]
+    fn jsonrpc_result__parses_error_envelope_with_null_id() {
+        // The upstream body that broke the Inspector flow: a 4xx-like
+        // JSON-RPC error response with `id: null` (set when the server
+        // couldn't determine the request id, per JSON-RPC 2.0 §5.1).
+        let v = json!({
+            "jsonrpc": "2.0",
+            "error": {"code": -32000, "message": "Bad Request: No valid session ID"},
+            "id": null,
+        });
+        let r: JsonRpcResult = serde_json::from_value(v).unwrap();
+        let JsonRpcResult::Error(envelope) = r else {
+            panic!("expected JsonRpcResult::Error");
+        };
+        assert_eq!(envelope.id, RequestId::Null);
+        assert_eq!(envelope.error.code, -32000);
+    }
+
+    #[test]
+    fn jsonrpc_result__bare_error_is_rejected() {
+        // Bare `{code, message}` was the old (incorrect) deserialization
+        // target. With the envelope shape, it must fail.
+        let v = json!({"code": -32000, "message": "boom"});
+        assert!(serde_json::from_value::<JsonRpcResult>(v).is_err());
+    }
+
+    #[test]
+    fn request_id__deserializes_null() {
+        let v = json!(null);
+        let id: RequestId = serde_json::from_value(v).unwrap();
+        assert_eq!(id, RequestId::Null);
+    }
+
+    #[test]
+    fn request_id__null_serializes_as_json_null() {
+        let id = RequestId::Null;
+        let v = serde_json::to_value(id).unwrap();
+        assert!(v.is_null());
     }
 
     // ── get_tool / get_resource_uri / get_prompt ──────────────

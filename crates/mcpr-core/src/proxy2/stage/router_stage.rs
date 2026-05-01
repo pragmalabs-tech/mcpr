@@ -417,8 +417,15 @@ mod tests {
 
     #[tokio::test]
     async fn process__mcp_request_propagates_jsonrpc_error_response() {
+        // Upstream returns a JSON-RPC error envelope `{jsonrpc, id, error}`,
+        // which is the spec-compliant shape (per JSON-RPC 2.0 §5.1). The
+        // `id` may be Null when the upstream couldn't determine it.
         async fn err_handler() -> axum::Json<Value> {
-            axum::Json(json!({"code": -32603, "message": "boom"}))
+            axum::Json(json!({
+                "jsonrpc": "2.0",
+                "id": null,
+                "error": {"code": -32603, "message": "boom"},
+            }))
         }
         let url = spawn_upstream(Router::new().route("/", post(err_handler))).await;
         let stage = RouterStage::new(config_for(&url)).unwrap();
@@ -428,8 +435,9 @@ mod tests {
         let Response::Mcp(_, JsonRpcResult::Error(e)) = resp else {
             panic!("expected JsonRpcResult::Error");
         };
-        assert_eq!(e.code, -32603);
-        assert_eq!(e.message, "boom");
+        assert_eq!(e.id, RequestId::Null);
+        assert_eq!(e.error.code, -32603);
+        assert_eq!(e.error.message, "boom");
     }
 
     #[tokio::test]

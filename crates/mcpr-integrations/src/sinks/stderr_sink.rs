@@ -122,8 +122,8 @@ mod tests {
     use bytes::Bytes;
     use http::{Request as HttpReq, Response as HttpResp, StatusCode};
     use mcpr_core::protocol::mcp::{
-        ClientInfo, ClientMethod, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JsonRpcResult,
-        JsonRpcVersion, RequestId, ToolsMethod,
+        ClientInfo, ClientMethod, JsonRpcError, JsonRpcErrorResponse, JsonRpcRequest,
+        JsonRpcResponse, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
     };
     use mcpr_core::protocol::session::SessionInfo;
     use serde_json::{Map, Value, json};
@@ -170,10 +170,14 @@ mod tests {
     fn mcp_response_error(code: i32, message: &str) -> ProxyEvent {
         ProxyEvent::Response(Arc::new(Response::Mcp(
             empty_response_parts(),
-            JsonRpcResult::Error(JsonRpcError {
-                code,
-                message: message.into(),
-                data: None,
+            JsonRpcResult::Error(JsonRpcErrorResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                error: JsonRpcError {
+                    code,
+                    message: message.into(),
+                    data: None,
+                },
             }),
         )))
     }
@@ -275,10 +279,12 @@ mod tests {
 
     #[test]
     fn json__mcp_response_error_includes_code_and_message() {
+        // The error is serialized as a JSON-RPC error envelope —
+        // `{jsonrpc, id, error: {code, message}}` — under `result`.
         let v = render(&mcp_response_error(-32601, "method not found"));
         assert_eq!(v["kind"], "mcp");
-        assert_eq!(v["result"]["code"], -32601);
-        assert_eq!(v["result"]["message"], "method not found");
+        assert_eq!(v["result"]["error"]["code"], -32601);
+        assert_eq!(v["result"]["error"]["message"], "method not found");
     }
 
     #[test]

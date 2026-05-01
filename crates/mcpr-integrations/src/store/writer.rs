@@ -399,6 +399,7 @@ fn stringify_request_id(id: &RequestId) -> String {
     match id {
         RequestId::Number(n) => n.to_string(),
         RequestId::String(s) => s.clone(),
+        RequestId::Null => "null".to_string(),
     }
 }
 
@@ -430,8 +431,8 @@ mod tests {
     use mcpr_core::protocol::{
         Request, Response,
         mcp::{
-            ClientMethod, JsonRpcError, JsonRpcRequest, JsonRpcResponse, JsonRpcResult,
-            JsonRpcVersion, LifecycleMethod, RequestId, ToolsMethod,
+            ClientMethod, JsonRpcError, JsonRpcErrorResponse, JsonRpcRequest, JsonRpcResponse,
+            JsonRpcResult, JsonRpcVersion, LifecycleMethod, RequestId, ToolsMethod,
         },
         schema::{ChangeSchema, Reason, Tool},
         session::{SessionInfo, SessionState},
@@ -850,10 +851,14 @@ mod tests {
         let parts = http::Response::new(()).into_parts().0;
         let err = Response::Mcp(
             parts,
-            JsonRpcResult::Error(JsonRpcError {
-                code: -32600,
-                message: "bad request".into(),
-                data: None,
+            JsonRpcResult::Error(JsonRpcErrorResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(99),
+                error: JsonRpcError {
+                    code: -32600,
+                    message: "bad request".into(),
+                    data: None,
+                },
             }),
         );
         let mut batch = vec![store_event(ProxyEvent::Response(Arc::new(err)), 3_000)];

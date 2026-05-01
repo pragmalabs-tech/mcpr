@@ -143,7 +143,9 @@ mod tests {
     use serde_json::json;
 
     use crate::event::{EventBusHandle, EventManager, EventSink};
-    use crate::protocol::mcp::{JsonRpcError, JsonRpcResponse, JsonRpcVersion, RequestId};
+    use crate::protocol::mcp::{
+        JsonRpcError, JsonRpcErrorResponse, JsonRpcResponse, JsonRpcVersion, RequestId,
+    };
     use crate::protocol::schema::ChangeSchema;
     use crate::protocol::session::SessionStore;
     use crate::proxy2::state::InnerProxyState;
@@ -340,10 +342,14 @@ mod tests {
         let (state, sink, handle) = state_with_sink();
         let resp = Response::Mcp(
             empty_response_parts(),
-            JsonRpcResult::Error(JsonRpcError {
-                code: -32603,
-                message: "boom".into(),
-                data: None,
+            JsonRpcResult::Error(JsonRpcErrorResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                error: JsonRpcError {
+                    code: -32603,
+                    message: "boom".into(),
+                    data: None,
+                },
             }),
         );
 
