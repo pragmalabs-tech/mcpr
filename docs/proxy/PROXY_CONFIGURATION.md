@@ -4,15 +4,6 @@
 
 mcpr searches the current directory, then parent directories, for `mcpr.toml`.
 
-## Modes
-
-mcpr runs in one of two modes, set in `mcpr.toml`:
-
-| Mode | Config | Purpose |
-|------|--------|---------|
-| **Gateway** (default) | `mode` omitted or `mode = "gateway"` | Proxy + tunnel client for MCP development and production |
-| **Relay** | `mode = "relay"` | Tunnel relay server deployed on a VPS |
-
 ## Gateway Mode
 
 The proxy does not serve widget HTML or static assets itself — that path was removed to match the MCP spec. CSP rewriting of upstream responses still applies; see [CSP](CSP.md).
@@ -132,94 +123,7 @@ rotation = "daily"
 | `[store].path` | Override database file path |
 | `[store].name` | Proxy name for stored requests |
 
-## Relay Mode
-
-### Minimal (open -- no auth)
-
-```toml
-mode = "relay"
-port = 8081
-
-[relay]
-domain = "tunnel.yourdomain.com"
-```
-
-### With static tokens
-
-```toml
-mode = "relay"
-port = 8081
-
-[relay]
-domain = "tunnel.yourdomain.com"
-
-[[relay.tokens]]
-token = "mcpr_abc123"
-subdomains = ["myapp", "myapp-*"]
-
-[[relay.tokens]]
-token = "mcpr_def456"
-subdomains = ["other-app", "other-app-*"]
-```
-
-### With auth provider
-
-```toml
-mode = "relay"
-port = 8081
-
-[relay]
-domain = "tunnel.yourdomain.com"
-auth_provider = "https://auth.yourdomain.com"
-auth_provider_secret = "your-shared-secret-here"
-```
-
-### Field reference
-
-| Field | Description |
-|-------|-------------|
-| `mode` | Set to `"relay"` to run as relay server |
-| `port` | Port the relay listens on |
-| `[relay].domain` | Base domain for tunnel subdomains |
-| `[relay].auth_provider` | External auth provider URL |
-| `[relay].auth_provider_secret` | Shared secret for auth provider |
-| `[[relay.tokens]]` | Static token entries (see below) |
-
-### Auth modes
-
-The relay supports three auth modes (pick one):
-
-| Mode | Config | When to use |
-|------|--------|-------------|
-| **Open** | No tokens, no auth_provider | Local dev, testing |
-| **Static tokens** | `[[relay.tokens]]` entries | Small team, simple setup |
-| **Auth provider** | `[relay].auth_provider` URL | Dynamic token management at scale |
-
-Priority: static tokens > auth provider > open.
-
-### Static token format
-
-```toml
-[[relay.tokens]]
-token = "mcpr_abc123"           # the token clients use
-subdomains = ["myapp", "myapp-*"]  # allowed subdomain patterns
-```
-
-### Subdomain patterns
-
-Patterns support glob-style `*` wildcard:
-
-| Pattern | Matches | Does not match |
-|---------|---------|----------------|
-| `myapp` | `myapp` | `myapp-dev` |
-| `myapp-*` | `myapp-dev`, `myapp-feat-123` | `myapp` |
-| `*-preview` | `feat-preview`, `hotfix-preview` | `preview` |
-| `pr-*-acme` | `pr-123-acme`, `pr-abc-acme` | `pr-123` |
-| `*` | anything | |
-
 ## Resource Limits & Timeouts
-
-These apply to both gateway and relay modes.
 
 ```toml
 # Max request body size in bytes (default: 5 MB)
@@ -252,7 +156,6 @@ Legacy flat fields from older config files are still supported:
 
 | Legacy field | New location |
 |-------------|--------------|
-| `relay_domain` | `[relay].domain` |
 | `relay_url` | `[tunnel].relay_url` |
 | `tunnel_token` | `[tunnel].token` |
 | `tunnel_subdomain` | `[tunnel].subdomain` |

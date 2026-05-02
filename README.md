@@ -152,8 +152,8 @@ Track progress in the [Roadmap](#roadmap) below. Open an issue if your provider 
 
 ## Reference
 
-- Configuration: [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) (upstream URL, port, tunnel, CSP, cloud sync, logging, limits)
-- CLI: [docs/CLI.md](docs/CLI.md) (`proxy run/stop/list/delete/setup`, `store stats/vacuum`, `relay`)
+- Configuration: [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) (upstream URL, port, CSP, cloud sync, logging, limits)
+- CLI: [docs/CLI.md](docs/CLI.md) (`proxy run/stop/list/delete/setup`, `store stats/vacuum`)
 - Docker: [docs/DOCKER.md](docs/DOCKER.md) (volumes, health probes, compose/Kubernetes)
 - Bench harness: [benches/README.md](benches/README.md) (initialize + tools/call latency, direct vs proxied)
 
@@ -182,11 +182,6 @@ Track progress in the [Roadmap](#roadmap) below. Open an issue if your provider 
 - [ ] Per-tool access control
 - [ ] Rate limiting and circuit breaker
 - [ ] IP whitelist
-
-**Tunnel/Relay**
-- [x] Built-in tunnel client and self-hosted relay server
-- [x] Standalone `mcpr relay run` CLI (foreground; host supervises)
-- [x] Graceful shutdown
 
 ## License
 

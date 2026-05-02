@@ -1,13 +1,13 @@
 # CLI Reference
 
-The CLI **runs proxies and the relay** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](proxy/PROXY_CONFIGURATION.md).
+The CLI **runs proxies** and **extracts information** from the local SQLite store. It does not configure proxy behavior — that's [`mcpr.toml`](proxy/PROXY_CONFIGURATION.md).
 
 mcpr is a sidecar primitive in the envoy / pgbouncer mold: a host process (your Node / Go / Ruby MCP server, systemd, Docker, …) spawns `mcpr proxy run <config>` as a child and supervises it directly. The PID you launch is the proxy itself, so SIGTERM drains it gracefully and crash-then-restart loops Just Work.
 
 > Running in a container? The [Docker image](DOCKER.md) execs `mcpr proxy run` directly as PID 1, so `docker stop` translates straight to a graceful SIGTERM.
 
 Two responsibilities:
-1. **Lifecycle** — run a proxy or relay in the foreground; observe and signal them via lockfile.
+1. **Lifecycle** — run a proxy in the foreground; observe and signal it via lockfile.
 2. **Query & observe** — read request logs, per-tool metrics, sessions, schema, and storage stats from SQLite. No long-lived process required.
 
 ## Quick Start
@@ -21,9 +21,6 @@ mcpr proxy list
 mcpr proxy stop <name>                  # graceful drain
 mcpr proxy reload <name> -c <new.toml>  # hot CSP reload, no session drop
 mcpr proxy logs --follow
-
-# Run a relay server (foreground)
-mcpr relay run relay.toml
 ```
 
 ## Commands
@@ -126,24 +123,6 @@ The setup flow:
 7. Writes `mcpr.toml` with `[cloud]` config filled in
 
 If `mcpr.toml` already exists, setup reads existing values as defaults.
-
-### Relay Lifecycle
-
-The relay is a singleton tunnel server — one per machine.
-
-| Command | Description |
-|---------|-------------|
-| `mcpr relay run <config>` | Run relay in the foreground (the only way to start it) |
-| `mcpr relay stop` | SIGTERM the relay via lockfile |
-| `mcpr relay status` | Show relay PID, port, uptime |
-
-```bash
-mcpr relay run relay.toml               # Ctrl-C / SIGTERM to stop
-mcpr relay status                       # check status from another terminal
-mcpr relay stop                         # send SIGTERM by lockfile
-```
-
-Restart is the host supervisor's job, same as for `mcpr proxy run`. Relay config does not need `mode = "relay"` when using `mcpr relay` commands.
 
 ### Query & Observe
 
@@ -453,6 +432,3 @@ All state lives under `~/.mcpr/`.
 | `~/.mcpr/proxies/{name}/config.toml` | Config snapshot (immutable after creation) |
 | `~/.mcpr/proxies/{name}/lock` | Proxy PID, port, timestamp, config path |
 | `~/.mcpr/proxies/{name}/proxy.log` | (legacy; foreground proxies log to the parent's stderr) |
-| `~/.mcpr/relay/config.toml` | Relay config snapshot |
-| `~/.mcpr/relay/lock` | Relay PID, port, timestamp |
-| `~/.mcpr/relay/relay.log` | (legacy; foreground relay logs to the parent's stderr) |
