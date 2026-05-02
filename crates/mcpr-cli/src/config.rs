@@ -2,24 +2,20 @@ use clap::{Parser, Subcommand};
 
 pub use mcpr_core::proxy2::csp::CspConfig;
 use mcpr_core::proxy2::proxy_config::{FileCspConfig, parse_mode};
-use mcpr_tunnel::RelayConfig;
 
 const CONFIG_FILE: &str = "mcpr.toml";
 
 // ── Run mode ────────────────────────────────────────────────────────────
 
-/// Top-level mode: either run as a relay server or as the gateway proxy.
-#[allow(dead_code)]
 pub enum Mode {
-    Relay(RelayConfig),
     Gateway(Box<GatewayConfig>),
 }
 
-/// Result of parsing CLI args — either a subcommand action or the run mode.
+/// Result of parsing CLI args - either a subcommand action or the run mode.
 pub enum CliAction {
     Validate(ValidateArgs),
     Version,
-    /// Read-only query against the store — no server needed.
+    /// Read-only query against the store - no server needed.
     Proxy(ProxyCommand),
     /// Run a proxy in the foreground. The launching process owns the PID
     /// (systemd, Docker, terminal, Node `child_process.spawn`); SIGTERM
@@ -38,14 +34,6 @@ pub enum CliAction {
     },
     /// Store maintenance commands.
     Store(StoreCommand),
-    /// Relay subcommands (stop, status — no config needed).
-    Relay(RelayCommand),
-    /// Run the relay server in the foreground.
-    RelayRun {
-        relay_config: RelayConfig,
-        /// Absolute path to the original config file.
-        config_path: String,
-    },
 }
 
 // ── CLI args ────────────────────────────────────────────────────────────
@@ -54,7 +42,7 @@ pub enum CliAction {
 #[command(
     name = "mcpr",
     version,
-    about = "A proxy for MCP Apps/Servers — routes JSON-RPC, observes traffic, authenticates, and secures MCP."
+    about = "A proxy for MCP Apps/Servers - routes JSON-RPC, observes traffic, authenticates, and secures MCP."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -75,8 +63,6 @@ enum Commands {
     Proxy(ProxyArgs),
     /// Storage maintenance (stats, vacuum)
     Store(StoreArgs),
-    /// Relay server lifecycle (run, stop, restart, status)
-    Relay(RelayArgs),
 }
 
 // ── Proxy subcommands ────────────────────────────────────────────────
@@ -96,9 +82,9 @@ pub enum ProxyCommand {
     Stop(ProxyStopArgs),
     /// List all known proxies and their status
     List(ProxyListArgs),
-    /// Delete a stopped proxy — removes its on-disk state (must be stopped first)
+    /// Delete a stopped proxy - removes its on-disk state (must be stopped first)
     Delete(ProxyDeleteArgs),
-    /// Interactive setup — authenticate, pick project, generate config
+    /// Interactive setup - authenticate, pick project, generate config
     Setup(ProxySetupArgs),
 }
 
@@ -186,32 +172,6 @@ pub struct StoreVacuumArgs {
     pub dry_run: bool,
 }
 
-// ── Relay subcommands ─────────────────────────────────────────────────
-
-#[derive(Parser)]
-pub struct RelayArgs {
-    #[command(subcommand)]
-    pub command: RelayCommand,
-}
-
-/// Relay server lifecycle commands.
-#[derive(Subcommand, Clone)]
-pub enum RelayCommand {
-    /// Run relay server in the foreground
-    Run(RelayRunArgs),
-    /// Stop the running relay server (SIGTERM via lockfile)
-    Stop,
-    /// Show relay server status
-    Status,
-}
-
-/// Arguments for `mcpr relay run`.
-#[derive(Parser, Clone)]
-pub struct RelayRunArgs {
-    /// Config file path
-    pub config: Option<String>,
-}
-
 /// Arguments for the `validate` subcommand.
 #[derive(Parser, Clone)]
 pub struct ValidateArgs {
@@ -232,23 +192,6 @@ pub struct RuntimeOptions {
 
 // ── TOML config file ────────────────────────────────────────────────────
 
-/// Entry in `[[relay.tokens]]` array
-#[derive(serde::Deserialize)]
-struct FileTokenEntry {
-    token: String,
-    subdomains: Vec<String>,
-}
-
-/// `[relay]` table in config file
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct FileRelayConfig {
-    domain: Option<String>,
-    auth_provider: Option<String>,
-    auth_provider_secret: Option<String>,
-    tokens: Vec<FileTokenEntry>,
-}
-
 /// `[tunnel]` table in config file
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -260,7 +203,6 @@ struct FileTunnelConfig {
     subdomain: Option<String>,
 }
 
-/// `[events]` table in config file
 /// `[cloud]` table in config file
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -281,14 +223,10 @@ struct FileConfig {
 
     // -- Shared --
     port: Option<u16>,
-    mode: Option<String>, // "relay" | "gateway" (default)
 
     // -- Gateway --
     mcp: Option<String>,
     csp: FileCspConfig,
-
-    // -- Relay --
-    relay: FileRelayConfig,
 
     // -- Tunnel client --
     tunnel: FileTunnelConfig,
@@ -363,11 +301,6 @@ impl FileConfig {
             }
         }
     }
-
-    /// Is relay mode via config file: mode = "relay"
-    fn is_relay(&self) -> bool {
-        self.mode.as_deref() == Some("relay")
-    }
 }
 
 // ── Gateway config ──────────────────────────────────────────────────────
@@ -410,8 +343,6 @@ pub fn load() -> CliAction {
         Some(Commands::Proxy(ProxyArgs {
             command: ProxyCommand::Run(run_args),
         })) => {
-            // `mcpr proxy run` loads config; foreground by default so a
-            // parent process (systemd, Node) supervises the PID directly.
             let explicit_path = run_args.config.as_deref().or(cli.config.as_deref());
             let (file, cfg_path) = FileConfig::load(explicit_path);
             let config_content = cfg_path
@@ -432,11 +363,7 @@ pub fn load() -> CliAction {
                     .unwrap_or_else(|| "127.0.0.1:9901".to_string()),
             };
 
-            let mode = if file.is_relay() {
-                load_relay(file, runtime)
-            } else {
-                load_gateway(file, cfg_path, runtime)
-            };
+            let mode = load_gateway(file, cfg_path, runtime);
 
             CliAction::ProxyRun {
                 mode,
@@ -452,59 +379,12 @@ pub fn load() -> CliAction {
         },
         Some(Commands::Proxy(args)) => CliAction::Proxy(args.command),
         Some(Commands::Store(args)) => CliAction::Store(args.command),
-        Some(Commands::Relay(RelayArgs {
-            command: RelayCommand::Run(run_args),
-        })) => load_relay_run(run_args, cli.config.as_deref()),
-        Some(Commands::Relay(args)) => CliAction::Relay(args.command),
-        // No subcommand — print help.
         None => {
             use clap::CommandFactory;
             let _ = Cli::command().print_help();
             eprintln!();
             std::process::exit(2);
         }
-    }
-}
-
-/// Load config for `mcpr relay run`.
-/// The `mode = "relay"` field is not required — it is implicit from the command.
-fn load_relay_run(args: RelayRunArgs, global_config: Option<&str>) -> CliAction {
-    let explicit_path = args.config.as_deref().or(global_config);
-    let (file, cfg_path) = FileConfig::load(explicit_path);
-    let config_path_str = cfg_path
-        .as_ref()
-        .and_then(|p| p.canonicalize().ok())
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-
-    let port = file
-        .port
-        .expect("port is required for relay mode in config");
-    let relay_domain = file
-        .relay
-        .domain
-        .expect("relay.domain is required for relay mode in config");
-
-    let tokens = file
-        .relay
-        .tokens
-        .into_iter()
-        .map(|e| (e.token, e.subdomains))
-        .collect();
-
-    let relay_config = RelayConfig {
-        port,
-        relay_domain,
-        auth_provider: file.relay.auth_provider,
-        auth_provider_secret: file.relay.auth_provider_secret,
-        tokens,
-        max_request_body_size: file.max_request_body_size,
-        max_response_body_size: file.max_response_body_size,
-    };
-
-    CliAction::RelayRun {
-        relay_config,
-        config_path: config_path_str,
     }
 }
 
@@ -538,25 +418,11 @@ pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
 
     match toml::from_str::<FileConfig>(&contents) {
         Ok(config) => {
-            // Check required fields for gateway mode
-            if !config.is_relay() && config.mcp.is_none() {
+            if config.mcp.is_none() {
                 issues.push((
                     "warn",
-                    "no 'mcp' URL set — required for gateway mode".to_string(),
+                    "no 'mcp' URL set - required for gateway mode".to_string(),
                 ));
-            }
-
-            // Check relay mode requirements
-            if config.is_relay() {
-                if config.port.is_none() {
-                    issues.push(("error", "'port' is required for relay mode".to_string()));
-                }
-                if config.relay.domain.is_none() {
-                    issues.push((
-                        "error",
-                        "'relay.domain' is required for relay mode".to_string(),
-                    ));
-                }
             }
 
             // Validate MCP URL if set
@@ -573,9 +439,6 @@ pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
                 issues.push(("warn", "port 0 will bind to a random port".to_string()));
             }
 
-            // Legacy `csp.mode` + `csp.domains` flat shape: valid values are
-            // `extend` and `replace`. `override` is the old spelling — accept
-            // it but warn so operators migrate.
             if let Some(ref mode) = config.csp.mode {
                 match mode.to_lowercase().as_str() {
                     "extend" | "replace" => {}
@@ -597,7 +460,6 @@ pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
                 ));
             }
 
-            // Validate per-directive modes and widget-scoped overrides.
             for (name, policy) in [
                 ("csp.connectDomains.mode", &config.csp.connect_domains),
                 ("csp.resourceDomains.mode", &config.csp.resource_domains),
@@ -629,33 +491,6 @@ pub fn validate_config(path: Option<&str>) -> Vec<(&'static str, String)> {
     }
 
     issues
-}
-
-fn load_relay(file: FileConfig, _runtime: RuntimeOptions) -> Mode {
-    let port = file
-        .port
-        .expect("port is required for relay mode in mcpr.toml");
-    let relay_domain = file
-        .relay
-        .domain
-        .expect("relay.domain is required for relay mode in mcpr.toml");
-
-    let tokens = file
-        .relay
-        .tokens
-        .into_iter()
-        .map(|e| (e.token, e.subdomains))
-        .collect();
-
-    Mode::Relay(RelayConfig {
-        port,
-        relay_domain,
-        auth_provider: file.relay.auth_provider,
-        auth_provider_secret: file.relay.auth_provider_secret,
-        tokens,
-        max_request_body_size: file.max_request_body_size,
-        max_response_body_size: file.max_response_body_size,
-    })
 }
 
 /// Resolve proxy name: explicit name > filename stem > "default".
@@ -953,9 +788,6 @@ mod tests {
 
     #[test]
     fn csp_config__canonical_overrides_legacy_when_both_present() {
-        // An operator partially migrated: they have the new connectDomains
-        // block plus a leftover legacy mode+domains. The new block wins; the
-        // legacy shape only fills directives the operator hasn't migrated yet.
         let toml_str = r#"
             [csp]
             mode    = "extend"
@@ -969,7 +801,6 @@ mod tests {
         let cfg = file.csp.into_runtime();
         assert_eq!(cfg.connect_domains.domains, vec!["new.com"]);
         assert_eq!(cfg.connect_domains.mode, CspMode::Replace);
-        // resourceDomains still comes from the legacy fallback.
         assert_eq!(cfg.resource_domains.domains, vec!["legacy.com"]);
         assert_eq!(cfg.resource_domains.mode, CspMode::Extend);
     }
@@ -1038,290 +869,5 @@ mod tests {
         "#;
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.name.as_deref(), Some("email"));
-    }
-
-    // ── Relay config parsing ──────────────────────────────────────────
-
-    #[test]
-    fn file_config__relay_mode_detected() {
-        let toml_str = r#"
-            mode = "relay"
-            port = 8080
-            [relay]
-            domain = "tunnel.example.com"
-        "#;
-        let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.is_relay());
-    }
-
-    #[test]
-    fn file_config__gateway_mode_by_default() {
-        let toml_str = r#"
-            mcp = "http://localhost:9000"
-            port = 3000
-        "#;
-        let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert!(!config.is_relay());
-    }
-
-    #[test]
-    fn file_config__relay_domain_parsed() {
-        let toml_str = r#"
-            mode = "relay"
-            port = 8080
-            [relay]
-            domain = "tunnel.example.com"
-        "#;
-        let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.relay.domain.as_deref(), Some("tunnel.example.com"));
-    }
-
-    #[test]
-    fn file_config__relay_static_tokens() {
-        let toml_str = r#"
-            mode = "relay"
-            port = 8080
-            [relay]
-            domain = "tunnel.example.com"
-            [[relay.tokens]]
-            token = "tok_abc"
-            subdomains = ["myapp", "myapp-*"]
-            [[relay.tokens]]
-            token = "tok_xyz"
-            subdomains = ["other"]
-        "#;
-        let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.relay.tokens.len(), 2);
-        assert_eq!(config.relay.tokens[0].token, "tok_abc");
-        assert_eq!(config.relay.tokens[0].subdomains, vec!["myapp", "myapp-*"]);
-        assert_eq!(config.relay.tokens[1].token, "tok_xyz");
-        assert_eq!(config.relay.tokens[1].subdomains, vec!["other"]);
-    }
-
-    #[test]
-    fn file_config__relay_auth_provider() {
-        let toml_str = r#"
-            mode = "relay"
-            port = 8080
-            [relay]
-            domain = "tunnel.example.com"
-            auth_provider = "https://auth.example.com"
-            auth_provider_secret = "secret123"
-        "#;
-        let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(
-            config.relay.auth_provider.as_deref(),
-            Some("https://auth.example.com")
-        );
-        assert_eq!(
-            config.relay.auth_provider_secret.as_deref(),
-            Some("secret123")
-        );
-    }
-
-    #[test]
-    fn file_config__relay_defaults_empty() {
-        let toml_str = r#"
-            mcp = "http://localhost:9000"
-        "#;
-        let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.relay.domain.is_none());
-        assert!(config.relay.auth_provider.is_none());
-        assert!(config.relay.auth_provider_secret.is_none());
-        assert!(config.relay.tokens.is_empty());
-    }
-
-    #[test]
-    fn file_config__relay_body_size_limits() {
-        let toml_str = r#"
-            mode = "relay"
-            port = 8080
-            max_request_body_size = 1048576
-            max_response_body_size = 2097152
-            [relay]
-            domain = "tunnel.example.com"
-        "#;
-        let config: FileConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.max_request_body_size, Some(1_048_576));
-        assert_eq!(config.max_response_body_size, Some(2_097_152));
-    }
-
-    // ── load_relay ────────────────────────────────────────────────────
-
-    #[test]
-    fn load_relay__builds_relay_config() {
-        let toml_str = r#"
-            mode = "relay"
-            port = 9090
-            [relay]
-            domain = "tunnel.test"
-            [[relay.tokens]]
-            token = "tok_a"
-            subdomains = ["app1"]
-        "#;
-        let file: FileConfig = toml::from_str(toml_str).unwrap();
-        let runtime = RuntimeOptions {
-            drain_timeout: 30,
-            admin_bind: "127.0.0.1:9901".to_string(),
-        };
-        let mode = load_relay(file, runtime);
-        match mode {
-            Mode::Relay(cfg) => {
-                assert_eq!(cfg.port, 9090);
-                assert_eq!(cfg.relay_domain, "tunnel.test");
-                assert_eq!(cfg.tokens.len(), 1);
-                assert!(cfg.tokens.contains_key("tok_a"));
-                assert_eq!(cfg.tokens["tok_a"], vec!["app1"]);
-            }
-            Mode::Gateway(_) => panic!("expected Mode::Relay"),
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "port is required")]
-    fn load_relay__panics_without_port() {
-        let toml_str = r#"
-            mode = "relay"
-            [relay]
-            domain = "tunnel.test"
-        "#;
-        let file: FileConfig = toml::from_str(toml_str).unwrap();
-        let runtime = RuntimeOptions {
-            drain_timeout: 30,
-            admin_bind: "127.0.0.1:9901".to_string(),
-        };
-        load_relay(file, runtime);
-    }
-
-    #[test]
-    #[should_panic(expected = "relay.domain is required")]
-    fn load_relay__panics_without_domain() {
-        let toml_str = r#"
-            mode = "relay"
-            port = 8080
-            [relay]
-        "#;
-        let file: FileConfig = toml::from_str(toml_str).unwrap();
-        let runtime = RuntimeOptions {
-            drain_timeout: 30,
-            admin_bind: "127.0.0.1:9901".to_string(),
-        };
-        load_relay(file, runtime);
-    }
-
-    // ── load_relay_run ────────────────────────────────────────────────
-
-    #[test]
-    fn load_relay_run__basic() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("relay.toml");
-        std::fs::write(
-            &cfg_path,
-            "port = 9090\n[relay]\ndomain = \"tunnel.test\"\n",
-        )
-        .unwrap();
-
-        let args = RelayRunArgs {
-            config: Some(cfg_path.display().to_string()),
-        };
-        let action = load_relay_run(args, None);
-        match action {
-            CliAction::RelayRun { relay_config, .. } => {
-                assert_eq!(relay_config.port, 9090);
-                assert_eq!(relay_config.relay_domain, "tunnel.test");
-            }
-            _ => panic!("expected CliAction::RelayRun"),
-        }
-    }
-
-    #[test]
-    fn load_relay_run__with_tokens() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("relay.toml");
-        std::fs::write(
-            &cfg_path,
-            r#"
-port = 8080
-[relay]
-domain = "tunnel.test"
-[[relay.tokens]]
-token = "tok_abc"
-subdomains = ["myapp"]
-"#,
-        )
-        .unwrap();
-
-        let args = RelayRunArgs {
-            config: Some(cfg_path.display().to_string()),
-        };
-        let action = load_relay_run(args, None);
-        match action {
-            CliAction::RelayRun { relay_config, .. } => {
-                assert_eq!(relay_config.tokens.len(), 1);
-                assert!(relay_config.tokens.contains_key("tok_abc"));
-            }
-            _ => panic!("expected CliAction::RelayRun"),
-        }
-    }
-
-    #[test]
-    fn load_relay_run__with_auth_provider() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("relay.toml");
-        std::fs::write(
-            &cfg_path,
-            r#"
-port = 8080
-[relay]
-domain = "tunnel.test"
-auth_provider = "https://auth.example.com"
-auth_provider_secret = "secret123"
-"#,
-        )
-        .unwrap();
-
-        let args = RelayRunArgs {
-            config: Some(cfg_path.display().to_string()),
-        };
-        let action = load_relay_run(args, None);
-        match action {
-            CliAction::RelayRun { relay_config, .. } => {
-                assert_eq!(
-                    relay_config.auth_provider.as_deref(),
-                    Some("https://auth.example.com")
-                );
-                assert_eq!(
-                    relay_config.auth_provider_secret.as_deref(),
-                    Some("secret123")
-                );
-            }
-            _ => panic!("expected CliAction::RelayRun"),
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "port is required")]
-    fn load_relay_run__panics_without_port() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("relay.toml");
-        std::fs::write(&cfg_path, "[relay]\ndomain = \"tunnel.test\"\n").unwrap();
-
-        let args = RelayRunArgs {
-            config: Some(cfg_path.display().to_string()),
-        };
-        load_relay_run(args, None);
-    }
-
-    #[test]
-    #[should_panic(expected = "relay.domain is required")]
-    fn load_relay_run__panics_without_domain() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("relay.toml");
-        std::fs::write(&cfg_path, "port = 8080\n[relay]\n").unwrap();
-
-        let args = RelayRunArgs {
-            config: Some(cfg_path.display().to_string()),
-        };
-        load_relay_run(args, None);
     }
 }

@@ -3,7 +3,6 @@ members = [
     "crates/mcpr-cli",
     "crates/mcpr-core",
     "crates/mcpr-integrations",
-    "crates/mcpr-tunnel",
 ]
 exclude = ["benches"]
 resolver = "2"
@@ -48,7 +47,6 @@ bytes = "1"
 
 mcpr-core = { path = "crates/mcpr-core", version = "0.5.0" }
 mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.5.0" }
-mcpr-tunnel = { path = "crates/mcpr-tunnel", version = "0.5.0" }
 
 # Release builds — tuned for runtime perf at the cost of build time.
 # `lto = "thin"` enables cross-crate inlining (5–15% perf on hot paths);

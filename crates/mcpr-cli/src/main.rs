@@ -1,13 +1,11 @@
 //! # mcpr (CLI binary)
 //!
 //! mcpr is a sidecar primitive in the envoy / pgbouncer mold. The launched PID
-//! is the proxy itself — your host process supervisor (systemd, Docker,
+//! is the proxy itself - your host process supervisor (systemd, Docker,
 //! Node `child_process.spawn`, terminal) owns the lifecycle.
 //!
-//! - **proxy**: `mcpr proxy run <config>` — runs the MCP gateway in the
+//! - **proxy**: `mcpr proxy run <config>` - runs the MCP gateway in the
 //!   foreground. SIGTERM drains gracefully.
-//! - **relay**: `mcpr relay run <config>` — tunnel relay server that accepts
-//!   WebSocket connections and assigns subdomains. One per machine.
 //!
 //! All state (lockfiles, config snapshots, sqlite store) lives under `~/.mcpr/`.
 
@@ -16,7 +14,6 @@ mod config;
 mod logic;
 
 mod proxy_lock;
-mod relay_lock;
 mod render;
 
 #[global_allocator]
@@ -92,32 +89,16 @@ async fn async_main(action: CliAction) {
         }
         CliAction::ProxyRun {
             mode, config_path, ..
-        } => match mode {
-            Mode::Relay(_) => {
-                eprintln!("error: use `mcpr relay run` instead of `mcpr proxy run` for relay mode");
-                std::process::exit(1);
-            }
-            Mode::Gateway(cfg) => {
-                run_gateway_inner(*cfg, config_path).await;
-            }
-        },
+        } => {
+            let Mode::Gateway(cfg) = mode;
+            run_gateway_inner(*cfg, config_path).await;
+        }
         CliAction::Store(cmd) => {
             cmd::handle_store_command(cmd);
-        }
-        CliAction::RelayRun {
-            relay_config,
-            config_path,
-            ..
-        } => {
-            run_relay_inner(relay_config, config_path).await;
-        }
-        CliAction::Relay(cmd) => {
-            cmd::handle_relay_command(cmd);
         }
     }
 }
 
-// Run a proxy to handle requests by using axum
 async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
     use std::sync::Arc;
 
@@ -129,7 +110,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         }
     };
 
-    // Read the configuration
     let proxy_cfg = Arc::new(mcpr_core::proxy2::proxy_config::ProxyConfig {
         name: cfg.name.clone(),
         mcp: mcp.clone(),
@@ -142,11 +122,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         request_timeout: cfg.request_timeout,
     });
 
-    // Open the local SQLite store. Default path is ~/.mcpr/store.db; the
-    // user can override via $MCPR_DB. The store handles its own writer
-    // thread and drains on drop, so no explicit shutdown is needed here —
-    // when EventBusHandle::shutdown() returns, the sinks Vec drops, the
-    // SqliteSink drops, and Store::drop flushes pending events.
     let db_path = match resolve_db_path(None) {
         Some(p) => p,
         None => {
@@ -165,7 +140,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         }
     };
 
-    // Setup Event Bus
     let mut event_manager = EventManager::new();
     event_manager.register(Box::new(StderrSink));
     event_manager.register(Box::new(SqliteSink::new(store, cfg.name.as_str())));
@@ -214,7 +188,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
             }
         };
 
-        match mcpr_tunnel::start_tunnel_client(
+        match mcp_tunnel_client::start_tunnel_client(
             actual_port,
             relay_url,
             token,
@@ -287,77 +261,9 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
     eprintln!("[mcpr] Shutdown complete.");
 }
 
-/// Run the relay server process. Called from `mcpr relay run` only.
-/// Always foreground — the launching process owns the PID.
-async fn run_relay_inner(cfg: mcpr_tunnel::RelayConfig, config_path: String) {
-    let (app, port) = mcpr_tunnel::build_relay_app(cfg);
-
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("error: failed to bind relay on port {port}: {e}");
-            std::process::exit(1);
-        });
-    let actual_port = listener.local_addr().unwrap().port();
-
-    #[cfg(unix)]
-    if let Err(e) = relay_lock::write_lock(actual_port, &config_path) {
-        eprintln!("error: failed to write relay lockfile: {e}");
-        std::process::exit(1);
-    }
-
-    eprintln!(
-        "  {} relay listening on :{actual_port}",
-        colored::Colorize::green("mcpr")
-    );
-
-    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
-    let mut shutdown_rx = shutdown_tx.subscribe();
-
-    let shutdown_trigger = shutdown_tx.clone();
-    tokio::spawn(async move {
-        let ctrl_c = tokio::signal::ctrl_c();
-
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{SignalKind, signal};
-            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM");
-            tokio::select! {
-                _ = ctrl_c => {},
-                _ = sigterm.recv() => {},
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            ctrl_c.await.expect("Failed to listen for ctrl-c");
-        }
-
-        eprintln!("[mcpr] Received shutdown signal, stopping relay...");
-        let _ = shutdown_trigger.send(true);
-    });
-
-    let shutdown_for_server = shutdown_tx.subscribe();
-    tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                let mut rx = shutdown_for_server;
-                let _ = rx.changed().await;
-            })
-            .await
-            .expect("Relay server failed");
-    });
-
-    let _ = shutdown_rx.changed().await;
-
-    relay_lock::remove_lock();
-
-    eprintln!("[mcpr] Relay shutdown complete.");
-}
-
 struct StderrTunnelStatus;
 
-impl mcpr_tunnel::TunnelStatusCallback for StderrTunnelStatus {
+impl mcp_tunnel_client::TunnelStatusCallback for StderrTunnelStatus {
     fn on_connected(&self, url: &str) {
         eprintln!("[mcpr] tunnel connected: {url}");
     }

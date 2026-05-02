@@ -1242,6 +1242,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
+name = "mcp-tunnel-client"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "438924136a2e600c8ec7ca8687964520545157cb1b8887a4d2f74da6ef44f516"
+dependencies = [
+ "base64",
+ "colored",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+]
+
+[[package]]
 name = "mcpr-core"
 version = "0.5.0"
 dependencies = [
@@ -1278,6 +1294,7 @@ version = "0.5.0"
 dependencies = [
  "bytes",
  "chrono",
+ "colored",
  "dirs",
  "http",
  "mcpr-core",
@@ -1304,50 +1321,25 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
- "dashmap",
  "dirs",
- "futures-util",
- "http-body-util",
  "inquire",
+ "mcp-tunnel-client",
  "mcpr-core",
  "mcpr-integrations",
- "mcpr-tunnel",
  "mimalloc",
  "nix",
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
  "tabled",
  "tempfile",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "toml",
  "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
- "uuid",
-]
-
-[[package]]
-name = "mcpr-tunnel"
-version = "0.5.0"
-dependencies = [
- "axum",
- "base64",
- "chrono",
- "colored",
- "dashmap",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "uuid",
 ]
 
 [[package]]

@@ -1,11 +1,10 @@
-//! Command dispatch — thin handlers that wire logic → render.
+//! Command dispatch - thin handlers that wire logic to render.
 
 mod proxy;
-mod relay;
 pub mod setup;
 mod store;
 
-use crate::config::{ProxyCommand, RelayCommand, StoreCommand};
+use crate::config::{ProxyCommand, StoreCommand};
 
 pub fn handle_proxy_command(cmd: ProxyCommand) {
     let result = match cmd {
@@ -18,21 +17,6 @@ pub fn handle_proxy_command(cmd: ProxyCommand) {
         ProxyCommand::Stop(args) => proxy::stop(args),
         ProxyCommand::List(args) => proxy::list(args),
         ProxyCommand::Delete(args) => proxy::delete(args),
-    };
-
-    if let Err(e) = result {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
-}
-
-pub fn handle_relay_command(cmd: RelayCommand) {
-    let result = match cmd {
-        RelayCommand::Run(_) => {
-            unreachable!("`mcpr relay run` is handled before async dispatch");
-        }
-        RelayCommand::Stop => relay::stop(),
-        RelayCommand::Status => relay::status(),
     };
 
     if let Err(e) = result {
