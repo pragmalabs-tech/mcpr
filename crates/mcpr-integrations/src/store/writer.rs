@@ -155,8 +155,8 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StoreEvent>) {
 fn write_events(tx: &Transaction, batch: &[StoreEvent]) -> rusqlite::Result<()> {
     for msg in batch {
         match &msg.event {
-            ProxyEvent::Request(req) => write_request(tx, msg.ts, &msg.proxy, req)?,
-            ProxyEvent::Response(res) => write_response(tx, msg.ts, res)?,
+            ProxyEvent::Request(re) => write_request(tx, msg.ts, &msg.proxy, &re.request)?,
+            ProxyEvent::Response(re) => write_response(tx, msg.ts, &re.response)?,
             ProxyEvent::Session(info) => write_session(tx, &msg.proxy, info)?,
             ProxyEvent::Schema(change) => write_schema_change(tx, msg.ts, &msg.proxy, change)?,
         }
@@ -428,6 +428,7 @@ mod tests {
 
     use chrono::Utc;
     use http::request::Builder as RequestBuilder;
+    use mcpr_core::event::{RequestEvent, ResponseEvent};
     use mcpr_core::protocol::{
         Request, Response,
         mcp::{
@@ -438,6 +439,23 @@ mod tests {
         session::{SessionInfo, SessionState},
     };
     use serde_json::json;
+
+    fn req_evt(req: Request) -> Arc<RequestEvent> {
+        Arc::new(RequestEvent {
+            request: req,
+            request_id: String::new(),
+            ts: Utc::now(),
+        })
+    }
+
+    fn res_evt(resp: Response) -> Arc<ResponseEvent> {
+        Arc::new(ResponseEvent {
+            response: resp,
+            request_id: String::new(),
+            latency_us: 0,
+            ts: Utc::now(),
+        })
+    }
 
     use crate::store::db;
 
@@ -527,7 +545,7 @@ mod tests {
     fn flush_batch__inserts_request_row_for_mcp() {
         let mut conn = test_db();
         let mut batch = vec![store_event(
-            ProxyEvent::Request(Arc::new(mcp_request("sess-1", rpc_tools_call(1, "search")))),
+            ProxyEvent::Request(req_evt(mcp_request("sess-1", rpc_tools_call(1, "search")))),
             1_000,
         )];
         drain(&mut conn, &mut batch);
@@ -558,7 +576,7 @@ mod tests {
             ],
         );
 
-        let mut batch = vec![store_event(ProxyEvent::Request(Arc::new(batch_req)), 1_000)];
+        let mut batch = vec![store_event(ProxyEvent::Request(req_evt(batch_req)), 1_000)];
         drain(&mut conn, &mut batch);
 
         let count: i64 = conn
@@ -577,7 +595,7 @@ mod tests {
             .unwrap();
 
         let mut batch = vec![store_event(
-            ProxyEvent::Request(Arc::new(Request::Http(http))),
+            ProxyEvent::Request(req_evt(Request::Http(http))),
             1_000,
         )];
         drain(&mut conn, &mut batch);
@@ -593,11 +611,11 @@ mod tests {
         let mut conn = test_db();
         let mut batch = vec![
             store_event(
-                ProxyEvent::Request(Arc::new(mcp_request("s", rpc_tools_call(1, "x")))),
+                ProxyEvent::Request(req_evt(mcp_request("s", rpc_tools_call(1, "x")))),
                 1_000,
             ),
             store_event(
-                ProxyEvent::Request(Arc::new(mcp_request("s", rpc_tools_call(1, "x")))),
+                ProxyEvent::Request(req_evt(mcp_request("s", rpc_tools_call(1, "x")))),
                 1_001,
             ),
         ];
@@ -629,7 +647,7 @@ mod tests {
             }),
         );
 
-        let mut batch = vec![store_event(ProxyEvent::Response(Arc::new(resp)), 2_000)];
+        let mut batch = vec![store_event(ProxyEvent::Response(res_evt(resp)), 2_000)];
         drain(&mut conn, &mut batch);
 
         let (sid, rid, status): (Option<String>, String, String) = conn
@@ -651,10 +669,10 @@ mod tests {
         let mut conn = test_db();
         let mut batch = vec![
             store_event(
-                ProxyEvent::Request(Arc::new(mcp_request("sess-3", rpc_tools_call(42, "x")))),
+                ProxyEvent::Request(req_evt(mcp_request("sess-3", rpc_tools_call(42, "x")))),
                 1_000,
             ),
-            store_event(ProxyEvent::Response(Arc::new(mcp_response_ok(42))), 1_142),
+            store_event(ProxyEvent::Response(res_evt(mcp_response_ok(42))), 1_142),
         ];
         drain(&mut conn, &mut batch);
 
@@ -690,10 +708,10 @@ mod tests {
         );
         let mut batch = vec![
             store_event(
-                ProxyEvent::Request(Arc::new(mcp_request("sess-J", rpc_tools_call(99, "go")))),
+                ProxyEvent::Request(req_evt(mcp_request("sess-J", rpc_tools_call(99, "go")))),
                 1_000,
             ),
-            store_event(ProxyEvent::Response(Arc::new(resp)), 1_250),
+            store_event(ProxyEvent::Response(res_evt(resp)), 1_250),
         ];
         drain(&mut conn, &mut batch);
 
@@ -862,7 +880,7 @@ mod tests {
                 },
             }),
         );
-        let mut batch = vec![store_event(ProxyEvent::Response(Arc::new(err)), 3_000)];
+        let mut batch = vec![store_event(ProxyEvent::Response(res_evt(err)), 3_000)];
         drain(&mut conn, &mut batch);
 
         let count: i64 = conn

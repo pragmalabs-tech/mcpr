@@ -59,6 +59,8 @@ mod tests {
 
     use std::sync::Arc;
 
+    use chrono::Utc;
+    use mcpr_core::event::RequestEvent;
     use mcpr_core::protocol::{
         Request,
         mcp::{ClientMethod, JsonRpcRequest, JsonRpcVersion, RequestId, ToolsMethod},
@@ -104,10 +106,11 @@ mod tests {
         let (store, db_path, _dir) = open_store();
         let mut sink = SqliteSink::new(store, "alpha");
 
-        sink.on_event(&ProxyEvent::Request(Arc::new(mcp_request(
-            "sess-1",
-            rpc(1, "search"),
-        ))));
+        sink.on_event(&ProxyEvent::Request(Arc::new(RequestEvent {
+            request: mcp_request("sess-1", rpc(1, "search")),
+            request_id: String::new(),
+            ts: Utc::now(),
+        })));
 
         sink.shutdown();
 

@@ -21,6 +21,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use config::{CliAction, GatewayConfig, Mode};
 use mcpr_core::event::EventManager;
+use mcpr_integrations::sinks::cloud_sink::{CloudSink, CloudSinkConfig};
 use mcpr_integrations::store::{Store, StoreConfig, path::resolve_db_path};
 use mcpr_integrations::{StderrSink, sinks::SqliteSink};
 
@@ -143,6 +144,21 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
     let mut event_manager = EventManager::new();
     event_manager.register(Box::new(StderrSink));
     event_manager.register(Box::new(SqliteSink::new(store, cfg.name.as_str())));
+
+    if let (Some(endpoint), Some(token)) = (cfg.cloud_endpoint.clone(), cfg.cloud_token.clone()) {
+        let cloud_cfg = CloudSinkConfig {
+            endpoint,
+            token,
+            server: cfg.cloud_server.clone(),
+            batch_size: cfg.cloud_batch_size.unwrap_or(100),
+            flush_interval: std::time::Duration::from_millis(
+                cfg.cloud_flush_interval_ms.unwrap_or(5_000),
+            ),
+            on_flush: None,
+        };
+        event_manager.register(Box::new(CloudSink::new(cloud_cfg)));
+    }
+
     let event_bus_handler = event_manager.start();
     let event_bus = event_bus_handler.bus.clone();
 

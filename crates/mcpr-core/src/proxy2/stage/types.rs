@@ -11,6 +11,7 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use axum::http::Method;
@@ -38,7 +39,7 @@ pub struct RequestContext {
 
 /// Underlying per-request state. Field access on [`RequestContext`]
 /// goes through `Deref` to this struct, so call sites stay ergonomic.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct RequestContextInner {
     /// `RequestId → ClientMethod` map. 1 entry for single MCP requests,
     /// N entries for batches, empty for HTTP.
@@ -60,10 +61,27 @@ pub struct RequestContextInner {
     /// to correlate logs and metrics across stages and the upstream
     /// call. Distinct from any MCP `RequestId`, which is client-supplied.
     pub request_id: String,
+    /// Wall-clock instant captured at pipeline entry. Response stages
+    /// read this to compute end-to-end request latency.
+    pub started_at: Instant,
     /// Per-stage timing recorder. Stages call `track_start` /
     /// `track_end` to mark spans; the pipeline can dump it after the
     /// response comes back to attribute latency to specific stages.
     pub timer: Timer,
+}
+
+impl Default for RequestContextInner {
+    fn default() -> Self {
+        Self {
+            client_methods: HashMap::new(),
+            session_id: None,
+            initialize: None,
+            is_session_close: false,
+            request_id: String::new(),
+            started_at: Instant::now(),
+            timer: Timer::default(),
+        }
+    }
 }
 
 impl Deref for RequestContext {
@@ -94,6 +112,7 @@ impl RequestContext {
     /// timer so spans tracked outside the pipeline (e.g. parse / encode
     /// in the HTTP entry point) land in the same dump as the stage spans.
     pub fn with_timer(request: &Request, timer: Timer) -> Self {
+        let started_at = Instant::now();
         let inner = match request {
             Request::Mcp(parts, rpc) => {
                 let mut client_methods = HashMap::with_capacity(1);
@@ -112,6 +131,7 @@ impl RequestContext {
                     initialize,
                     is_session_close: false,
                     request_id: new_request_id(),
+                    started_at,
                     timer,
                 }
             }
@@ -126,6 +146,7 @@ impl RequestContext {
                 initialize: None,
                 is_session_close: false,
                 request_id: new_request_id(),
+                started_at,
                 timer,
             },
             Request::Http(http) => RequestContextInner {
@@ -134,6 +155,7 @@ impl RequestContext {
                 initialize: None,
                 is_session_close: http.method() == Method::DELETE,
                 request_id: new_request_id(),
+                started_at,
                 timer,
             },
         };
