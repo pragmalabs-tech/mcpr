@@ -9,6 +9,8 @@ use std::time::Duration;
 use mcpr_core::event::{EventSink, ProxyEvent};
 use tokio::sync::mpsc;
 
+use crate::wire;
+
 /// Callback invoked after each cloud sync attempt.
 pub type SyncCallback = Arc<dyn Fn(SyncStatus) + Send + Sync>;
 
@@ -103,20 +105,12 @@ async fn flush_batch(
 ) {
     let events = std::mem::take(buffer);
 
-    // Convert to JSON — the cloud API accepts the ProxyEvent format directly.
-    // Stamp server slug on each event.
+    // Encode each event into the wire envelope. The cloud lands these
+    // verbatim in `events_raw` and the analytics MV projects on read.
+    let server = config.server.as_deref().unwrap_or("");
     let payload: Vec<serde_json::Value> = events
         .iter()
-        .map(|e| {
-            let mut val = serde_json::to_value(e).unwrap_or(serde_json::Value::Null);
-            if let Some(ref server) = config.server
-                && let Some(obj) = val.as_object_mut()
-            {
-                obj.entry("server")
-                    .or_insert(serde_json::Value::String(server.clone()));
-            }
-            val
-        })
+        .map(|e| wire::encode_envelope(e, server))
         .collect();
 
     let body = match serde_json::to_vec(&payload) {

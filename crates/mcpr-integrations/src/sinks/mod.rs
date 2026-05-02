@@ -6,8 +6,10 @@
 //!   (`crate::store`).
 //! - [`cloud_sink`]: batches + POSTs events to cloud.mcpr.app.
 
+pub mod cloud_sink;
 pub mod sqlite_sink;
 pub mod stderr_sink;
 
+pub use cloud_sink::{CloudSink, CloudSinkConfig};
 pub use sqlite_sink::SqliteSink;
 pub use stderr_sink::StderrSink;

@@ -63,5 +63,6 @@
 pub mod cloud_client;
 pub mod sinks;
 pub mod store;
+pub mod wire;
 
 pub use sinks::StderrSink;
