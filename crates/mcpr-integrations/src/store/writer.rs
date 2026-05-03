@@ -35,9 +35,8 @@ use rusqlite::{Connection, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use mcpr_core::event::ProxyEvent;
-use mcpr_core::event::types::RequestEvent;
+use mcpr_core::event::types::{LoggedRequest, LoggedResponse, RequestEvent};
 use mcpr_core::protocol::{
-    Request, Response,
     mcp::{ClientMethod, JsonRpcRequest, JsonRpcResult, RequestId},
     schema::{ChangeSchema, Reason},
     session::{SessionInfo, SessionState, session_id_from_headers},
@@ -189,21 +188,21 @@ fn write_request(
     tx: &Transaction,
     ts: i64,
     proxy: &str,
-    request: &Request,
+    request: &LoggedRequest,
 ) -> rusqlite::Result<()> {
     match request {
-        Request::Mcp(parts, rpc) => {
+        LoggedRequest::Mcp(parts, rpc) => {
             let session_id = session_id_from_headers(&parts.headers);
             insert_request_row(tx, ts, proxy, session_id.as_deref(), rpc)
         }
-        Request::McpBatch(parts, rpcs) => {
+        LoggedRequest::McpBatch(parts, rpcs) => {
             let session_id = session_id_from_headers(&parts.headers);
             for rpc in rpcs {
                 insert_request_row(tx, ts, proxy, session_id.as_deref(), rpc)?;
             }
             Ok(())
         }
-        Request::Http(_) => Ok(()),
+        LoggedRequest::Http { .. } => Ok(()),
     }
 }
 
@@ -234,20 +233,20 @@ fn insert_request_row(
 
 // ── Response side ─────────────────────────────────────────────────────
 
-fn write_response(tx: &Transaction, ts: i64, response: &Response) -> rusqlite::Result<()> {
+fn write_response(tx: &Transaction, ts: i64, response: &LoggedResponse) -> rusqlite::Result<()> {
     match response {
-        Response::Mcp(parts, result) => {
+        LoggedResponse::Mcp(parts, result) => {
             let session_id = session_id_from_headers(&parts.headers);
             insert_response_row(tx, ts, session_id.as_deref(), result)
         }
-        Response::McpBatch(parts, results) => {
+        LoggedResponse::McpBatch(parts, results) => {
             let session_id = session_id_from_headers(&parts.headers);
             for result in results {
                 insert_response_row(tx, ts, session_id.as_deref(), result)?;
             }
             Ok(())
         }
-        Response::Http(_) => Ok(()),
+        LoggedResponse::Http { .. } => Ok(()),
     }
 }
 
@@ -447,9 +446,9 @@ mod tests {
 
     use chrono::Utc;
     use http::request::Builder as RequestBuilder;
+    use http::{Method, StatusCode, Uri};
     use mcpr_core::event::types::RequestEvent;
     use mcpr_core::protocol::{
-        Request, Response,
         mcp::{
             ClientMethod, JsonRpcError, JsonRpcErrorResponse, JsonRpcRequest, JsonRpcResponse,
             JsonRpcResult, JsonRpcVersion, LifecycleMethod, RequestId, ToolsMethod,
@@ -459,7 +458,7 @@ mod tests {
     };
     use serde_json::json;
 
-    fn transaction_event(req: Request, resp: Response) -> ProxyEvent {
+    fn transaction_event(req: LoggedRequest, resp: LoggedResponse) -> ProxyEvent {
         ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "rid".into(),
             request: req,
@@ -471,7 +470,7 @@ mod tests {
         }))
     }
 
-    fn orphan_event(req: Request) -> ProxyEvent {
+    fn orphan_event(req: LoggedRequest) -> ProxyEvent {
         ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "rid".into(),
             request: req,
@@ -487,8 +486,8 @@ mod tests {
         http::Response::new(()).into_parts().0
     }
 
-    fn empty_response_for(id: i64) -> Response {
-        Response::Mcp(
+    fn empty_response_for(id: i64) -> LoggedResponse {
+        LoggedResponse::Mcp(
             empty_response_parts(),
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -530,13 +529,13 @@ mod tests {
         }
     }
 
-    fn mcp_request(sid: &str, rpc: JsonRpcRequest) -> Request {
-        Request::Mcp(parts_with_session(sid), rpc)
+    fn mcp_request(sid: &str, rpc: JsonRpcRequest) -> LoggedRequest {
+        LoggedRequest::Mcp(parts_with_session(sid), rpc)
     }
 
-    fn mcp_response_ok(id: i64) -> Response {
+    fn mcp_response_ok(id: i64) -> LoggedResponse {
         let parts = http::Response::new(()).into_parts().0;
-        Response::Mcp(
+        LoggedResponse::Mcp(
             parts,
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -611,7 +610,7 @@ mod tests {
     fn flush_batch__unfolds_mcp_batch_into_n_rows() {
         let mut conn = test_db();
         let parts = parts_with_session("sess-2");
-        let batch_req = Request::McpBatch(
+        let batch_req = LoggedRequest::McpBatch(
             parts,
             vec![
                 rpc_tools_call(1, "a"),
@@ -635,22 +634,17 @@ mod tests {
     #[test]
     fn flush_batch__skips_http_request_silently() {
         let mut conn = test_db();
-        let http: mcpr_core::protocol::http_request::HttpRequest = http::Request::builder()
-            .method("POST")
-            .uri("/")
-            .body(bytes::Bytes::new())
-            .unwrap();
-        let http_resp = Response::Http(
-            http::Response::builder()
-                .status(200)
-                .body(bytes::Bytes::new())
-                .unwrap(),
-        );
+        let http_req = LoggedRequest::Http {
+            method: Method::POST,
+            uri: "/".parse::<Uri>().unwrap(),
+            body_size: 0,
+        };
+        let http_resp = LoggedResponse::Http {
+            status: StatusCode::OK,
+            body_size: 0,
+        };
 
-        let mut batch = vec![store_event(
-            transaction_event(Request::Http(http), http_resp),
-            1_000,
-        )];
+        let mut batch = vec![store_event(transaction_event(http_req, http_resp), 1_000)];
         drain(&mut conn, &mut batch);
 
         let count: i64 = conn
@@ -716,7 +710,7 @@ mod tests {
             .unwrap()
             .into_parts()
             .0;
-        let resp = Response::Mcp(
+        let resp = LoggedResponse::Mcp(
             parts,
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -779,7 +773,7 @@ mod tests {
             .unwrap()
             .into_parts()
             .0;
-        let resp = Response::Mcp(
+        let resp = LoggedResponse::Mcp(
             parts,
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -948,7 +942,7 @@ mod tests {
     fn flush_batch__bare_jsonrpc_error_drops_response_row() {
         let mut conn = test_db();
         let parts = http::Response::new(()).into_parts().0;
-        let err = Response::Mcp(
+        let err = LoggedResponse::Mcp(
             parts,
             JsonRpcResult::Error(JsonRpcErrorResponse {
                 jsonrpc: JsonRpcVersion,

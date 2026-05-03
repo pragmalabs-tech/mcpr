@@ -325,6 +325,7 @@ pub struct GatewayConfig {
     pub request_timeout: Option<u64>,
     pub cloud_token: Option<String>,
     pub cloud_server: Option<String>,
+    // Default is https://api.mcpr.app/api/ingest-events
     pub cloud_endpoint: Option<String>,
     pub cloud_batch_size: Option<usize>,
     pub cloud_flush_interval_ms: Option<u64>,

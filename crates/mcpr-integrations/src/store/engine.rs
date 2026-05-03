@@ -197,9 +197,8 @@ mod tests {
 
     use chrono::Utc;
     use mcpr_core::event::ProxyEvent;
-    use mcpr_core::event::types::RequestEvent;
+    use mcpr_core::event::types::{LoggedRequest, LoggedResponse, RequestEvent};
     use mcpr_core::protocol::{
-        Request, Response,
         mcp::{
             ClientMethod, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, JsonRpcVersion,
             RequestId, ToolsMethod,
@@ -260,7 +259,7 @@ mod tests {
                 json!("test_tool"),
             )])),
         };
-        let resp = Response::Mcp(
+        let resp = LoggedResponse::Mcp(
             http::Response::new(()).into_parts().0,
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -273,7 +272,7 @@ mod tests {
             proxy: proxy.clone(),
             event: ProxyEvent::Request(Arc::new(RequestEvent {
                 request_id: "rid".into(),
-                request: Request::Mcp(parts, rpc),
+                request: LoggedRequest::Mcp(parts, rpc),
                 response: Some(resp),
                 ts: now,
                 latency_us: 0,

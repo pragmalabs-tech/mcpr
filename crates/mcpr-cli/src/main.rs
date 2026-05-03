@@ -23,6 +23,7 @@ use config::{CliAction, GatewayConfig, Mode};
 use mcpr_core::event::EventManager;
 use mcpr_core::event::types::HeartbeatEvent;
 use mcpr_core::event::{EventBus, ProxyEvent};
+use mcpr_integrations::cloud_client::DEFAULT_CLOUD_INGEST_ENDPOINT;
 use mcpr_integrations::sinks::cloud_sink::{CloudSink, CloudSinkConfig};
 use mcpr_integrations::store::{Store, StoreConfig, path::resolve_db_path};
 use mcpr_integrations::{StderrSink, sinks::SqliteSink};
@@ -147,7 +148,11 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
     event_manager.register(Box::new(StderrSink));
     event_manager.register(Box::new(SqliteSink::new(store, cfg.name.as_str())));
 
-    if let (Some(endpoint), Some(token)) = (cfg.cloud_endpoint.clone(), cfg.cloud_token.clone()) {
+    if let Some(token) = cfg.cloud_token.clone() {
+        let endpoint = cfg
+            .cloud_endpoint
+            .clone()
+            .unwrap_or_else(|| DEFAULT_CLOUD_INGEST_ENDPOINT.to_string());
         let cloud_cfg = CloudSinkConfig {
             endpoint,
             token,

@@ -29,7 +29,7 @@ pub mod types;
 pub use bus::{EventBus, EventBusHandle};
 pub use manager::EventManager;
 pub use sink::{EventSink, NoopSink};
-pub use types::{HeartbeatEvent, ProxyEvent, RequestEvent};
+pub use types::{HeartbeatEvent, LoggedRequest, LoggedResponse, ProxyEvent, RequestEvent};
 
 #[cfg(test)]
 mod tests {
@@ -39,11 +39,11 @@ mod tests {
     use chrono::Utc;
     use http::{Response as HttpResp, StatusCode};
 
+    use crate::event::types::{LoggedRequest, LoggedResponse};
     use crate::protocol::mcp::{
         ClientMethod, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, JsonRpcVersion, RequestId,
         ToolsMethod,
     };
-    use crate::protocol::{Request, Response};
 
     struct MemorySink {
         events: Arc<Mutex<Vec<ProxyEvent>>>,
@@ -94,7 +94,7 @@ mod tests {
             .0;
         ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "test-id".into(),
-            request: Request::Mcp(
+            request: LoggedRequest::Mcp(
                 req_parts,
                 JsonRpcRequest {
                     jsonrpc: JsonRpcVersion,
@@ -103,7 +103,7 @@ mod tests {
                     params: None,
                 },
             ),
-            response: Some(Response::Mcp(
+            response: Some(LoggedResponse::Mcp(
                 resp_parts,
                 JsonRpcResult::Response(JsonRpcResponse {
                     jsonrpc: JsonRpcVersion,

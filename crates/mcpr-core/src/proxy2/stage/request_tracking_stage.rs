@@ -43,17 +43,16 @@ impl ResponseStage for ResponseLogStage {
             .map(|(_, us)| *us)
             .unwrap_or(0);
 
-        let request = match request_ctx.request.as_ref() {
-            Some(req) => (**req).clone(),
-            None => return Ok(res),
+        let Some(req_arc) = request_ctx.request.as_ref() else {
+            return Ok(res);
         };
 
         state
             .event_bus
             .emit(ProxyEvent::Request(Arc::new(RequestEvent {
                 request_id: request_ctx.request_id.clone(),
-                request,
-                response: Some(res.clone()),
+                request: req_arc.as_ref().into(),
+                response: Some((&res).into()),
                 ts: Utc::now(),
                 latency_us,
                 upstream_us,

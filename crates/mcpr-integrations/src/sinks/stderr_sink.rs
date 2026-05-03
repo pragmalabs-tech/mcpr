@@ -4,10 +4,9 @@
 
 use std::io::Write;
 
-use mcpr_core::event::types::RequestEvent;
+use mcpr_core::event::types::{LoggedRequest, LoggedResponse, RequestEvent};
 use mcpr_core::event::{EventSink, ProxyEvent};
 use mcpr_core::protocol::schema::ChangeSchema;
-use mcpr_core::protocol::{Request, Response};
 use serde_json::{Value, json};
 
 /// Sink that prints proxy events to stderr as JSON, one event per line.
@@ -108,27 +107,31 @@ fn format_transaction(re: &RequestEvent) -> Value {
     })
 }
 
-fn format_request(req: &Request) -> Value {
+fn format_request(req: &LoggedRequest) -> Value {
     match req {
-        Request::Mcp(_, rpc) => json!({"kind": "mcp", "rpc": rpc}),
-        Request::McpBatch(_, rpcs) => json!({"kind": "mcp_batch", "rpcs": rpcs}),
-        Request::Http(http) => json!({
+        LoggedRequest::Mcp(_, rpc) => json!({"kind": "mcp", "rpc": rpc}),
+        LoggedRequest::McpBatch(_, rpcs) => json!({"kind": "mcp_batch", "rpcs": rpcs}),
+        LoggedRequest::Http {
+            method,
+            uri,
+            body_size,
+        } => json!({
             "kind": "http",
-            "method": http.method().as_str(),
-            "path": http.uri().path(),
-            "size": http.body().len(),
+            "method": method.as_str(),
+            "path": uri.path(),
+            "size": body_size,
         }),
     }
 }
 
-fn format_response(resp: &Response) -> Value {
+fn format_response(resp: &LoggedResponse) -> Value {
     match resp {
-        Response::Mcp(_, result) => json!({"kind": "mcp", "result": result}),
-        Response::McpBatch(_, rs) => json!({"kind": "mcp_batch", "results": rs}),
-        Response::Http(http) => json!({
+        LoggedResponse::Mcp(_, result) => json!({"kind": "mcp", "result": result}),
+        LoggedResponse::McpBatch(_, rs) => json!({"kind": "mcp_batch", "results": rs}),
+        LoggedResponse::Http { status, body_size } => json!({
             "kind": "http",
-            "status": http.status().as_u16(),
-            "size": http.body().len(),
+            "status": status.as_u16(),
+            "size": body_size,
         }),
     }
 }
@@ -140,9 +143,8 @@ mod tests {
 
     use std::sync::Arc;
 
-    use bytes::Bytes;
     use chrono::Utc;
-    use http::{Request as HttpReq, Response as HttpResp, StatusCode};
+    use http::{Method, Request as HttpReq, Response as HttpResp, StatusCode, Uri};
     use mcpr_core::protocol::mcp::{
         ClientInfo, ClientMethod, JsonRpcError, JsonRpcErrorResponse, JsonRpcRequest,
         JsonRpcResponse, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
@@ -166,7 +168,7 @@ mod tests {
         HttpResp::builder().body(()).unwrap().into_parts().0
     }
 
-    fn transaction(request: Request, response: Response) -> ProxyEvent {
+    fn transaction(request: LoggedRequest, response: LoggedResponse) -> ProxyEvent {
         ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "rid-1".into(),
             request,
@@ -178,7 +180,7 @@ mod tests {
         }))
     }
 
-    fn orphan(request: Request) -> ProxyEvent {
+    fn orphan(request: LoggedRequest) -> ProxyEvent {
         ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "rid-orphan".into(),
             request,
@@ -190,8 +192,8 @@ mod tests {
         }))
     }
 
-    fn mcp_request(method: ClientMethod, params: Option<Map<String, Value>>) -> Request {
-        Request::Mcp(
+    fn mcp_request(method: ClientMethod, params: Option<Map<String, Value>>) -> LoggedRequest {
+        LoggedRequest::Mcp(
             empty_request_parts(),
             JsonRpcRequest {
                 jsonrpc: JsonRpcVersion,
@@ -202,8 +204,8 @@ mod tests {
         )
     }
 
-    fn mcp_response_ok() -> Response {
-        Response::Mcp(
+    fn mcp_response_ok() -> LoggedResponse {
+        LoggedResponse::Mcp(
             empty_response_parts(),
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -213,8 +215,8 @@ mod tests {
         )
     }
 
-    fn mcp_response_error(code: i32, message: &str) -> Response {
-        Response::Mcp(
+    fn mcp_response_error(code: i32, message: &str) -> LoggedResponse {
+        LoggedResponse::Mcp(
             empty_response_parts(),
             JsonRpcResult::Error(JsonRpcErrorResponse {
                 jsonrpc: JsonRpcVersion,
@@ -228,21 +230,19 @@ mod tests {
         )
     }
 
-    fn http_request(method: &str, path: &str, body: &[u8]) -> Request {
-        let req = HttpReq::builder()
-            .method(method)
-            .uri(path)
-            .body(Bytes::copy_from_slice(body))
-            .unwrap();
-        Request::Http(req)
+    fn http_request(method: &str, path: &str, body: &[u8]) -> LoggedRequest {
+        LoggedRequest::Http {
+            method: Method::from_bytes(method.as_bytes()).unwrap(),
+            uri: path.parse::<Uri>().unwrap(),
+            body_size: body.len(),
+        }
     }
 
-    fn http_response(status: u16, body: &[u8]) -> Response {
-        let resp = HttpResp::builder()
-            .status(StatusCode::from_u16(status).unwrap())
-            .body(Bytes::copy_from_slice(body))
-            .unwrap();
-        Response::Http(resp)
+    fn http_response(status: u16, body: &[u8]) -> LoggedResponse {
+        LoggedResponse::Http {
+            status: StatusCode::from_u16(status).unwrap(),
+            body_size: body.len(),
+        }
     }
 
     fn session(id: &str, client: Option<ClientInfo>) -> ProxyEvent {
@@ -336,7 +336,7 @@ mod tests {
             },
         ];
         let v = render(&transaction(
-            Request::McpBatch(empty_request_parts(), rpcs),
+            LoggedRequest::McpBatch(empty_request_parts(), rpcs),
             mcp_response_ok(),
         ));
         assert_eq!(v["request"]["kind"], "mcp_batch");

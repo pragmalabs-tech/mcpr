@@ -60,13 +60,10 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use mcpr_core::event::types::RequestEvent;
-    use mcpr_core::protocol::{
-        Request, Response,
-        mcp::{
-            ClientMethod, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, JsonRpcVersion,
-            RequestId, ToolsMethod,
-        },
+    use mcpr_core::event::types::{LoggedRequest, LoggedResponse, RequestEvent};
+    use mcpr_core::protocol::mcp::{
+        ClientMethod, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, JsonRpcVersion, RequestId,
+        ToolsMethod,
     };
     use serde_json::json;
 
@@ -92,7 +89,7 @@ mod tests {
         }
     }
 
-    fn mcp_request(sid: &str, rpc: JsonRpcRequest) -> Request {
+    fn mcp_request(sid: &str, rpc: JsonRpcRequest) -> LoggedRequest {
         let parts = http::Request::builder()
             .method("POST")
             .uri("/")
@@ -101,12 +98,12 @@ mod tests {
             .unwrap()
             .into_parts()
             .0;
-        Request::Mcp(parts, rpc)
+        LoggedRequest::Mcp(parts, rpc)
     }
 
-    fn ok_response(id: i64) -> Response {
+    fn ok_response(id: i64) -> LoggedResponse {
         let parts = http::Response::new(()).into_parts().0;
-        Response::Mcp(
+        LoggedResponse::Mcp(
             parts,
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -116,7 +113,7 @@ mod tests {
         )
     }
 
-    fn transaction(req: Request, resp: Response) -> ProxyEvent {
+    fn transaction(req: LoggedRequest, resp: LoggedResponse) -> ProxyEvent {
         ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "rid".into(),
             request: req,

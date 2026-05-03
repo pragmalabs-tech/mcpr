@@ -3,8 +3,9 @@
 //! The cloud ingest endpoint receives an array of these envelopes and
 //! lands them verbatim in `events_raw`. ClickHouse materialized views
 //! project analytics columns from `payload` on insert, so the wire
-//! format stays raw: full JSON-RPC envelopes, full HTTP bodies, no
-//! pre-aggregation. The proxy doesn't know what cloud needs to query.
+//! format stays raw: full JSON-RPC envelopes for MCP traffic. HTTP
+//! bodies are NOT shipped (only method/uri/status/body_size) so HTML
+//! pages, SSE streams, and probes don't bloat ingest.
 //!
 //! Each `ProxyEvent::Request` is split on the wire into one "request"
 //! envelope and one "response" envelope sharing the same `request_id`
@@ -17,11 +18,10 @@
 //! ```
 
 use mcpr_core::event::ProxyEvent;
-use mcpr_core::event::types::{HeartbeatEvent, RequestEvent};
+use mcpr_core::event::types::{HeartbeatEvent, LoggedRequest, LoggedResponse, RequestEvent};
 use mcpr_core::protocol::mcp::{JsonRpcRequest, JsonRpcResult};
 use mcpr_core::protocol::schema::{ChangeSchema, Reason};
 use mcpr_core::protocol::session::{SessionInfo, SessionState};
-use mcpr_core::protocol::{Request, Response};
 use serde_json::{Value, json};
 
 const ENVELOPE_VERSION: u8 = 1;
@@ -73,9 +73,14 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
     out
 }
 
-fn encode_request_envelopes(req: &Request, server: &str, ts: &str, request_id: &str) -> Vec<Value> {
+fn encode_request_envelopes(
+    req: &LoggedRequest,
+    server: &str,
+    ts: &str,
+    request_id: &str,
+) -> Vec<Value> {
     match req {
-        Request::Mcp(parts, rpc) => {
+        LoggedRequest::Mcp(parts, rpc) => {
             let http_method = parts.method.as_str();
             let uri = parts.uri.to_string();
             vec![envelope(
@@ -85,7 +90,7 @@ fn encode_request_envelopes(req: &Request, server: &str, ts: &str, request_id: &
                 mcp_request_payload(request_id, http_method, &uri, rpc),
             )]
         }
-        Request::McpBatch(parts, rpcs) => {
+        LoggedRequest::McpBatch(parts, rpcs) => {
             let http_method = parts.method.as_str();
             let uri = parts.uri.to_string();
             rpcs.iter()
@@ -99,14 +104,17 @@ fn encode_request_envelopes(req: &Request, server: &str, ts: &str, request_id: &
                 })
                 .collect()
         }
-        Request::Http(http) => {
+        LoggedRequest::Http {
+            method,
+            uri,
+            body_size,
+        } => {
             let payload = json!({
                 "kind": "http",
                 "request_id": request_id,
-                "http_method": http.method().as_str(),
-                "uri": http.uri().to_string(),
-                "body": String::from_utf8_lossy(http.body()),
-                "body_size": http.body().len(),
+                "http_method": method.as_str(),
+                "uri": uri.to_string(),
+                "body_size": body_size,
             });
             vec![envelope("request", ts.to_string(), server, payload)]
         }
@@ -133,7 +141,7 @@ fn encode_response_envelopes(re: &RequestEvent, server: &str, ts: &str) -> Vec<V
         return vec![];
     };
     match response {
-        Response::Mcp(parts, result) => {
+        LoggedResponse::Mcp(parts, result) => {
             let http_status = parts.status.as_u16();
             vec![envelope(
                 "response",
@@ -148,7 +156,7 @@ fn encode_response_envelopes(re: &RequestEvent, server: &str, ts: &str) -> Vec<V
                 ),
             )]
         }
-        Response::McpBatch(parts, results) => {
+        LoggedResponse::McpBatch(parts, results) => {
             let http_status = parts.status.as_u16();
             results
                 .iter()
@@ -168,13 +176,12 @@ fn encode_response_envelopes(re: &RequestEvent, server: &str, ts: &str) -> Vec<V
                 })
                 .collect()
         }
-        Response::Http(http) => {
+        LoggedResponse::Http { status, body_size } => {
             let payload = json!({
                 "kind": "http",
                 "request_id": re.request_id,
-                "http_status": http.status().as_u16(),
-                "body": String::from_utf8_lossy(http.body()),
-                "body_size": http.body().len(),
+                "http_status": status.as_u16(),
+                "body_size": body_size,
                 "latency_us": re.latency_us,
                 "upstream_us": re.upstream_us,
             });
@@ -268,9 +275,8 @@ mod tests {
 
     use std::sync::Arc;
 
-    use bytes::Bytes;
     use chrono::Utc;
-    use http::{Request as HttpReq, Response as HttpResp, StatusCode};
+    use http::{Method, Request as HttpReq, Response as HttpResp, StatusCode, Uri};
     use mcpr_core::protocol::mcp::{
         ClientInfo, ClientMethod, JsonRpcError, JsonRpcErrorResponse, JsonRpcRequest,
         JsonRpcResponse, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
@@ -308,8 +314,8 @@ mod tests {
         }
     }
 
-    fn ok_response(id: i64) -> Response {
-        Response::Mcp(
+    fn ok_response(id: i64) -> LoggedResponse {
+        LoggedResponse::Mcp(
             resp_parts(200),
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -319,11 +325,19 @@ mod tests {
         )
     }
 
-    fn empty_http_response() -> Response {
-        Response::Http(HttpResp::builder().status(200).body(Bytes::new()).unwrap())
+    fn empty_http_response() -> LoggedResponse {
+        LoggedResponse::Http {
+            status: StatusCode::OK,
+            body_size: 0,
+        }
     }
 
-    fn transaction(req: Request, resp: Response, latency_us: u64, upstream_us: u64) -> ProxyEvent {
+    fn transaction(
+        req: LoggedRequest,
+        resp: LoggedResponse,
+        latency_us: u64,
+        upstream_us: u64,
+    ) -> ProxyEvent {
         ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "rid-X".into(),
             request: req,
@@ -335,7 +349,7 @@ mod tests {
         }))
     }
 
-    fn orphan(req: Request) -> ProxyEvent {
+    fn orphan(req: LoggedRequest) -> ProxyEvent {
         ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "rid-orphan".into(),
             request: req,
@@ -351,7 +365,7 @@ mod tests {
 
     #[test]
     fn encode_envelopes__orphan_emits_request_only() {
-        let event = orphan(Request::Mcp(
+        let event = orphan(LoggedRequest::Mcp(
             req_parts(),
             rpc(ClientMethod::Tools(ToolsMethod::List), None),
         ));
@@ -364,7 +378,7 @@ mod tests {
     #[test]
     fn encode_envelopes__transaction_emits_request_then_response() {
         let event = transaction(
-            Request::Mcp(
+            LoggedRequest::Mcp(
                 req_parts(),
                 rpc(ClientMethod::Tools(ToolsMethod::List), None),
             ),
@@ -384,7 +398,7 @@ mod tests {
     #[test]
     fn encode_envelopes__request_and_response_share_request_id() {
         let event = transaction(
-            Request::Mcp(
+            LoggedRequest::Mcp(
                 req_parts(),
                 rpc(ClientMethod::Tools(ToolsMethod::List), None),
             ),
@@ -400,7 +414,7 @@ mod tests {
     #[test]
     fn encode_envelopes__request_and_response_share_ts() {
         let event = transaction(
-            Request::Mcp(
+            LoggedRequest::Mcp(
                 req_parts(),
                 rpc(ClientMethod::Tools(ToolsMethod::List), None),
             ),
@@ -420,7 +434,7 @@ mod tests {
         params.insert("name".into(), json!("search"));
         params.insert("arguments".into(), json!({"q": "rust"}));
         let event = transaction(
-            Request::Mcp(
+            LoggedRequest::Mcp(
                 req_parts(),
                 rpc(ClientMethod::Tools(ToolsMethod::Call), Some(params)),
             ),
@@ -452,7 +466,7 @@ mod tests {
             .into_parts()
             .0;
         let event = transaction(
-            Request::Mcp(parts, rpc(ClientMethod::Tools(ToolsMethod::List), None)),
+            LoggedRequest::Mcp(parts, rpc(ClientMethod::Tools(ToolsMethod::List), None)),
             ok_response(1),
             0,
             0,
@@ -467,7 +481,7 @@ mod tests {
 
     #[test]
     fn encode_request__mcp_batch_flattens_into_n_envelopes() {
-        let batch = Request::McpBatch(
+        let batch = LoggedRequest::McpBatch(
             req_parts(),
             vec![
                 rpc(ClientMethod::Tools(ToolsMethod::List), None),
@@ -492,17 +506,16 @@ mod tests {
 
     // ── request: Http ────────────────────────────────────────────
 
-    fn http_req(method: &str, uri: &str, body: &'static [u8]) -> Request {
-        let req = HttpReq::builder()
-            .method(method)
-            .uri(uri)
-            .body(Bytes::from_static(body))
-            .unwrap();
-        Request::Http(req)
+    fn http_req(method: &str, uri: &str, body: &'static [u8]) -> LoggedRequest {
+        LoggedRequest::Http {
+            method: Method::from_bytes(method.as_bytes()).unwrap(),
+            uri: uri.parse::<Uri>().unwrap(),
+            body_size: body.len(),
+        }
     }
 
     #[test]
-    fn encode_request__http_carries_body_and_size() {
+    fn encode_request__http_carries_method_uri_and_size_only() {
         let envs = encode_envelopes(
             &transaction(
                 http_req("PUT", "/some/path", b"hello world"),
@@ -517,32 +530,15 @@ mod tests {
         assert_eq!(p["kind"], "http");
         assert_eq!(p["http_method"], "PUT");
         assert_eq!(p["uri"], "/some/path");
-        assert_eq!(p["body"], "hello world");
         assert_eq!(p["body_size"], 11);
-    }
-
-    #[test]
-    fn encode_request__http_binary_body_lossy_decoded() {
-        let envs = encode_envelopes(
-            &transaction(
-                http_req("POST", "/", &[0xFF, 0xFE, b'a']),
-                empty_http_response(),
-                0,
-                0,
-            ),
-            "s",
-        );
-        let p = envs[0]["payload"].clone();
-
-        assert_eq!(p["body_size"], 3);
-        assert!(p["body"].is_string());
+        assert!(p.get("body").is_none());
     }
 
     // ── response: Mcp with timing ────────────────────────────────
 
     #[test]
     fn encode_response__mcp_carries_full_result_envelope_and_timing() {
-        let resp = Response::Mcp(
+        let resp = LoggedResponse::Mcp(
             resp_parts(200),
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
@@ -551,7 +547,7 @@ mod tests {
             }),
         );
         let event = transaction(
-            Request::Mcp(
+            LoggedRequest::Mcp(
                 req_parts(),
                 rpc(ClientMethod::Tools(ToolsMethod::List), None),
             ),
@@ -574,7 +570,7 @@ mod tests {
 
     #[test]
     fn encode_response__mcp_error_carries_full_error_envelope() {
-        let resp = Response::Mcp(
+        let resp = LoggedResponse::Mcp(
             resp_parts(200),
             JsonRpcResult::Error(JsonRpcErrorResponse {
                 jsonrpc: JsonRpcVersion,
@@ -587,7 +583,7 @@ mod tests {
             }),
         );
         let event = transaction(
-            Request::Mcp(
+            LoggedRequest::Mcp(
                 req_parts(),
                 rpc(ClientMethod::Tools(ToolsMethod::List), None),
             ),
@@ -609,7 +605,7 @@ mod tests {
             .with_timezone(&Utc);
         let event = ProxyEvent::Request(Arc::new(RequestEvent {
             request_id: "rid-Z".into(),
-            request: Request::Mcp(
+            request: LoggedRequest::Mcp(
                 req_parts(),
                 rpc(ClientMethod::Tools(ToolsMethod::List), None),
             ),
@@ -629,7 +625,7 @@ mod tests {
 
     #[test]
     fn encode_response__mcp_batch_flattens_with_shared_timing() {
-        let resp = Response::McpBatch(
+        let resp = LoggedResponse::McpBatch(
             resp_parts(200),
             vec![
                 JsonRpcResult::Response(JsonRpcResponse {
@@ -649,7 +645,7 @@ mod tests {
             ],
         );
         let event = transaction(
-            Request::Mcp(
+            LoggedRequest::Mcp(
                 req_parts(),
                 rpc(ClientMethod::Tools(ToolsMethod::List), None),
             ),
@@ -675,18 +671,18 @@ mod tests {
 
     #[test]
     fn encode_response__http_carries_status_body_size_and_timing() {
-        let http = HttpResp::builder()
-            .status(502)
-            .body(Bytes::copy_from_slice(b"upstream is dead"))
-            .unwrap();
-        let event = transaction(http_req("GET", "/", b""), Response::Http(http), 200, 150);
+        let resp = LoggedResponse::Http {
+            status: StatusCode::BAD_GATEWAY,
+            body_size: 16,
+        };
+        let event = transaction(http_req("GET", "/", b""), resp, 200, 150);
         let envs = encode_envelopes(&event, "s");
         let p = envs.iter().find(|e| e["kind"] == "response").unwrap()["payload"].clone();
 
         assert_eq!(p["kind"], "http");
         assert_eq!(p["http_status"], 502);
-        assert_eq!(p["body"], "upstream is dead");
         assert_eq!(p["body_size"], 16);
+        assert!(p.get("body").is_none());
         assert_eq!(p["latency_us"], 200);
         assert_eq!(p["upstream_us"], 150);
     }

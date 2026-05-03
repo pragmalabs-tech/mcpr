@@ -9,6 +9,10 @@ use serde::{Deserialize, Serialize};
 /// Default cloud API base URL.
 pub const DEFAULT_CLOUD_URL: &str = "https://api.mcpr.app";
 
+/// Default ingest endpoint for the cloud event sink. Used when the
+/// operator sets a `cloud.token` but omits `cloud.endpoint`.
+pub const DEFAULT_CLOUD_INGEST_ENDPOINT: &str = "https://api.mcpr.app/api/ingest-events";
+
 // ── Response / model types ─────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

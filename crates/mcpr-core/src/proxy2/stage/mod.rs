@@ -169,7 +169,7 @@ fn emit_orphan_event(ctx: &RequestContext, bus: &EventBus) {
 
     bus.emit(ProxyEvent::Request(Arc::new(RequestEvent {
         request_id: ctx.request_id.clone(),
-        request: (**req_arc).clone(),
+        request: req_arc.as_ref().into(),
         response: None,
         ts: Utc::now(),
         latency_us,
