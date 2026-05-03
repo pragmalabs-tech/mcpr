@@ -32,14 +32,13 @@ use crate::{
 /// The fields live on [`RequestContextInner`] behind a shared `Arc` so
 /// stages can hold or move the context without re-allocating the
 /// `client_methods` map or duplicating the timer.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct RequestContext {
     inner: Arc<RequestContextInner>,
 }
 
 /// Underlying per-request state. Field access on [`RequestContext`]
 /// goes through `Deref` to this struct, so call sites stay ergonomic.
-#[derive(Debug)]
 pub struct RequestContextInner {
     /// `RequestId → ClientMethod` map. 1 entry for single MCP requests,
     /// N entries for batches, empty for HTTP.
@@ -57,10 +56,19 @@ pub struct RequestContextInner {
     /// session-close signal. Triggers `end_session` when its response
     /// comes back.
     pub is_session_close: bool,
-    /// Proxy-internal request id. UUID minted at pipeline entry, used
-    /// to correlate logs and metrics across stages and the upstream
-    /// call. Distinct from any MCP `RequestId`, which is client-supplied.
+    /// Correlation key for the transaction. Source depends on the
+    /// inbound request:
+    ///
+    /// - `Request::Mcp` -> JSON-RPC `id` stringified.
+    /// - `Request::McpBatch` (legacy) -> first rpc's JSON-RPC `id`.
+    /// - `Request::Http` -> fresh UUID v4 minted at pipeline entry.
     pub request_id: String,
+    /// Snapshot of the parsed inbound request as it entered the
+    /// pipeline. Stashed here so the response stage can build a
+    /// consolidated `RequestEvent` carrying both halves of the
+    /// transaction. `None` only on the `Default` path used by tests
+    /// that don't go through `with_timer`.
+    pub request: Option<Arc<Request>>,
     /// Wall-clock instant captured at pipeline entry. Response stages
     /// read this to compute end-to-end request latency.
     pub started_at: Instant,
@@ -78,6 +86,7 @@ impl Default for RequestContextInner {
             initialize: None,
             is_session_close: false,
             request_id: String::new(),
+            request: None,
             started_at: Instant::now(),
             timer: Timer::default(),
         }
@@ -113,6 +122,7 @@ impl RequestContext {
     /// in the HTTP entry point) land in the same dump as the stage spans.
     pub fn with_timer(request: &Request, timer: Timer) -> Self {
         let started_at = Instant::now();
+        let request_arc = Arc::new(request.clone());
         let inner = match request {
             Request::Mcp(parts, rpc) => {
                 let mut client_methods = HashMap::with_capacity(1);
@@ -130,7 +140,8 @@ impl RequestContext {
                     session_id: session_id_from_headers(&parts.headers),
                     initialize,
                     is_session_close: false,
-                    request_id: new_request_id(),
+                    request_id: rpc.id.to_string(),
+                    request: Some(request_arc),
                     started_at,
                     timer,
                 }
@@ -145,7 +156,12 @@ impl RequestContext {
                 // request is single-shot. Skip the scan.
                 initialize: None,
                 is_session_close: false,
-                request_id: new_request_id(),
+                // Legacy MCP batch (removed from spec in 2025-06-18). Use
+                // the first rpc's id as the correlation key; sinks that
+                // care about per-rpc detail still see the full batch in
+                // `request`.
+                request_id: rpcs.first().map(|r| r.id.to_string()).unwrap_or_default(),
+                request: Some(request_arc),
                 started_at,
                 timer,
             },
@@ -154,7 +170,8 @@ impl RequestContext {
                 session_id: session_id_from_headers(http.headers()),
                 initialize: None,
                 is_session_close: http.method() == Method::DELETE,
-                request_id: new_request_id(),
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request: Some(request_arc),
                 started_at,
                 timer,
             },
@@ -165,10 +182,6 @@ impl RequestContext {
     pub fn get_method(&self, request_id: &RequestId) -> Option<&ClientMethod> {
         self.client_methods.get(request_id)
     }
-}
-
-fn new_request_id() -> String {
-    uuid::Uuid::new_v4().to_string()
 }
 
 #[async_trait]

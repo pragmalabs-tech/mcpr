@@ -66,6 +66,7 @@ impl Request {
                 JsonShape::Other => {}
             }
         }
+
         Ok(Self::Http(axum::http::Request::from_parts(parts, bytes)))
     }
 }
@@ -79,7 +80,7 @@ impl Request {
 pub enum Response {
     Mcp(ResponseParts, mcp::JsonRpcResult),
     McpBatch(ResponseParts, Vec<mcp::JsonRpcResult>),
-    Http(http_request::Result),
+    Http(http_request::HttpResult),
 }
 
 impl Response {

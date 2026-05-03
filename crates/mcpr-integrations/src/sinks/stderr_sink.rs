@@ -4,10 +4,11 @@
 
 use std::io::Write;
 
+use mcpr_core::event::types::RequestEvent;
 use mcpr_core::event::{EventSink, ProxyEvent};
 use mcpr_core::protocol::schema::ChangeSchema;
 use mcpr_core::protocol::{Request, Response};
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Sink that prints proxy events to stderr as JSON, one event per line.
 pub struct StderrSink;
@@ -47,33 +48,7 @@ impl EventSink for StderrSink {
 
 fn format_json(event: &ProxyEvent) -> String {
     let value = match event {
-        ProxyEvent::Request(req) => match req.as_ref() {
-            Request::Mcp(_, rpc) => json!({"type": "request", "kind": "mcp", "rpc": rpc}),
-            Request::McpBatch(_, rpcs) => {
-                json!({"type": "request", "kind": "mcp_batch", "rpcs": rpcs})
-            }
-            Request::Http(http) => json!({
-                "type": "request",
-                "kind": "http",
-                "method": http.method().as_str(),
-                "path": http.uri().path(),
-                "size": http.body().len(),
-            }),
-        },
-        ProxyEvent::Response(resp) => match resp.as_ref() {
-            Response::Mcp(_, result) => {
-                json!({"type": "response", "kind": "mcp", "result": result})
-            }
-            Response::McpBatch(_, rs) => {
-                json!({"type": "response", "kind": "mcp_batch", "results": rs})
-            }
-            Response::Http(http) => json!({
-                "type": "response",
-                "kind": "http",
-                "status": http.status().as_u16(),
-                "size": http.body().len(),
-            }),
-        },
+        ProxyEvent::Request(re) => format_transaction(re),
         ProxyEvent::Session(info) => json!({
             "type": "session",
             "id": info.id,
@@ -122,6 +97,42 @@ fn format_json(event: &ProxyEvent) -> String {
     serde_json::to_string(&value).unwrap_or_default()
 }
 
+fn format_transaction(re: &RequestEvent) -> Value {
+    json!({
+        "type": "transaction",
+        "request_id": re.request_id,
+        "request": format_request(&re.request),
+        "response": re.response.as_ref().map(format_response),
+        "latency_us": re.latency_us,
+        "upstream_us": re.upstream_us,
+    })
+}
+
+fn format_request(req: &Request) -> Value {
+    match req {
+        Request::Mcp(_, rpc) => json!({"kind": "mcp", "rpc": rpc}),
+        Request::McpBatch(_, rpcs) => json!({"kind": "mcp_batch", "rpcs": rpcs}),
+        Request::Http(http) => json!({
+            "kind": "http",
+            "method": http.method().as_str(),
+            "path": http.uri().path(),
+            "size": http.body().len(),
+        }),
+    }
+}
+
+fn format_response(resp: &Response) -> Value {
+    match resp {
+        Response::Mcp(_, result) => json!({"kind": "mcp", "result": result}),
+        Response::McpBatch(_, rs) => json!({"kind": "mcp_batch", "results": rs}),
+        Response::Http(http) => json!({
+            "kind": "http",
+            "status": http.status().as_u16(),
+            "size": http.body().len(),
+        }),
+    }
+}
+
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
@@ -130,6 +141,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use chrono::Utc;
     use http::{Request as HttpReq, Response as HttpResp, StatusCode};
     use mcpr_core::protocol::mcp::{
         ClientInfo, ClientMethod, JsonRpcError, JsonRpcErrorResponse, JsonRpcRequest,
@@ -154,8 +166,32 @@ mod tests {
         HttpResp::builder().body(()).unwrap().into_parts().0
     }
 
-    fn mcp_request(method: ClientMethod, params: Option<Map<String, Value>>) -> ProxyEvent {
-        ProxyEvent::Request(Arc::new(Request::Mcp(
+    fn transaction(request: Request, response: Response) -> ProxyEvent {
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-1".into(),
+            request,
+            response: Some(response),
+            ts: Utc::now(),
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+        }))
+    }
+
+    fn orphan(request: Request) -> ProxyEvent {
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-orphan".into(),
+            request,
+            response: None,
+            ts: Utc::now(),
+            latency_us: 100,
+            upstream_us: 0,
+            spans: vec![],
+        }))
+    }
+
+    fn mcp_request(method: ClientMethod, params: Option<Map<String, Value>>) -> Request {
+        Request::Mcp(
             empty_request_parts(),
             JsonRpcRequest {
                 jsonrpc: JsonRpcVersion,
@@ -163,22 +199,22 @@ mod tests {
                 method,
                 params,
             },
-        )))
+        )
     }
 
-    fn mcp_response_ok() -> ProxyEvent {
-        ProxyEvent::Response(Arc::new(Response::Mcp(
+    fn mcp_response_ok() -> Response {
+        Response::Mcp(
             empty_response_parts(),
             JsonRpcResult::Response(JsonRpcResponse {
                 jsonrpc: JsonRpcVersion,
                 id: RequestId::Number(1),
                 result: Some(json!({"tools": []})),
             }),
-        )))
+        )
     }
 
-    fn mcp_response_error(code: i32, message: &str) -> ProxyEvent {
-        ProxyEvent::Response(Arc::new(Response::Mcp(
+    fn mcp_response_error(code: i32, message: &str) -> Response {
+        Response::Mcp(
             empty_response_parts(),
             JsonRpcResult::Error(JsonRpcErrorResponse {
                 jsonrpc: JsonRpcVersion,
@@ -189,24 +225,24 @@ mod tests {
                     data: None,
                 },
             }),
-        )))
+        )
     }
 
-    fn http_request(method: &str, path: &str, body: &[u8]) -> ProxyEvent {
+    fn http_request(method: &str, path: &str, body: &[u8]) -> Request {
         let req = HttpReq::builder()
             .method(method)
             .uri(path)
             .body(Bytes::copy_from_slice(body))
             .unwrap();
-        ProxyEvent::Request(Arc::new(Request::Http(req)))
+        Request::Http(req)
     }
 
-    fn http_response(status: u16, body: &[u8]) -> ProxyEvent {
+    fn http_response(status: u16, body: &[u8]) -> Response {
         let resp = HttpResp::builder()
             .status(StatusCode::from_u16(status).unwrap())
             .body(Bytes::copy_from_slice(body))
             .unwrap();
-        ProxyEvent::Response(Arc::new(Response::Http(resp)))
+        Response::Http(resp)
     }
 
     fn session(id: &str, client: Option<ClientInfo>) -> ProxyEvent {
@@ -218,27 +254,69 @@ mod tests {
         serde_json::from_str(&StderrSink::new().format_event(event)).unwrap()
     }
 
-    // ── Request ──────────────────────────────────────────────────
+    // ── Transaction shape ─────────────────────────────────────────
+
+    #[test]
+    fn json__transaction_includes_request_id() {
+        let v = render(&transaction(
+            mcp_request(ClientMethod::Tools(ToolsMethod::List), None),
+            mcp_response_ok(),
+        ));
+        assert_eq!(v["type"], "transaction");
+        assert_eq!(v["request_id"], "rid-1");
+    }
+
+    #[test]
+    fn json__transaction_carries_latency_fields() {
+        let event = ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-2".into(),
+            request: mcp_request(ClientMethod::Tools(ToolsMethod::List), None),
+            response: Some(mcp_response_ok()),
+            ts: Utc::now(),
+            latency_us: 1234,
+            upstream_us: 999,
+            spans: vec![],
+        }));
+        let v = render(&event);
+        assert_eq!(v["latency_us"], 1234);
+        assert_eq!(v["upstream_us"], 999);
+    }
+
+    #[test]
+    fn json__orphan_transaction_emits_null_response() {
+        let v = render(&orphan(mcp_request(
+            ClientMethod::Tools(ToolsMethod::List),
+            None,
+        )));
+        assert_eq!(v["type"], "transaction");
+        assert_eq!(v["request_id"], "rid-orphan");
+        assert!(v["response"].is_null());
+        assert_eq!(v["latency_us"], 100);
+    }
+
+    // ── Request side of the transaction ──────────────────────────
 
     #[test]
     fn json__mcp_request_includes_rpc_envelope() {
-        let v = render(&mcp_request(ClientMethod::Tools(ToolsMethod::List), None));
-        assert_eq!(v["type"], "request");
-        assert_eq!(v["kind"], "mcp");
-        assert_eq!(v["rpc"]["method"], "tools/list");
-        assert_eq!(v["rpc"]["id"], 1);
+        let v = render(&transaction(
+            mcp_request(ClientMethod::Tools(ToolsMethod::List), None),
+            mcp_response_ok(),
+        ));
+        assert_eq!(v["request"]["kind"], "mcp");
+        assert_eq!(v["request"]["rpc"]["method"], "tools/list");
+        assert_eq!(v["request"]["rpc"]["id"], 1);
     }
 
     #[test]
     fn json__mcp_request_tools_call_preserves_params() {
         let mut params = Map::new();
         params.insert("name".into(), json!("search"));
-        let v = render(&mcp_request(
-            ClientMethod::Tools(ToolsMethod::Call),
-            Some(params),
+        let v = render(&transaction(
+            mcp_request(ClientMethod::Tools(ToolsMethod::Call), Some(params)),
+            mcp_response_ok(),
         ));
-        assert_eq!(v["rpc"]["method"], "tools/call");
-        assert_eq!(v["rpc"]["params"]["name"], "search");
+        assert_eq!(v["request"]["rpc"]["method"], "tools/call");
+        assert_eq!(v["request"]["rpc"]["params"]["name"], "search");
     }
 
     #[test]
@@ -257,53 +335,63 @@ mod tests {
                 params: None,
             },
         ];
-        let v = render(&ProxyEvent::Request(Arc::new(Request::McpBatch(
-            empty_request_parts(),
-            rpcs,
-        ))));
-        assert_eq!(v["kind"], "mcp_batch");
-        assert_eq!(v["rpcs"].as_array().unwrap().len(), 2);
-        assert_eq!(v["rpcs"][1]["id"], 2);
+        let v = render(&transaction(
+            Request::McpBatch(empty_request_parts(), rpcs),
+            mcp_response_ok(),
+        ));
+        assert_eq!(v["request"]["kind"], "mcp_batch");
+        assert_eq!(v["request"]["rpcs"].as_array().unwrap().len(), 2);
+        assert_eq!(v["request"]["rpcs"][1]["id"], 2);
     }
 
     #[test]
     fn json__http_request_tagged_with_method_path_and_size() {
-        let v = render(&http_request("PUT", "/path", b"hello"));
-        assert_eq!(v["type"], "request");
-        assert_eq!(v["kind"], "http");
-        assert_eq!(v["method"], "PUT");
-        assert_eq!(v["path"], "/path");
-        assert_eq!(v["size"], 5);
+        let v = render(&transaction(
+            http_request("PUT", "/path", b"hello"),
+            http_response(200, b"ok"),
+        ));
+        assert_eq!(v["request"]["kind"], "http");
+        assert_eq!(v["request"]["method"], "PUT");
+        assert_eq!(v["request"]["path"], "/path");
+        assert_eq!(v["request"]["size"], 5);
     }
 
-    // ── Response ─────────────────────────────────────────────────
+    // ── Response side of the transaction ─────────────────────────
 
     #[test]
     fn json__mcp_response_ok_serializes_result() {
-        let v = render(&mcp_response_ok());
-        assert_eq!(v["type"], "response");
-        assert_eq!(v["kind"], "mcp");
-        assert_eq!(v["result"]["id"], 1);
-        assert!(v["result"]["result"]["tools"].is_array());
+        let v = render(&transaction(
+            mcp_request(ClientMethod::Tools(ToolsMethod::List), None),
+            mcp_response_ok(),
+        ));
+        assert_eq!(v["response"]["kind"], "mcp");
+        assert_eq!(v["response"]["result"]["id"], 1);
+        assert!(v["response"]["result"]["result"]["tools"].is_array());
     }
 
     #[test]
     fn json__mcp_response_error_includes_code_and_message() {
-        // The error is serialized as a JSON-RPC error envelope —
-        // `{jsonrpc, id, error: {code, message}}` — under `result`.
-        let v = render(&mcp_response_error(-32601, "method not found"));
-        assert_eq!(v["kind"], "mcp");
-        assert_eq!(v["result"]["error"]["code"], -32601);
-        assert_eq!(v["result"]["error"]["message"], "method not found");
+        let v = render(&transaction(
+            mcp_request(ClientMethod::Tools(ToolsMethod::List), None),
+            mcp_response_error(-32601, "method not found"),
+        ));
+        assert_eq!(v["response"]["kind"], "mcp");
+        assert_eq!(v["response"]["result"]["error"]["code"], -32601);
+        assert_eq!(
+            v["response"]["result"]["error"]["message"],
+            "method not found"
+        );
     }
 
     #[test]
     fn json__http_response_includes_status_and_size() {
-        let v = render(&http_response(200, b"ok"));
-        assert_eq!(v["type"], "response");
-        assert_eq!(v["kind"], "http");
-        assert_eq!(v["status"], 200);
-        assert_eq!(v["size"], 2);
+        let v = render(&transaction(
+            http_request("GET", "/", b""),
+            http_response(200, b"ok"),
+        ));
+        assert_eq!(v["response"]["kind"], "http");
+        assert_eq!(v["response"]["status"], 200);
+        assert_eq!(v["response"]["size"], 2);
     }
 
     // ── Session ──────────────────────────────────────────────────

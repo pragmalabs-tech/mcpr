@@ -35,6 +35,7 @@ use rusqlite::{Connection, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use mcpr_core::event::ProxyEvent;
+use mcpr_core::event::types::RequestEvent;
 use mcpr_core::protocol::{
     Request, Response,
     mcp::{ClientMethod, JsonRpcRequest, JsonRpcResult, RequestId},
@@ -155,12 +156,29 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<StoreEvent>) {
 fn write_events(tx: &Transaction, batch: &[StoreEvent]) -> rusqlite::Result<()> {
     for msg in batch {
         match &msg.event {
-            ProxyEvent::Request(req) => write_request(tx, msg.ts, &msg.proxy, req)?,
-            ProxyEvent::Response(res) => write_response(tx, msg.ts, res)?,
+            ProxyEvent::Request(re) => write_transaction(tx, msg.ts, &msg.proxy, re)?,
             ProxyEvent::Session(info) => write_session(tx, &msg.proxy, info)?,
             ProxyEvent::Schema(change) => write_schema_change(tx, msg.ts, &msg.proxy, change)?,
             ProxyEvent::Heartbeat(_) => {}
         }
+    }
+    Ok(())
+}
+
+/// Write both halves of a consolidated `RequestEvent` in the same
+/// iteration. Requests and responses share a `(session_id, request_id)`
+/// key per JSON-RPC id; the proxy `request_id` is not stored here.
+/// Orphan transactions (`response: None` from the pipeline error path)
+/// land only the request row.
+fn write_transaction(
+    tx: &Transaction,
+    ts: i64,
+    proxy: &str,
+    re: &RequestEvent,
+) -> rusqlite::Result<()> {
+    write_request(tx, ts, proxy, &re.request)?;
+    if let Some(response) = &re.response {
+        write_response(tx, ts, response)?;
     }
     Ok(())
 }
@@ -427,7 +445,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use chrono::Utc;
     use http::request::Builder as RequestBuilder;
+    use mcpr_core::event::types::RequestEvent;
     use mcpr_core::protocol::{
         Request, Response,
         mcp::{
@@ -438,6 +458,45 @@ mod tests {
         session::{SessionInfo, SessionState},
     };
     use serde_json::json;
+
+    fn transaction_event(req: Request, resp: Response) -> ProxyEvent {
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid".into(),
+            request: req,
+            response: Some(resp),
+            ts: Utc::now(),
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+        }))
+    }
+
+    fn orphan_event(req: Request) -> ProxyEvent {
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid".into(),
+            request: req,
+            response: None,
+            ts: Utc::now(),
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+        }))
+    }
+
+    fn empty_response_parts() -> http::response::Parts {
+        http::Response::new(()).into_parts().0
+    }
+
+    fn empty_response_for(id: i64) -> Response {
+        Response::Mcp(
+            empty_response_parts(),
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(id),
+                result: Some(json!({})),
+            }),
+        )
+    }
 
     use crate::store::db;
 
@@ -527,7 +586,10 @@ mod tests {
     fn flush_batch__inserts_request_row_for_mcp() {
         let mut conn = test_db();
         let mut batch = vec![store_event(
-            ProxyEvent::Request(Arc::new(mcp_request("sess-1", rpc_tools_call(1, "search")))),
+            transaction_event(
+                mcp_request("sess-1", rpc_tools_call(1, "search")),
+                empty_response_for(1),
+            ),
             1_000,
         )];
         drain(&mut conn, &mut batch);
@@ -558,7 +620,10 @@ mod tests {
             ],
         );
 
-        let mut batch = vec![store_event(ProxyEvent::Request(Arc::new(batch_req)), 1_000)];
+        let mut batch = vec![store_event(
+            transaction_event(batch_req, empty_response_for(1)),
+            1_000,
+        )];
         drain(&mut conn, &mut batch);
 
         let count: i64 = conn
@@ -575,9 +640,15 @@ mod tests {
             .uri("/")
             .body(bytes::Bytes::new())
             .unwrap();
+        let http_resp = Response::Http(
+            http::Response::builder()
+                .status(200)
+                .body(bytes::Bytes::new())
+                .unwrap(),
+        );
 
         let mut batch = vec![store_event(
-            ProxyEvent::Request(Arc::new(Request::Http(http))),
+            transaction_event(Request::Http(http), http_resp),
             1_000,
         )];
         drain(&mut conn, &mut batch);
@@ -593,11 +664,17 @@ mod tests {
         let mut conn = test_db();
         let mut batch = vec![
             store_event(
-                ProxyEvent::Request(Arc::new(mcp_request("s", rpc_tools_call(1, "x")))),
+                transaction_event(
+                    mcp_request("s", rpc_tools_call(1, "x")),
+                    empty_response_for(1),
+                ),
                 1_000,
             ),
             store_event(
-                ProxyEvent::Request(Arc::new(mcp_request("s", rpc_tools_call(1, "x")))),
+                transaction_event(
+                    mcp_request("s", rpc_tools_call(1, "x")),
+                    empty_response_for(1),
+                ),
                 1_001,
             ),
         ];
@@ -610,6 +687,25 @@ mod tests {
     }
 
     // ── response side ────────────────────────────────────────────────
+
+    #[test]
+    fn flush_batch__orphan_transaction_writes_request_only() {
+        let mut conn = test_db();
+        let mut batch = vec![store_event(
+            orphan_event(mcp_request("sess-O", rpc_tools_call(5, "x"))),
+            1_000,
+        )];
+        drain(&mut conn, &mut batch);
+
+        let req_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM requests", [], |row| row.get(0))
+            .unwrap();
+        let resp_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM responses", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(req_count, 1);
+        assert_eq!(resp_count, 0);
+    }
 
     #[test]
     fn flush_batch__inserts_response_ok() {
@@ -629,7 +725,10 @@ mod tests {
             }),
         );
 
-        let mut batch = vec![store_event(ProxyEvent::Response(Arc::new(resp)), 2_000)];
+        let mut batch = vec![store_event(
+            transaction_event(mcp_request("sess-1", rpc_tools_call(7, "x")), resp),
+            2_000,
+        )];
         drain(&mut conn, &mut batch);
 
         let (sid, rid, status): (Option<String>, String, String) = conn
@@ -647,15 +746,15 @@ mod tests {
     // ── join via request_log view ────────────────────────────────────
 
     #[test]
-    fn request_log_view__computes_latency_when_response_present() {
+    fn request_log_view__pending_when_response_session_unknown() {
         let mut conn = test_db();
-        let mut batch = vec![
-            store_event(
-                ProxyEvent::Request(Arc::new(mcp_request("sess-3", rpc_tools_call(42, "x")))),
-                1_000,
+        let mut batch = vec![store_event(
+            transaction_event(
+                mcp_request("sess-3", rpc_tools_call(42, "x")),
+                mcp_response_ok(42),
             ),
-            store_event(ProxyEvent::Response(Arc::new(mcp_response_ok(42))), 1_142),
-        ];
+            1_000,
+        )];
         drain(&mut conn, &mut batch);
 
         // The Mcp response above has no session-id header, so the view's
@@ -688,15 +787,14 @@ mod tests {
                 result: Some(json!({})),
             }),
         );
-        let mut batch = vec![
-            store_event(
-                ProxyEvent::Request(Arc::new(mcp_request("sess-J", rpc_tools_call(99, "go")))),
-                1_000,
-            ),
-            store_event(ProxyEvent::Response(Arc::new(resp)), 1_250),
-        ];
+        let mut batch = vec![store_event(
+            transaction_event(mcp_request("sess-J", rpc_tools_call(99, "go")), resp),
+            1_000,
+        )];
         drain(&mut conn, &mut batch);
 
+        // Both rows share the same `ts` now (consolidated emit), so the
+        // view's `(res.ts - r.ts) * 1000` is 0; verify status and join.
         let (latency_us, status): (i64, String) = conn
             .query_row(
                 "SELECT latency_us, status FROM request_log WHERE request_id = '99'",
@@ -704,7 +802,7 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(latency_us, 250_000);
+        assert_eq!(latency_us, 0);
         assert_eq!(status, "ok");
     }
 
@@ -847,7 +945,7 @@ mod tests {
     // ── error response (id-less) is dropped, not panic ───────────────
 
     #[test]
-    fn flush_batch__bare_jsonrpc_error_is_dropped() {
+    fn flush_batch__bare_jsonrpc_error_drops_response_row() {
         let mut conn = test_db();
         let parts = http::Response::new(()).into_parts().0;
         let err = Response::Mcp(
@@ -862,7 +960,10 @@ mod tests {
                 },
             }),
         );
-        let mut batch = vec![store_event(ProxyEvent::Response(Arc::new(err)), 3_000)];
+        let mut batch = vec![store_event(
+            transaction_event(mcp_request("s", rpc_tools_call(99, "x")), err),
+            3_000,
+        )];
         drain(&mut conn, &mut batch);
 
         let count: i64 = conn

@@ -1,38 +1,24 @@
-/// Log Stage will focus to track request and response events;
+//! Request/response logging stage. Emits one `ProxyEvent::Request`
+//! after the response stage completes, carrying both halves of the
+//! transaction plus the per-request timer snapshot.
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 
 use crate::{
-    event::ProxyEvent,
-    protocol::{Request, Response},
+    event::{ProxyEvent, types::RequestEvent},
+    protocol::Response,
     proxy2::{
-        stage::types::{RequestContext, RequestStage, ResponseStage},
+        stage::types::{RequestContext, ResponseStage},
         state::ProxyState,
     },
 };
 
-pub struct RequestLogStage;
-
-#[async_trait]
-impl RequestStage for RequestLogStage {
-    fn name(&self) -> &'static str {
-        "RequestLogStage"
-    }
-
-    async fn process(
-        &self,
-        request: Request,
-        _request_ctx: RequestContext,
-        state: ProxyState,
-    ) -> anyhow::Result<Request> {
-        state
-            .event_bus
-            .emit(ProxyEvent::Request(Arc::new(request.clone())));
-
-        Ok(request)
-    }
-}
+/// Span name set by the pipeline router for the upstream call. Looked up
+/// from the per-request `Timer` to populate `RequestEvent.upstream_us`.
+const UPSTREAM_SPAN: &str = "Router";
 
 pub struct ResponseLogStage;
 
@@ -45,12 +31,34 @@ impl ResponseStage for ResponseLogStage {
     async fn process(
         &self,
         res: Response,
-        _request_ctx: RequestContext,
+        request_ctx: RequestContext,
         state: ProxyState,
     ) -> anyhow::Result<Response> {
+        let latency_us =
+            u64::try_from(request_ctx.started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let spans = request_ctx.timer.to_spans_us();
+        let upstream_us = spans
+            .iter()
+            .find(|(name, _)| name == UPSTREAM_SPAN)
+            .map(|(_, us)| *us)
+            .unwrap_or(0);
+
+        let request = match request_ctx.request.as_ref() {
+            Some(req) => (**req).clone(),
+            None => return Ok(res),
+        };
+
         state
             .event_bus
-            .emit(ProxyEvent::Response(Arc::new(res.clone())));
+            .emit(ProxyEvent::Request(Arc::new(RequestEvent {
+                request_id: request_ctx.request_id.clone(),
+                request,
+                response: Some(res.clone()),
+                ts: Utc::now(),
+                latency_us,
+                upstream_us,
+                spans,
+            })));
 
         Ok(res)
     }

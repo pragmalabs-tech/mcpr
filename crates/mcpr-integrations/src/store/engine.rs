@@ -197,9 +197,13 @@ mod tests {
 
     use chrono::Utc;
     use mcpr_core::event::ProxyEvent;
+    use mcpr_core::event::types::RequestEvent;
     use mcpr_core::protocol::{
-        Request,
-        mcp::{ClientMethod, JsonRpcRequest, JsonRpcVersion, RequestId, ToolsMethod},
+        Request, Response,
+        mcp::{
+            ClientMethod, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, JsonRpcVersion,
+            RequestId, ToolsMethod,
+        },
         session::{SessionInfo, SessionState},
     };
     use serde_json::json;
@@ -256,10 +260,26 @@ mod tests {
                 json!("test_tool"),
             )])),
         };
+        let resp = Response::Mcp(
+            http::Response::new(()).into_parts().0,
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                result: Some(json!({})),
+            }),
+        );
         store.record(StoreEvent {
             ts: now.timestamp_millis() + 1,
             proxy: proxy.clone(),
-            event: ProxyEvent::Request(Arc::new(Request::Mcp(parts, rpc))),
+            event: ProxyEvent::Request(Arc::new(RequestEvent {
+                request_id: "rid".into(),
+                request: Request::Mcp(parts, rpc),
+                response: Some(resp),
+                ts: now,
+                latency_us: 0,
+                upstream_us: 0,
+                spans: vec![],
+            })),
         });
 
         store.shutdown();

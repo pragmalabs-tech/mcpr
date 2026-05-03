@@ -25,9 +25,11 @@ use std::sync::Arc;
 
 use axum::http::request::Parts as RequestParts;
 use axum::response::Response as AxumResponse;
+use chrono::Utc;
 use futures_util::StreamExt;
 
 use crate::{
+    event::{EventBus, ProxyEvent, types::RequestEvent},
     protocol::{Request, session::session_id_from_headers},
     proxy2::{
         stage::{
@@ -38,6 +40,11 @@ use crate::{
     },
     timer::Timer,
 };
+
+/// Span name set by the pipeline router for the upstream call. Looked up
+/// from the per-request `Timer` to populate `RequestEvent.upstream_us`
+/// on the orphan-emit path.
+const UPSTREAM_SPAN: &str = "Router";
 
 pub struct StagePipeline {
     request_stages: Vec<Box<dyn RequestStage>>,
@@ -69,20 +76,27 @@ impl StagePipeline {
     /// [`RouterOutput::Stream`], wraps each yielded `Response::Mcp` with
     /// the response stage chain. Stages keep their existing trait and
     /// never see the `Stream` itself.
-    pub async fn process(
+    pub async fn process(&self, request: Request, timer: Timer) -> anyhow::Result<RouterOutput> {
+        let request_ctx = RequestContext::with_timer(&request, timer);
+        let result = self.run_stages(request, request_ctx.clone()).await;
+        if result.is_err() {
+            emit_orphan_event(&request_ctx, &self.state.event_bus);
+        }
+        result
+    }
+
+    async fn run_stages(
         &self,
         mut request: Request,
-        timer: Timer,
+        request_ctx: RequestContext,
     ) -> anyhow::Result<RouterOutput> {
-        let request_ctx = RequestContext::with_timer(&request, timer);
-
         for stage in &self.request_stages {
             request = stage
                 .process_with_timer(request, request_ctx.clone(), self.state.clone())
                 .await?;
         }
 
-        let timer_id = request_ctx.timer.track_start("Router");
+        let timer_id = request_ctx.timer.track_start(UPSTREAM_SPAN);
         let output = self
             .router_stage
             .process(request, self.state.clone())
@@ -134,6 +148,34 @@ impl StagePipeline {
         }
         self.router_stage.open_get_sse(parts).await
     }
+}
+
+/// Emit a `RequestEvent` with `response: None` for a request whose
+/// pipeline failed before the response stage could run. Pulls timing
+/// and the snapshotted request from the context. No-op if the context
+/// is missing the request snapshot (the `Default` path used by tests
+/// that bypass `with_timer`).
+fn emit_orphan_event(ctx: &RequestContext, bus: &EventBus) {
+    let Some(req_arc) = ctx.request.as_ref() else {
+        return;
+    };
+    let latency_us = u64::try_from(ctx.started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let spans = ctx.timer.to_spans_us();
+    let upstream_us = spans
+        .iter()
+        .find(|(name, _)| name == UPSTREAM_SPAN)
+        .map(|(_, us)| *us)
+        .unwrap_or(0);
+
+    bus.emit(ProxyEvent::Request(Arc::new(RequestEvent {
+        request_id: ctx.request_id.clone(),
+        request: (**req_arc).clone(),
+        response: None,
+        ts: Utc::now(),
+        latency_us,
+        upstream_us,
+        spans,
+    })));
 }
 
 #[cfg(test)]
@@ -362,6 +404,67 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.to_string().contains("nope"));
+    }
+
+    // ── orphan emit on error ──────────────────────────────────
+
+    use crate::event::ProxyEvent as Pe;
+    use crate::event::types::RequestEvent as Re;
+    use crate::event::{EventBusHandle, EventManager, EventSink};
+    use crate::protocol::session::SessionStore;
+
+    #[derive(Clone, Default)]
+    struct CapturingSink {
+        events: Arc<Mutex<Vec<Pe>>>,
+    }
+
+    impl EventSink for CapturingSink {
+        fn on_event(&self, event: &Pe) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+        fn name(&self) -> &'static str {
+            "capturing"
+        }
+    }
+
+    fn state_with_sink() -> (ProxyState, CapturingSink, EventBusHandle) {
+        let sink = CapturingSink::default();
+        let mut mgr = EventManager::new();
+        mgr.register(Box::new(sink.clone()));
+        let handle = mgr.start();
+        let state = Arc::new(InnerProxyState::new(
+            handle.bus.clone(),
+            SessionStore::new(),
+        ));
+        (state, sink, handle)
+    }
+
+    #[tokio::test]
+    async fn process__request_stage_error_emits_orphan_event() {
+        let (state, sink, handle) = state_with_sink();
+        let pipeline = StagePipeline::new(
+            vec![Box::new(FailingRequestStage)],
+            vec![],
+            RouterStage::new(config_for("http://127.0.0.1:1")).unwrap(),
+            state,
+        );
+
+        let _ = pipeline.process(mcp_request(), Timer::new()).await;
+        handle.shutdown().await;
+
+        let events: Vec<Arc<Re>> = sink
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                Pe::Request(re) => Some(re.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].response.is_none());
+        assert!(!events[0].request_id.is_empty());
     }
 
     /// Upstream that returns SSE so RouterOutput::Stream flows through.

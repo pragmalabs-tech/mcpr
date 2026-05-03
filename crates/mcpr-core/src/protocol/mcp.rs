@@ -28,6 +28,16 @@ impl Serialize for RequestId {
     }
 }
 
+impl std::fmt::Display for RequestId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestId::Number(n) => write!(f, "{n}"),
+            RequestId::String(s) => write!(f, "{s}"),
+            RequestId::Null => write!(f, "null"),
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for RequestId {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = Value::deserialize(d)?;

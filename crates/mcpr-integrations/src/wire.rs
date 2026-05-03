@@ -1,51 +1,60 @@
-//! Wire envelope for `ProxyEvent` → cloud ingest.
+//! Wire envelope for `ProxyEvent` -> cloud ingest.
 //!
 //! The cloud ingest endpoint receives an array of these envelopes and
-//! lands them verbatim in `events_raw`. A ClickHouse materialized view
-//! does the analytics projection on read.
+//! lands them verbatim in `events_raw`. ClickHouse materialized views
+//! project analytics columns from `payload` on insert, so the wire
+//! format stays raw: full JSON-RPC envelopes, full HTTP bodies, no
+//! pre-aggregation. The proxy doesn't know what cloud needs to query.
+//!
+//! Each `ProxyEvent::Request` is split on the wire into one "request"
+//! envelope and one "response" envelope sharing the same `request_id`
+//! (the proxy-minted UUID). McpBatch requests and responses are
+//! flattened: one batched event becomes N envelopes, each carrying a
+//! single rpc/result. Cloud only ever sees one MCP shape per envelope.
 //!
 //! ```text
 //! { "v": 1, "ts": "...", "server": "<slug>", "kind": "...", "payload": { ... } }
 //! ```
 
 use mcpr_core::event::ProxyEvent;
-use mcpr_core::event::types::HeartbeatEvent;
-use mcpr_core::protocol::mcp::{JsonRpcRequest, JsonRpcResult, RequestId};
+use mcpr_core::event::types::{HeartbeatEvent, RequestEvent};
+use mcpr_core::protocol::mcp::{JsonRpcRequest, JsonRpcResult};
 use mcpr_core::protocol::schema::{ChangeSchema, Reason};
-use mcpr_core::protocol::session::{SessionInfo, SessionState, session_id_from_headers};
+use mcpr_core::protocol::session::{SessionInfo, SessionState};
 use mcpr_core::protocol::{Request, Response};
-use mcpr_core::timer::Timer;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 const ENVELOPE_VERSION: u8 = 1;
 
-/// Build the JSON envelope for one event. The cloud ingest accepts
-/// `Vec<Envelope>` as the request body.
-pub fn encode_envelope(event: &ProxyEvent, server: &str) -> Value {
-    let (kind, ts, payload) = match event {
-        ProxyEvent::Request(re) => (
-            "request",
-            re.ts.to_rfc3339(),
-            encode_request(&re.request, &re.request_id),
-        ),
-        ProxyEvent::Response(re) => (
-            "response",
-            re.ts.to_rfc3339(),
-            encode_response(&re.response, &re.request_id, re.latency_us, &re.timer),
-        ),
-        ProxyEvent::Session(info) => (
+/// Encode one `ProxyEvent` into the wire envelopes the cloud expects.
+/// Returns `Vec<Value>` because consolidated transactions split into
+/// request + response envelopes (and McpBatch variants flatten further);
+/// every other variant returns a 1-element vec.
+pub fn encode_envelopes(event: &ProxyEvent, server: &str) -> Vec<Value> {
+    match event {
+        ProxyEvent::Request(re) => encode_transaction_envelopes(re, server),
+        ProxyEvent::Session(info) => vec![envelope(
             "session",
             info.last_active.to_rfc3339(),
+            server,
             encode_session(info),
-        ),
-        ProxyEvent::Schema(change) => (
+        )],
+        ProxyEvent::Schema(change) => vec![envelope(
             "schema",
             chrono::Utc::now().to_rfc3339(),
+            server,
             encode_schema(change),
-        ),
-        ProxyEvent::Heartbeat(hb) => ("heartbeat", hb.ts.to_rfc3339(), encode_heartbeat(hb)),
-    };
+        )],
+        ProxyEvent::Heartbeat(hb) => vec![envelope(
+            "heartbeat",
+            hb.ts.to_rfc3339(),
+            server,
+            encode_heartbeat(hb),
+        )],
+    }
+}
 
+fn envelope(kind: &str, ts: String, server: &str, payload: Value) -> Value {
     json!({
         "v": ENVELOPE_VERSION,
         "ts": ts,
@@ -55,132 +64,140 @@ pub fn encode_envelope(event: &ProxyEvent, server: &str) -> Value {
     })
 }
 
-fn encode_request(req: &Request, request_id: &str) -> Value {
+fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
+    let ts = re.ts.to_rfc3339();
+    let mut out = encode_request_envelopes(&re.request, server, &ts, &re.request_id);
+    if re.response.is_some() {
+        out.extend(encode_response_envelopes(re, server, &ts));
+    }
+    out
+}
+
+fn encode_request_envelopes(req: &Request, server: &str, ts: &str, request_id: &str) -> Vec<Value> {
     match req {
         Request::Mcp(parts, rpc) => {
-            let session_id = session_id_from_headers(&parts.headers);
-            let mut payload = base_request_payload(request_id, session_id.as_deref(), rpc);
-            payload["request_size"] = json!(0);
-            payload
+            let http_method = parts.method.as_str();
+            let uri = parts.uri.to_string();
+            vec![envelope(
+                "request",
+                ts.to_string(),
+                server,
+                mcp_request_payload(request_id, http_method, &uri, rpc),
+            )]
         }
         Request::McpBatch(parts, rpcs) => {
-            let session_id = session_id_from_headers(&parts.headers);
-            // Batches collapse to a synthetic envelope with the first
-            // RPC's method as the discriminator. Per-RPC analytics rows
-            // are produced by unfolding in the cloud if/when needed.
-            let first = rpcs.first();
-            let mcp_method = first.and_then(|r| r.method.as_str()).unwrap_or("");
-            json!({
-                "request_id": request_id,
-                "session_id": session_id,
-                "mcp_method": mcp_method,
-                "batch_size": rpcs.len(),
-            })
+            let http_method = parts.method.as_str();
+            let uri = parts.uri.to_string();
+            rpcs.iter()
+                .map(|rpc| {
+                    envelope(
+                        "request",
+                        ts.to_string(),
+                        server,
+                        mcp_request_payload(request_id, http_method, &uri, rpc),
+                    )
+                })
+                .collect()
         }
         Request::Http(http) => {
-            let session_id = session_id_from_headers(http.headers());
-            json!({
+            let payload = json!({
+                "kind": "http",
                 "request_id": request_id,
-                "session_id": session_id,
                 "http_method": http.method().as_str(),
-                "path": http.uri().path(),
-                "request_size": http.body().len() as u64,
-            })
+                "uri": http.uri().to_string(),
+                "body": String::from_utf8_lossy(http.body()),
+                "body_size": http.body().len(),
+            });
+            vec![envelope("request", ts.to_string(), server, payload)]
         }
     }
 }
 
-fn base_request_payload(request_id: &str, session_id: Option<&str>, rpc: &JsonRpcRequest) -> Value {
-    let mcp_method = rpc.method.as_str().unwrap_or("");
+fn mcp_request_payload(
+    request_id: &str,
+    http_method: &str,
+    uri: &str,
+    rpc: &JsonRpcRequest,
+) -> Value {
     json!({
+        "kind": "mcp",
         "request_id": request_id,
-        "rpc_id": request_id_to_value(&rpc.id),
-        "session_id": session_id,
-        "mcp_method": mcp_method,
-        "tool": rpc.get_tool().unwrap_or(""),
-        "resource_uri": rpc.get_resource_uri().unwrap_or(""),
-        "prompt_name": rpc.get_prompt().unwrap_or(""),
+        "http_method": http_method,
+        "uri": uri,
+        "rpc": rpc,
     })
 }
 
-fn encode_response(resp: &Response, request_id: &str, latency_us: u64, timer: &Timer) -> Value {
-    let timer_value = encode_timer(timer);
-    match resp {
+fn encode_response_envelopes(re: &RequestEvent, server: &str, ts: &str) -> Vec<Value> {
+    let Some(response) = re.response.as_ref() else {
+        return vec![];
+    };
+    match response {
         Response::Mcp(parts, result) => {
             let http_status = parts.status.as_u16();
-            let (status, error_code, error_detail) = mcp_result_status(result);
-            json!({
-                "request_id": request_id,
-                "latency_us": latency_us,
-                "upstream_us": 0,
-                "http_status": http_status,
-                "status": status,
-                "error_code": error_code,
-                "error_detail": error_detail,
-                "response_size": 0,
-                "timer": timer_value,
-            })
+            vec![envelope(
+                "response",
+                ts.to_string(),
+                server,
+                mcp_response_payload(
+                    &re.request_id,
+                    http_status,
+                    result,
+                    re.latency_us,
+                    re.upstream_us,
+                ),
+            )]
         }
         Response::McpBatch(parts, results) => {
             let http_status = parts.status.as_u16();
-            // Batch status is "ok" if every result succeeded, else "error".
-            let any_error = results.iter().any(|r| matches!(r, JsonRpcResult::Error(_)));
-            let status = if any_error { "error" } else { "ok" };
-            json!({
-                "request_id": request_id,
-                "latency_us": latency_us,
-                "http_status": http_status,
-                "status": status,
-                "batch_size": results.len(),
-                "response_size": 0,
-                "timer": timer_value,
-            })
+            results
+                .iter()
+                .map(|result| {
+                    envelope(
+                        "response",
+                        ts.to_string(),
+                        server,
+                        mcp_response_payload(
+                            &re.request_id,
+                            http_status,
+                            result,
+                            re.latency_us,
+                            re.upstream_us,
+                        ),
+                    )
+                })
+                .collect()
         }
         Response::Http(http) => {
-            let http_status = http.status().as_u16();
-            let status = if http.status().is_success() {
-                "ok"
-            } else {
-                "error"
-            };
-            json!({
-                "request_id": request_id,
-                "latency_us": latency_us,
-                "http_status": http_status,
-                "status": status,
-                "response_size": http.body().len() as u64,
-                "timer": timer_value,
-            })
+            let payload = json!({
+                "kind": "http",
+                "request_id": re.request_id,
+                "http_status": http.status().as_u16(),
+                "body": String::from_utf8_lossy(http.body()),
+                "body_size": http.body().len(),
+                "latency_us": re.latency_us,
+                "upstream_us": re.upstream_us,
+            });
+            vec![envelope("response", ts.to_string(), server, payload)]
         }
     }
 }
 
-/// Collapse the timer's spans into a flat `{name: duration_us}` object.
-/// Stages that ran more than once on a single request (e.g. response
-/// stages on each frame of a stream) have their durations summed so the
-/// shape stays comparable across requests.
-fn encode_timer(timer: &Timer) -> Value {
-    let mut map: Map<String, Value> = Map::new();
-    for (name, us) in timer.to_spans_us() {
-        let acc = map
-            .get(&name)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0)
-            .saturating_add(us);
-        map.insert(name, json!(acc));
-    }
-    Value::Object(map)
-}
-
-fn mcp_result_status(result: &JsonRpcResult) -> (&'static str, String, String) {
-    match result {
-        JsonRpcResult::Response(_) => ("ok", String::new(), String::new()),
-        JsonRpcResult::Error(err) => (
-            "error",
-            err.error.code.to_string(),
-            err.error.message.clone(),
-        ),
-    }
+fn mcp_response_payload(
+    request_id: &str,
+    http_status: u16,
+    result: &JsonRpcResult,
+    latency_us: u64,
+    upstream_us: u64,
+) -> Value {
+    json!({
+        "kind": "mcp",
+        "request_id": request_id,
+        "http_status": http_status,
+        "result": result,
+        "latency_us": latency_us,
+        "upstream_us": upstream_us,
+    })
 }
 
 fn encode_session(info: &SessionInfo) -> Value {
@@ -244,14 +261,6 @@ fn encode_heartbeat(hb: &HeartbeatEvent) -> Value {
     })
 }
 
-fn request_id_to_value(id: &RequestId) -> Value {
-    match id {
-        RequestId::Number(n) => json!(*n),
-        RequestId::String(s) => json!(s),
-        RequestId::Null => Value::Null,
-    }
-}
-
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
@@ -262,23 +271,23 @@ mod tests {
     use bytes::Bytes;
     use chrono::Utc;
     use http::{Request as HttpReq, Response as HttpResp, StatusCode};
-    use mcpr_core::event::{RequestEvent, ResponseEvent};
     use mcpr_core::protocol::mcp::{
         ClientInfo, ClientMethod, JsonRpcError, JsonRpcErrorResponse, JsonRpcRequest,
-        JsonRpcResponse, JsonRpcResult, JsonRpcVersion, PromptsMethod, RequestId, ResourcesMethod,
-        ToolsMethod,
+        JsonRpcResponse, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
     };
     use mcpr_core::protocol::schema::{Prompt, Resource, ResourceTemplate, Tool, ToolAnnotations};
     use serde_json::{Map, json};
 
     // ── Helpers ──────────────────────────────────────────────────
 
-    fn req_parts(session_id: Option<&str>) -> http::request::Parts {
-        let mut b = HttpReq::builder().method("POST").uri("/");
-        if let Some(sid) = session_id {
-            b = b.header("mcp-session-id", sid);
-        }
-        b.body(()).unwrap().into_parts().0
+    fn req_parts() -> http::request::Parts {
+        HttpReq::builder()
+            .method("POST")
+            .uri("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0
     }
 
     fn resp_parts(status: u16) -> http::response::Parts {
@@ -299,23 +308,413 @@ mod tests {
         }
     }
 
-    fn request_event(req: Request) -> ProxyEvent {
+    fn ok_response(id: i64) -> Response {
+        Response::Mcp(
+            resp_parts(200),
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(id),
+                result: Some(json!({})),
+            }),
+        )
+    }
+
+    fn empty_http_response() -> Response {
+        Response::Http(HttpResp::builder().status(200).body(Bytes::new()).unwrap())
+    }
+
+    fn transaction(req: Request, resp: Response, latency_us: u64, upstream_us: u64) -> ProxyEvent {
         ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-X".into(),
             request: req,
-            request_id: "req-abc".into(),
+            response: Some(resp),
             ts: Utc::now(),
+            latency_us,
+            upstream_us,
+            spans: vec![],
         }))
     }
 
-    fn response_event(resp: Response, latency_us: u64) -> ProxyEvent {
-        ProxyEvent::Response(Arc::new(ResponseEvent {
-            response: resp,
-            request_id: "req-abc".into(),
-            latency_us,
-            timer: Timer::default(),
+    fn orphan(req: Request) -> ProxyEvent {
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-orphan".into(),
+            request: req,
+            response: None,
             ts: Utc::now(),
+            latency_us: 50,
+            upstream_us: 0,
+            spans: vec![],
         }))
     }
+
+    // ── envelope shape ───────────────────────────────────────────
+
+    #[test]
+    fn encode_envelopes__orphan_emits_request_only() {
+        let event = orphan(Request::Mcp(
+            req_parts(),
+            rpc(ClientMethod::Tools(ToolsMethod::List), None),
+        ));
+        let envs = encode_envelopes(&event, "s");
+        assert_eq!(envs.len(), 1);
+        assert_eq!(envs[0]["kind"], "request");
+        assert_eq!(envs[0]["payload"]["request_id"], "rid-orphan");
+    }
+
+    #[test]
+    fn encode_envelopes__transaction_emits_request_then_response() {
+        let event = transaction(
+            Request::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            ok_response(1),
+            0,
+            0,
+        );
+        let envs = encode_envelopes(&event, "prod-server");
+        assert_eq!(envs.len(), 2);
+        assert_eq!(envs[0]["kind"], "request");
+        assert_eq!(envs[1]["kind"], "response");
+        assert_eq!(envs[0]["server"], "prod-server");
+        assert_eq!(envs[1]["server"], "prod-server");
+        assert_eq!(envs[0]["v"], json!(ENVELOPE_VERSION));
+    }
+
+    #[test]
+    fn encode_envelopes__request_and_response_share_request_id() {
+        let event = transaction(
+            Request::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            ok_response(1),
+            0,
+            0,
+        );
+        let envs = encode_envelopes(&event, "s");
+        assert_eq!(envs[0]["payload"]["request_id"], "rid-X");
+        assert_eq!(envs[1]["payload"]["request_id"], "rid-X");
+    }
+
+    #[test]
+    fn encode_envelopes__request_and_response_share_ts() {
+        let event = transaction(
+            Request::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            ok_response(1),
+            0,
+            0,
+        );
+        let envs = encode_envelopes(&event, "s");
+        assert_eq!(envs[0]["ts"], envs[1]["ts"]);
+    }
+
+    // ── request: Mcp ─────────────────────────────────────────────
+
+    #[test]
+    fn encode_request__mcp_payload_carries_full_rpc_envelope() {
+        let mut params = Map::new();
+        params.insert("name".into(), json!("search"));
+        params.insert("arguments".into(), json!({"q": "rust"}));
+        let event = transaction(
+            Request::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::Call), Some(params)),
+            ),
+            ok_response(1),
+            0,
+            0,
+        );
+        let p = encode_envelopes(&event, "s")[0]["payload"].clone();
+
+        assert_eq!(p["kind"], "mcp");
+        assert_eq!(p["http_method"], "POST");
+        assert_eq!(p["uri"], "/");
+        assert_eq!(p["rpc"]["jsonrpc"], "2.0");
+        assert_eq!(p["rpc"]["id"], 1);
+        assert_eq!(p["rpc"]["method"], "tools/call");
+        assert_eq!(p["rpc"]["params"]["name"], "search");
+        assert_eq!(p["rpc"]["params"]["arguments"]["q"], "rust");
+    }
+
+    #[test]
+    fn encode_request__mcp_no_headers_in_payload() {
+        let parts = HttpReq::builder()
+            .method("POST")
+            .uri("/")
+            .header("mcp-session-id", "sess-1")
+            .header("authorization", "Bearer secret")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let event = transaction(
+            Request::Mcp(parts, rpc(ClientMethod::Tools(ToolsMethod::List), None)),
+            ok_response(1),
+            0,
+            0,
+        );
+        let p = encode_envelopes(&event, "s")[0]["payload"].clone();
+
+        assert!(p.get("headers").is_none());
+        assert!(p.get("session_id").is_none());
+    }
+
+    // ── request: McpBatch flattening ─────────────────────────────
+
+    #[test]
+    fn encode_request__mcp_batch_flattens_into_n_envelopes() {
+        let batch = Request::McpBatch(
+            req_parts(),
+            vec![
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+                rpc(ClientMethod::Tools(ToolsMethod::Call), None),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ],
+        );
+        let envs = encode_envelopes(&transaction(batch, ok_response(1), 0, 0), "s");
+
+        // 3 request envelopes + 1 response envelope.
+        let req_envs: Vec<&Value> = envs.iter().filter(|e| e["kind"] == "request").collect();
+        assert_eq!(req_envs.len(), 3);
+        for env in &req_envs {
+            assert_eq!(env["payload"]["kind"], "mcp");
+            assert!(env["payload"]["rpc"].is_object());
+            assert!(env["payload"].get("rpcs").is_none());
+        }
+        assert_eq!(req_envs[0]["payload"]["rpc"]["method"], "tools/list");
+        assert_eq!(req_envs[1]["payload"]["rpc"]["method"], "tools/call");
+        assert_eq!(req_envs[2]["payload"]["rpc"]["method"], "tools/list");
+    }
+
+    // ── request: Http ────────────────────────────────────────────
+
+    fn http_req(method: &str, uri: &str, body: &'static [u8]) -> Request {
+        let req = HttpReq::builder()
+            .method(method)
+            .uri(uri)
+            .body(Bytes::from_static(body))
+            .unwrap();
+        Request::Http(req)
+    }
+
+    #[test]
+    fn encode_request__http_carries_body_and_size() {
+        let envs = encode_envelopes(
+            &transaction(
+                http_req("PUT", "/some/path", b"hello world"),
+                empty_http_response(),
+                0,
+                0,
+            ),
+            "s",
+        );
+        let p = envs[0]["payload"].clone();
+
+        assert_eq!(p["kind"], "http");
+        assert_eq!(p["http_method"], "PUT");
+        assert_eq!(p["uri"], "/some/path");
+        assert_eq!(p["body"], "hello world");
+        assert_eq!(p["body_size"], 11);
+    }
+
+    #[test]
+    fn encode_request__http_binary_body_lossy_decoded() {
+        let envs = encode_envelopes(
+            &transaction(
+                http_req("POST", "/", &[0xFF, 0xFE, b'a']),
+                empty_http_response(),
+                0,
+                0,
+            ),
+            "s",
+        );
+        let p = envs[0]["payload"].clone();
+
+        assert_eq!(p["body_size"], 3);
+        assert!(p["body"].is_string());
+    }
+
+    // ── response: Mcp with timing ────────────────────────────────
+
+    #[test]
+    fn encode_response__mcp_carries_full_result_envelope_and_timing() {
+        let resp = Response::Mcp(
+            resp_parts(200),
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(7),
+                result: Some(json!({"tools": [{"name": "search"}]})),
+            }),
+        );
+        let event = transaction(
+            Request::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            resp,
+            12_345,
+            11_200,
+        );
+        let envs = encode_envelopes(&event, "s");
+        let resp_env = envs.iter().find(|e| e["kind"] == "response").unwrap();
+        let p = resp_env["payload"].clone();
+
+        assert_eq!(p["kind"], "mcp");
+        assert_eq!(p["http_status"], 200);
+        assert_eq!(p["result"]["jsonrpc"], "2.0");
+        assert_eq!(p["result"]["id"], 7);
+        assert_eq!(p["result"]["result"]["tools"][0]["name"], "search");
+        assert_eq!(p["latency_us"], 12_345);
+        assert_eq!(p["upstream_us"], 11_200);
+    }
+
+    #[test]
+    fn encode_response__mcp_error_carries_full_error_envelope() {
+        let resp = Response::Mcp(
+            resp_parts(200),
+            JsonRpcResult::Error(JsonRpcErrorResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                error: JsonRpcError {
+                    code: -32601,
+                    message: "method not found".into(),
+                    data: None,
+                },
+            }),
+        );
+        let event = transaction(
+            Request::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            resp,
+            0,
+            0,
+        );
+        let envs = encode_envelopes(&event, "s");
+        let p = envs.iter().find(|e| e["kind"] == "response").unwrap()["payload"].clone();
+
+        assert_eq!(p["result"]["error"]["code"], -32601);
+        assert_eq!(p["result"]["error"]["message"], "method not found");
+    }
+
+    #[test]
+    fn encode_response__ts_comes_from_event_not_encode_time() {
+        let frozen_ts = chrono::DateTime::parse_from_rfc3339("2024-01-15T12:30:45.123Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let event = ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-Z".into(),
+            request: Request::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            response: Some(ok_response(1)),
+            ts: frozen_ts,
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+        }));
+        let envs = encode_envelopes(&event, "s");
+        for env in &envs {
+            assert_eq!(env["ts"], "2024-01-15T12:30:45.123+00:00");
+        }
+    }
+
+    // ── response: McpBatch flattening ────────────────────────────
+
+    #[test]
+    fn encode_response__mcp_batch_flattens_with_shared_timing() {
+        let resp = Response::McpBatch(
+            resp_parts(200),
+            vec![
+                JsonRpcResult::Response(JsonRpcResponse {
+                    jsonrpc: JsonRpcVersion,
+                    id: RequestId::Number(1),
+                    result: Some(json!({"ok": 1})),
+                }),
+                JsonRpcResult::Error(JsonRpcErrorResponse {
+                    jsonrpc: JsonRpcVersion,
+                    id: RequestId::Number(2),
+                    error: JsonRpcError {
+                        code: -32000,
+                        message: "boom".into(),
+                        data: None,
+                    },
+                }),
+            ],
+        );
+        let event = transaction(
+            Request::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            resp,
+            5_000,
+            4_800,
+        );
+        let envs = encode_envelopes(&event, "s");
+
+        let resp_envs: Vec<&Value> = envs.iter().filter(|e| e["kind"] == "response").collect();
+        assert_eq!(resp_envs.len(), 2);
+        for env in &resp_envs {
+            assert_eq!(env["payload"]["kind"], "mcp");
+            assert_eq!(env["payload"]["latency_us"], 5_000);
+            assert_eq!(env["payload"]["upstream_us"], 4_800);
+            assert!(env["payload"].get("results").is_none());
+        }
+        assert_eq!(resp_envs[0]["payload"]["result"]["result"]["ok"], 1);
+        assert_eq!(resp_envs[1]["payload"]["result"]["error"]["code"], -32000);
+    }
+
+    // ── response: Http ───────────────────────────────────────────
+
+    #[test]
+    fn encode_response__http_carries_status_body_size_and_timing() {
+        let http = HttpResp::builder()
+            .status(502)
+            .body(Bytes::copy_from_slice(b"upstream is dead"))
+            .unwrap();
+        let event = transaction(http_req("GET", "/", b""), Response::Http(http), 200, 150);
+        let envs = encode_envelopes(&event, "s");
+        let p = envs.iter().find(|e| e["kind"] == "response").unwrap()["payload"].clone();
+
+        assert_eq!(p["kind"], "http");
+        assert_eq!(p["http_status"], 502);
+        assert_eq!(p["body"], "upstream is dead");
+        assert_eq!(p["body_size"], 16);
+        assert_eq!(p["latency_us"], 200);
+        assert_eq!(p["upstream_us"], 150);
+    }
+
+    // ── session ──────────────────────────────────────────────────
+
+    #[test]
+    fn encode_session__active_with_client_info() {
+        let mut info = SessionInfo::new(
+            "sess-9".into(),
+            Some(ClientInfo {
+                name: "cursor".into(),
+                version: Some("0.42".into()),
+            }),
+            RequestId::Number(0),
+        );
+        info.request_count = 5;
+        let p = encode_envelopes(&ProxyEvent::Session(Arc::new(info)), "s").remove(0)["payload"]
+            .clone();
+
+        assert_eq!(p["session_id"], "sess-9");
+        assert_eq!(p["state"], "active");
+        assert_eq!(p["client_name"], "cursor");
+        assert_eq!(p["client_version"], "0.42");
+        assert_eq!(p["request_count"], 5);
+    }
+
+    // ── schema ───────────────────────────────────────────────────
 
     fn tool(name: &str) -> Tool {
         Tool {
@@ -329,382 +728,19 @@ mod tests {
         }
     }
 
-    // ── encode_envelope (top-level shape) ────────────────────────
-
     #[test]
-    fn encode_envelope__top_level_fields_present() {
-        let event = request_event(Request::Mcp(
-            req_parts(None),
-            rpc(ClientMethod::Tools(ToolsMethod::List), None),
-        ));
-        let v = encode_envelope(&event, "prod-server");
-
-        assert_eq!(v["v"], json!(ENVELOPE_VERSION));
-        assert_eq!(v["server"], "prod-server");
-        assert_eq!(v["kind"], "request");
-        assert!(v["ts"].is_string());
-        assert!(v["payload"].is_object());
-    }
-
-    #[test]
-    fn encode_envelope__server_slug_passed_through_unchanged() {
-        let event = request_event(Request::Mcp(
-            req_parts(None),
-            rpc(ClientMethod::Tools(ToolsMethod::List), None),
-        ));
-        assert_eq!(encode_envelope(&event, "")["server"], "");
-        assert_eq!(
-            encode_envelope(&event, "weird-Slug_42")["server"],
-            "weird-Slug_42"
-        );
-    }
-
-    // ── encode_request: Mcp ──────────────────────────────────────
-
-    #[test]
-    fn encode_request__mcp_carries_request_id_and_method() {
-        let event = request_event(Request::Mcp(
-            req_parts(None),
-            rpc(ClientMethod::Tools(ToolsMethod::List), None),
-        ));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["request_id"], "req-abc");
-        assert_eq!(p["mcp_method"], "tools/list");
-    }
-
-    #[test]
-    fn encode_request__mcp_tools_call_extracts_tool_name() {
-        let mut params = Map::new();
-        params.insert("name".into(), json!("search"));
-        let event = request_event(Request::Mcp(
-            req_parts(None),
-            rpc(ClientMethod::Tools(ToolsMethod::Call), Some(params)),
-        ));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["tool"], "search");
-        assert_eq!(p["mcp_method"], "tools/call");
-    }
-
-    #[test]
-    fn encode_request__mcp_resources_read_extracts_uri() {
-        let mut params = Map::new();
-        params.insert("uri".into(), json!("file:///doc.md"));
-        let event = request_event(Request::Mcp(
-            req_parts(None),
-            rpc(ClientMethod::Resources(ResourcesMethod::Read), Some(params)),
-        ));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["resource_uri"], "file:///doc.md");
-    }
-
-    #[test]
-    fn encode_request__mcp_prompts_get_extracts_prompt_name() {
-        let mut params = Map::new();
-        params.insert("name".into(), json!("greeting"));
-        let event = request_event(Request::Mcp(
-            req_parts(None),
-            rpc(ClientMethod::Prompts(PromptsMethod::Get), Some(params)),
-        ));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["prompt_name"], "greeting");
-    }
-
-    #[test]
-    fn encode_request__mcp_session_id_from_inbound_header() {
-        let event = request_event(Request::Mcp(
-            req_parts(Some("sess-1")),
-            rpc(ClientMethod::Tools(ToolsMethod::List), None),
-        ));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["session_id"], "sess-1");
-    }
-
-    #[test]
-    fn encode_request__mcp_session_id_null_when_header_missing() {
-        let event = request_event(Request::Mcp(
-            req_parts(None),
-            rpc(ClientMethod::Tools(ToolsMethod::List), None),
-        ));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert!(p["session_id"].is_null());
-    }
-
-    #[test]
-    fn encode_request__mcp_unknown_method_serializes_as_empty_string() {
-        let event = request_event(Request::Mcp(
-            req_parts(None),
-            rpc(ClientMethod::Unknown("custom/thing".into()), None),
-        ));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        // Unknown methods are not in the enum's strum names, so as_str()
-        // returns None and the encoder falls back to "".
-        assert_eq!(p["mcp_method"], "");
-    }
-
-    // ── encode_request: McpBatch ─────────────────────────────────
-
-    #[test]
-    fn encode_request__mcp_batch_carries_size_and_first_method() {
-        let batch = Request::McpBatch(
-            req_parts(Some("sess-b")),
-            vec![
-                rpc(ClientMethod::Tools(ToolsMethod::List), None),
-                rpc(ClientMethod::Tools(ToolsMethod::List), None),
-                rpc(ClientMethod::Tools(ToolsMethod::List), None),
-            ],
-        );
-        let event = request_event(batch);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["mcp_method"], "tools/list");
-        assert_eq!(p["batch_size"], 3);
-        assert_eq!(p["session_id"], "sess-b");
-    }
-
-    #[test]
-    fn encode_request__mcp_batch_empty_uses_blank_method() {
-        let batch = Request::McpBatch(req_parts(None), vec![]);
-        let event = request_event(batch);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["mcp_method"], "");
-        assert_eq!(p["batch_size"], 0);
-    }
-
-    // ── encode_request: Http ─────────────────────────────────────
-
-    #[test]
-    fn encode_request__http_carries_method_path_and_size() {
-        let req = HttpReq::builder()
-            .method("PUT")
-            .uri("/some/path")
-            .body(Bytes::copy_from_slice(b"hello"))
-            .unwrap();
-        let event = request_event(Request::Http(req));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["http_method"], "PUT");
-        assert_eq!(p["path"], "/some/path");
-        assert_eq!(p["request_size"], 5);
-    }
-
-    // ── encode_response: Mcp ─────────────────────────────────────
-
-    #[test]
-    fn encode_response__mcp_ok_status_and_latency() {
-        let resp = Response::Mcp(
-            resp_parts(200),
-            JsonRpcResult::Response(JsonRpcResponse {
-                jsonrpc: JsonRpcVersion,
-                id: RequestId::Number(1),
-                result: Some(json!({})),
-            }),
-        );
-        let event = response_event(resp, 12_345);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["status"], "ok");
-        assert_eq!(p["http_status"], 200);
-        assert_eq!(p["latency_us"], 12_345);
-        assert_eq!(p["error_code"], "");
-        assert_eq!(p["error_detail"], "");
-    }
-
-    #[test]
-    fn encode_response__mcp_error_carries_code_and_message() {
-        let resp = Response::Mcp(
-            resp_parts(200),
-            JsonRpcResult::Error(JsonRpcErrorResponse {
-                jsonrpc: JsonRpcVersion,
-                id: RequestId::Number(1),
-                error: JsonRpcError {
-                    code: -32601,
-                    message: "method not found".into(),
-                    data: None,
-                },
-            }),
-        );
-        let event = response_event(resp, 0);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["status"], "error");
-        assert_eq!(p["error_code"], "-32601");
-        assert_eq!(p["error_detail"], "method not found");
-    }
-
-    #[test]
-    fn encode_response__mcp_request_id_matches_paired_request() {
-        let resp = Response::Mcp(
-            resp_parts(200),
-            JsonRpcResult::Response(JsonRpcResponse {
-                jsonrpc: JsonRpcVersion,
-                id: RequestId::Number(1),
-                result: None,
-            }),
-        );
-        let event = response_event(resp, 1);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["request_id"], "req-abc");
-    }
-
-    // ── encode_response: McpBatch ────────────────────────────────
-
-    #[test]
-    fn encode_response__mcp_batch_all_ok() {
-        let resp = Response::McpBatch(
-            resp_parts(200),
-            vec![
-                JsonRpcResult::Response(JsonRpcResponse {
-                    jsonrpc: JsonRpcVersion,
-                    id: RequestId::Number(1),
-                    result: Some(json!({})),
-                }),
-                JsonRpcResult::Response(JsonRpcResponse {
-                    jsonrpc: JsonRpcVersion,
-                    id: RequestId::Number(2),
-                    result: Some(json!({})),
-                }),
-            ],
-        );
-        let event = response_event(resp, 100);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["status"], "ok");
-        assert_eq!(p["batch_size"], 2);
-    }
-
-    #[test]
-    fn encode_response__mcp_batch_any_error_marks_status_error() {
-        let resp = Response::McpBatch(
-            resp_parts(200),
-            vec![
-                JsonRpcResult::Response(JsonRpcResponse {
-                    jsonrpc: JsonRpcVersion,
-                    id: RequestId::Number(1),
-                    result: Some(json!({})),
-                }),
-                JsonRpcResult::Error(JsonRpcErrorResponse {
-                    jsonrpc: JsonRpcVersion,
-                    id: RequestId::Number(2),
-                    error: JsonRpcError {
-                        code: -32000,
-                        message: "boom".into(),
-                        data: None,
-                    },
-                }),
-            ],
-        );
-        let event = response_event(resp, 0);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["status"], "error");
-    }
-
-    // ── encode_response: Http ────────────────────────────────────
-
-    #[test]
-    fn encode_response__http_2xx_marks_status_ok() {
-        let http = HttpResp::builder().status(204).body(Bytes::new()).unwrap();
-        let event = response_event(Response::Http(http), 50);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["http_status"], 204);
-        assert_eq!(p["status"], "ok");
-    }
-
-    #[test]
-    fn encode_response__http_5xx_marks_status_error() {
-        let http = HttpResp::builder()
-            .status(502)
-            .body(Bytes::copy_from_slice(b"upstream is dead"))
-            .unwrap();
-        let event = response_event(Response::Http(http), 50);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["http_status"], 502);
-        assert_eq!(p["status"], "error");
-        assert_eq!(p["response_size"], 16);
-    }
-
-    // ── encode_session ───────────────────────────────────────────
-
-    #[test]
-    fn encode_session__active_with_client_info() {
-        let mut info = SessionInfo::new(
-            "sess-9".into(),
-            Some(ClientInfo {
-                name: "cursor".into(),
-                version: Some("0.42".into()),
-            }),
-            RequestId::Number(0),
-        );
-        info.request_count = 5;
-        let event = ProxyEvent::Session(Arc::new(info));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["session_id"], "sess-9");
-        assert_eq!(p["state"], "active");
-        assert_eq!(p["client_name"], "cursor");
-        assert_eq!(p["client_version"], "0.42");
-        assert_eq!(p["request_count"], 5);
-    }
-
-    #[test]
-    fn encode_session__without_client_info_emits_nulls() {
-        let info = SessionInfo::new("sess-x".into(), None, RequestId::Number(0));
-        let event = ProxyEvent::Session(Arc::new(info));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert!(p["client_name"].is_null());
-        assert!(p["client_version"].is_null());
-        assert!(p["server_name"].is_null());
-    }
-
-    #[test]
-    fn encode_session__closed_state_serialized() {
-        let mut info = SessionInfo::new("sess-c".into(), None, RequestId::Number(0));
-        info.state = SessionState::Closed;
-        let event = ProxyEvent::Session(Arc::new(info));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["state"], "closed");
-    }
-
-    // ── encode_schema ────────────────────────────────────────────
-
-    #[test]
-    fn encode_schema__tool_carries_name_and_reason() {
+    fn encode_schema__tool_carries_full_definition() {
         let event = ProxyEvent::Schema(Arc::new(ChangeSchema::Tool(Reason::Added, tool("search"))));
-        let env = encode_envelope(&event, "s");
+        let p = encode_envelopes(&event, "s").remove(0)["payload"].clone();
 
-        assert_eq!(env["kind"], "schema");
-        assert_eq!(env["payload"]["kind"], "tool");
-        assert_eq!(env["payload"]["reason"], "added");
-        assert_eq!(env["payload"]["name"], "search");
-        assert_eq!(env["payload"]["tool"]["name"], "search");
+        assert_eq!(p["kind"], "tool");
+        assert_eq!(p["reason"], "added");
+        assert_eq!(p["name"], "search");
+        assert_eq!(p["tool"]["name"], "search");
     }
 
     #[test]
-    fn encode_schema__tool_observed_reason() {
-        let event = ProxyEvent::Schema(Arc::new(ChangeSchema::Tool(
-            Reason::Observed,
-            tool("lookup"),
-        )));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["reason"], "observed");
-    }
-
-    #[test]
-    fn encode_schema__prompt() {
+    fn encode_schema__prompt_resource_template_kinds() {
         let prompt = Prompt {
             name: "summarize".into(),
             title: None,
@@ -712,15 +748,15 @@ mod tests {
             arguments: None,
             meta: None,
         };
-        let event = ProxyEvent::Schema(Arc::new(ChangeSchema::Prompt(Reason::Added, prompt)));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
+        let p = encode_envelopes(
+            &ProxyEvent::Schema(Arc::new(ChangeSchema::Prompt(Reason::Added, prompt))),
+            "s",
+        )
+        .remove(0)["payload"]
+            .clone();
         assert_eq!(p["kind"], "prompt");
         assert_eq!(p["name"], "summarize");
-    }
 
-    #[test]
-    fn encode_schema__resource() {
         let resource = Resource {
             uri: "file:///x".into(),
             name: "x".into(),
@@ -731,15 +767,15 @@ mod tests {
             annotations: None,
             meta: None,
         };
-        let event = ProxyEvent::Schema(Arc::new(ChangeSchema::Resource(Reason::Added, resource)));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
+        let p = encode_envelopes(
+            &ProxyEvent::Schema(Arc::new(ChangeSchema::Resource(Reason::Added, resource))),
+            "s",
+        )
+        .remove(0)["payload"]
+            .clone();
         assert_eq!(p["kind"], "resource");
         assert_eq!(p["uri"], "file:///x");
-    }
 
-    #[test]
-    fn encode_schema__resource_template() {
         let rt = ResourceTemplate {
             uri_template: "doc://{id}".into(),
             name: "doc".into(),
@@ -749,40 +785,29 @@ mod tests {
             annotations: None,
             meta: None,
         };
-        let event = ProxyEvent::Schema(Arc::new(ChangeSchema::ResourceTemplate(Reason::Added, rt)));
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
+        let p = encode_envelopes(
+            &ProxyEvent::Schema(Arc::new(ChangeSchema::ResourceTemplate(Reason::Added, rt))),
+            "s",
+        )
+        .remove(0)["payload"]
+            .clone();
         assert_eq!(p["kind"], "resource_template");
         assert_eq!(p["uri_template"], "doc://{id}");
     }
 
-    // ── encode_heartbeat ─────────────────────────────────────────
-
-    fn heartbeat_event(
-        tunnel_status: &str,
-        tunnel_address: Option<&str>,
-        upstream: &str,
-        export_port: u16,
-    ) -> ProxyEvent {
-        ProxyEvent::Heartbeat(Arc::new(mcpr_core::event::types::HeartbeatEvent {
-            mcp_status: "running".into(),
-            tunnel_status: tunnel_status.into(),
-            tunnel_address: tunnel_address.map(|s| s.into()),
-            upstream: upstream.into(),
-            export_port,
-            ts: Utc::now(),
-        }))
-    }
+    // ── heartbeat ────────────────────────────────────────────────
 
     #[test]
-    fn encode_envelope__heartbeat_kind_and_fields() {
-        let event = heartbeat_event(
-            "connected",
-            Some("https://abc.tunnel.mcpr.app"),
-            "http://127.0.0.1:8080",
-            3004,
-        );
-        let env = encode_envelope(&event, "prod-server");
+    fn encode_heartbeat__carries_status_and_address() {
+        let hb = HeartbeatEvent {
+            mcp_status: "running".into(),
+            tunnel_status: "connected".into(),
+            tunnel_address: Some("https://abc.tunnel.mcpr.app".into()),
+            upstream: "http://127.0.0.1:8080".into(),
+            export_port: 3004,
+            ts: Utc::now(),
+        };
+        let env = encode_envelopes(&ProxyEvent::Heartbeat(Arc::new(hb)), "prod-server").remove(0);
 
         assert_eq!(env["kind"], "heartbeat");
         assert_eq!(env["server"], "prod-server");
@@ -792,109 +817,6 @@ mod tests {
             env["payload"]["tunnel_address"],
             "https://abc.tunnel.mcpr.app"
         );
-        assert_eq!(env["payload"]["upstream"], "http://127.0.0.1:8080");
         assert_eq!(env["payload"]["export_port"], 3004);
-    }
-
-    #[test]
-    fn encode_envelope__heartbeat_disabled_tunnel_emits_null_address() {
-        let event = heartbeat_event("disabled", None, "http://up:9000", 3000);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert_eq!(p["tunnel_status"], "disabled");
-        assert!(p["tunnel_address"].is_null());
-    }
-
-    // ── encode_response timer ────────────────────────────────────
-
-    fn response_event_with_timer(resp: Response, timer: Timer) -> ProxyEvent {
-        ProxyEvent::Response(Arc::new(ResponseEvent {
-            response: resp,
-            request_id: "req-abc".into(),
-            latency_us: 0,
-            timer,
-            ts: Utc::now(),
-        }))
-    }
-
-    #[test]
-    fn encode_response__timer_object_present_with_default_timer() {
-        let resp = Response::Mcp(
-            resp_parts(200),
-            JsonRpcResult::Response(JsonRpcResponse {
-                jsonrpc: JsonRpcVersion,
-                id: RequestId::Number(1),
-                result: Some(json!({})),
-            }),
-        );
-        let event = response_event(resp, 0);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        assert!(p["timer"].is_object());
-        assert_eq!(p["timer"].as_object().unwrap().len(), 0);
-    }
-
-    #[test]
-    fn encode_response__timer_object_carries_recorded_spans() {
-        let timer = Timer::new();
-        let id_a = timer.track_start("Parse");
-        timer.track_end(id_a);
-        let id_b = timer.track_start("Encode");
-        timer.track_end(id_b);
-
-        let resp = Response::Mcp(
-            resp_parts(200),
-            JsonRpcResult::Response(JsonRpcResponse {
-                jsonrpc: JsonRpcVersion,
-                id: RequestId::Number(1),
-                result: None,
-            }),
-        );
-        let event = response_event_with_timer(resp, timer);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        let timer_obj = p["timer"].as_object().expect("timer is object");
-        assert!(timer_obj.contains_key("Parse"));
-        assert!(timer_obj.contains_key("Encode"));
-    }
-
-    #[test]
-    fn encode_response__timer_sums_duplicate_span_names() {
-        let timer = Timer::new();
-        let a = timer.track_start("Stage");
-        timer.track_end(a);
-        let b = timer.track_start("Stage");
-        timer.track_end(b);
-
-        let http = http::Response::builder()
-            .status(200)
-            .body(Bytes::new())
-            .unwrap();
-        let event = response_event_with_timer(Response::Http(http), timer);
-        let p = encode_envelope(&event, "s")["payload"].clone();
-
-        let timer_obj = p["timer"].as_object().expect("timer is object");
-        assert_eq!(timer_obj.len(), 1, "duplicate names collapse to one key");
-        assert!(timer_obj["Stage"].is_u64());
-    }
-
-    // ── request_id_to_value ──────────────────────────────────────
-
-    #[test]
-    fn request_id_to_value__number() {
-        assert_eq!(request_id_to_value(&RequestId::Number(42)), json!(42));
-    }
-
-    #[test]
-    fn request_id_to_value__string() {
-        assert_eq!(
-            request_id_to_value(&RequestId::String("xyz".into())),
-            json!("xyz")
-        );
-    }
-
-    #[test]
-    fn request_id_to_value__null() {
-        assert_eq!(request_id_to_value(&RequestId::Null), Value::Null);
     }
 }

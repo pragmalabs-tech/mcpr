@@ -29,17 +29,21 @@ pub mod types;
 pub use bus::{EventBus, EventBusHandle};
 pub use manager::EventManager;
 pub use sink::{EventSink, NoopSink};
-pub use types::{HeartbeatEvent, ProxyEvent};
+pub use types::{HeartbeatEvent, ProxyEvent, RequestEvent};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    use crate::protocol::Request;
+    use chrono::Utc;
+    use http::{Response as HttpResp, StatusCode};
+
     use crate::protocol::mcp::{
-        ClientMethod, JsonRpcRequest, JsonRpcVersion, RequestId, ToolsMethod,
+        ClientMethod, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, JsonRpcVersion, RequestId,
+        ToolsMethod,
     };
+    use crate::protocol::{Request, Response};
 
     struct MemorySink {
         events: Arc<Mutex<Vec<ProxyEvent>>>,
@@ -75,22 +79,43 @@ mod tests {
     }
 
     fn test_request() -> ProxyEvent {
-        let parts = axum::http::Request::builder()
+        let req_parts = axum::http::Request::builder()
             .method("POST")
             .uri("/")
             .body(())
             .unwrap()
             .into_parts()
             .0;
-        ProxyEvent::Request(Arc::new(Request::Mcp(
-            parts,
-            JsonRpcRequest {
-                jsonrpc: JsonRpcVersion,
-                id: RequestId::Number(1),
-                method: ClientMethod::Tools(ToolsMethod::List),
-                params: None,
-            },
-        )))
+        let resp_parts = HttpResp::builder()
+            .status(StatusCode::OK)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "test-id".into(),
+            request: Request::Mcp(
+                req_parts,
+                JsonRpcRequest {
+                    jsonrpc: JsonRpcVersion,
+                    id: RequestId::Number(1),
+                    method: ClientMethod::Tools(ToolsMethod::List),
+                    params: None,
+                },
+            ),
+            response: Some(Response::Mcp(
+                resp_parts,
+                JsonRpcResult::Response(JsonRpcResponse {
+                    jsonrpc: JsonRpcVersion,
+                    id: RequestId::Number(1),
+                    result: None,
+                }),
+            )),
+            ts: Utc::now(),
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+        }))
     }
 
     fn start_with(sinks: Vec<Box<dyn EventSink>>) -> EventBusHandle {

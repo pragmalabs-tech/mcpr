@@ -110,7 +110,7 @@ async fn flush_batch(
     let server = config.server.as_deref().unwrap_or("");
     let payload: Vec<serde_json::Value> = events
         .iter()
-        .map(|e| wire::encode_envelope(e, server))
+        .flat_map(|e| wire::encode_envelopes(e, server))
         .collect();
 
     let body = match serde_json::to_vec(&payload) {

@@ -59,9 +59,14 @@ mod tests {
 
     use std::sync::Arc;
 
+    use chrono::Utc;
+    use mcpr_core::event::types::RequestEvent;
     use mcpr_core::protocol::{
-        Request,
-        mcp::{ClientMethod, JsonRpcRequest, JsonRpcVersion, RequestId, ToolsMethod},
+        Request, Response,
+        mcp::{
+            ClientMethod, JsonRpcRequest, JsonRpcResponse, JsonRpcResult, JsonRpcVersion,
+            RequestId, ToolsMethod,
+        },
     };
     use serde_json::json;
 
@@ -99,15 +104,39 @@ mod tests {
         Request::Mcp(parts, rpc)
     }
 
+    fn ok_response(id: i64) -> Response {
+        let parts = http::Response::new(()).into_parts().0;
+        Response::Mcp(
+            parts,
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(id),
+                result: Some(json!({})),
+            }),
+        )
+    }
+
+    fn transaction(req: Request, resp: Response) -> ProxyEvent {
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid".into(),
+            request: req,
+            response: Some(resp),
+            ts: Utc::now(),
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+        }))
+    }
+
     #[test]
     fn on_event__forwards_request_to_store_with_proxy_tag() {
         let (store, db_path, _dir) = open_store();
         let mut sink = SqliteSink::new(store, "alpha");
 
-        sink.on_event(&ProxyEvent::Request(Arc::new(mcp_request(
-            "sess-1",
-            rpc(1, "search"),
-        ))));
+        sink.on_event(&transaction(
+            mcp_request("sess-1", rpc(1, "search")),
+            ok_response(1),
+        ));
 
         sink.shutdown();
 
