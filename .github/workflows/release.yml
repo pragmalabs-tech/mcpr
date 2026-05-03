@@ -95,7 +95,6 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           cargo publish -p mcpr-core --no-verify
-          cargo publish -p mcpr-tunnel --no-verify
           cargo publish -p mcpr-integrations --no-verify
           cargo publish -p mcpr-proxy --no-verify
 
