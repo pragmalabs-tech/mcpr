@@ -8,7 +8,7 @@
 [![codecov](https://codecov.io/gh/pragmalabs-tech/mcpr/branch/main/graph/badge.svg)](https://codecov.io/gh/pragmalabs-tech/mcpr)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**Observability-first proxy for MCP servers.** A single Rust binary that sits in front of your MCP app and records every JSON-RPC call to a local SQLite store: per-tool latency, session traces, schema diffs, client breakdowns. 
+**Observability-first proxy for MCP servers.** A Rust proxy sits in front of your MCP app and records every JSON-RPC: per-tool latency, session traces, schema diffs, client breakdowns. It also help you to configuration csp policy and handle Auth (both oauth, api key) at the proxy layer.
 
 </div>
 
@@ -20,20 +20,20 @@
 curl -fsSL https://mcpr.app/install.sh | sh
 ```
 
-Detects your OS and architecture, downloads the latest release from GitHub, installs to `$HOME/.local/bin/mcpr`, and adds that directory to your shell PATH. Override the destination with `MCPR_INSTALL_DIR=/usr/local/bin` if you prefer. Linux (x86_64, aarch64) and macOS (Intel, Apple Silicon) are supported. Manual tarballs are attached to every [GitHub release](https://github.com/pragmalabs-tech/mcpr/releases).
-
 ### Run
 
 ```bash
 cat > mcpr.toml <<'EOF'
-mcp = "http://localhost:9000"
+mcp = "http://localhost:9000/mcp"
 port = 3000
 EOF
 
 mcpr proxy run mcpr.toml
 ```
 
-Traffic flows through `http://localhost:3000`. `mcpr proxy run` is a foreground process: your supervisor (systemd, Docker, `child_process.spawn`) owns the lifecycle. SIGTERM drains gracefully.
+Traffic flows through `http://localhost:3000` and send it to your mcp server at `http://localhost:9000/mcp`.
+
+Note: We also has useful dashboard that you stream your data to and view your mcp server anywhere:
 
 To stream events into the cloud dashboard, run `mcpr proxy setup` once.
 
