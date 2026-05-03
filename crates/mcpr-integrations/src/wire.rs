@@ -21,7 +21,7 @@ use mcpr_core::event::ProxyEvent;
 use mcpr_core::event::types::{HeartbeatEvent, LoggedRequest, LoggedResponse, RequestEvent};
 use mcpr_core::protocol::mcp::{JsonRpcRequest, JsonRpcResult};
 use mcpr_core::protocol::schema::{ChangeSchema, Reason};
-use mcpr_core::protocol::session::{SessionInfo, SessionState};
+use mcpr_core::protocol::session::{SessionInfo, SessionState, session_id_from_headers};
 use serde_json::{Value, json};
 
 const ENVELOPE_VERSION: u8 = 1;
@@ -83,23 +83,31 @@ fn encode_request_envelopes(
         LoggedRequest::Mcp(parts, rpc) => {
             let http_method = parts.method.as_str();
             let uri = parts.uri.to_string();
+            let session_id = session_id_from_headers(&parts.headers);
             vec![envelope(
                 "request",
                 ts.to_string(),
                 server,
-                mcp_request_payload(request_id, http_method, &uri, rpc),
+                mcp_request_payload(request_id, http_method, &uri, session_id.as_deref(), rpc),
             )]
         }
         LoggedRequest::McpBatch(parts, rpcs) => {
             let http_method = parts.method.as_str();
             let uri = parts.uri.to_string();
+            let session_id = session_id_from_headers(&parts.headers);
             rpcs.iter()
                 .map(|rpc| {
                     envelope(
                         "request",
                         ts.to_string(),
                         server,
-                        mcp_request_payload(request_id, http_method, &uri, rpc),
+                        mcp_request_payload(
+                            request_id,
+                            http_method,
+                            &uri,
+                            session_id.as_deref(),
+                            rpc,
+                        ),
                     )
                 })
                 .collect()
@@ -125,6 +133,7 @@ fn mcp_request_payload(
     request_id: &str,
     http_method: &str,
     uri: &str,
+    session_id: Option<&str>,
     rpc: &JsonRpcRequest,
 ) -> Value {
     json!({
@@ -132,6 +141,7 @@ fn mcp_request_payload(
         "request_id": request_id,
         "http_method": http_method,
         "uri": uri,
+        "session_id": session_id.unwrap_or(""),
         "rpc": rpc,
     })
 }
@@ -455,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_request__mcp_no_headers_in_payload() {
+    fn encode_request__mcp_carries_session_id_from_header_but_not_other_headers() {
         let parts = HttpReq::builder()
             .method("POST")
             .uri("/")
@@ -474,7 +484,22 @@ mod tests {
         let p = encode_envelopes(&event, "s")[0]["payload"].clone();
 
         assert!(p.get("headers").is_none());
-        assert!(p.get("session_id").is_none());
+        assert_eq!(p["session_id"], "sess-1");
+    }
+
+    #[test]
+    fn encode_request__mcp_session_id_is_empty_when_header_absent() {
+        let event = transaction(
+            LoggedRequest::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            ok_response(1),
+            0,
+            0,
+        );
+        let p = encode_envelopes(&event, "s")[0]["payload"].clone();
+        assert_eq!(p["session_id"], "");
     }
 
     // ── request: McpBatch flattening ─────────────────────────────
