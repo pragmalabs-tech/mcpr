@@ -29,7 +29,7 @@ pub mod types;
 pub use bus::{EventBus, EventBusHandle};
 pub use manager::EventManager;
 pub use sink::{EventSink, NoopSink};
-pub use types::{HeartbeatEvent, ProxyEvent, RequestEvent, ResponseEvent};
+pub use types::{HeartbeatEvent, ProxyEvent};
 
 #[cfg(test)]
 mod tests {
@@ -82,19 +82,15 @@ mod tests {
             .unwrap()
             .into_parts()
             .0;
-        ProxyEvent::Request(Arc::new(RequestEvent {
-            request: Request::Mcp(
-                parts,
-                JsonRpcRequest {
-                    jsonrpc: JsonRpcVersion,
-                    id: RequestId::Number(1),
-                    method: ClientMethod::Tools(ToolsMethod::List),
-                    params: None,
-                },
-            ),
-            request_id: "test-req".into(),
-            ts: chrono::Utc::now(),
-        }))
+        ProxyEvent::Request(Arc::new(Request::Mcp(
+            parts,
+            JsonRpcRequest {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                method: ClientMethod::Tools(ToolsMethod::List),
+                params: None,
+            },
+        )))
     }
 
     fn start_with(sinks: Vec<Box<dyn EventSink>>) -> EventBusHandle {

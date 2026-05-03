@@ -1,38 +1,15 @@
 //! Proxy event types carried through the event bus.
 //!
 //! [`ProxyEvent`] is the single event enum; sinks match on the variant to
-//! decide what to do with each event. The `Request` and `Response`
-//! variants wrap a small metadata struct around the protocol value so
-//! downstream sinks have the proxy-internal request id, emission
-//! timestamp, and response latency without re-deriving them.
+//! decide what to do with each event. Variants hold their payload behind
+//! `Arc` so fan-out to multiple sinks is a refcount bump rather than a
+//! deep clone.
 
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 
 use crate::protocol::{Request, Response, schema::ChangeSchema, session::SessionInfo};
-use crate::timer::Timer;
-
-/// Request observation: the parsed request alongside the proxy-internal
-/// `request_id` (for cross-event correlation) and the emission timestamp.
-#[derive(Clone)]
-pub struct RequestEvent {
-    pub request: Request,
-    pub request_id: String,
-    pub ts: DateTime<Utc>,
-}
-
-/// Response observation: the parsed response, the matching `request_id`,
-/// the round-trip latency captured at the response stage, the per-stage
-/// timer breakdown, and the emission timestamp.
-#[derive(Clone)]
-pub struct ResponseEvent {
-    pub response: Response,
-    pub request_id: String,
-    pub latency_us: u64,
-    pub timer: Timer,
-    pub ts: DateTime<Utc>,
-}
 
 /// Periodic snapshot of a proxy's runtime status. Emitted on a fixed
 /// cadence by the CLI host (not by the request pipeline) so the cloud
@@ -54,8 +31,8 @@ pub struct HeartbeatEvent {
 /// the variant to decide what to process.
 #[derive(Clone)]
 pub enum ProxyEvent {
-    Request(Arc<RequestEvent>),
-    Response(Arc<ResponseEvent>),
+    Request(Arc<Request>),
+    Response(Arc<Response>),
     Session(Arc<SessionInfo>),
     Schema(Arc<ChangeSchema>),
     Heartbeat(Arc<HeartbeatEvent>),

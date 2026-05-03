@@ -259,11 +259,7 @@ mod tests {
         store.record(StoreEvent {
             ts: now.timestamp_millis() + 1,
             proxy: proxy.clone(),
-            event: ProxyEvent::Request(Arc::new(mcpr_core::event::RequestEvent {
-                request: Request::Mcp(parts, rpc),
-                request_id: String::new(),
-                ts: now,
-            })),
+            event: ProxyEvent::Request(Arc::new(Request::Mcp(parts, rpc))),
         });
 
         store.shutdown();
