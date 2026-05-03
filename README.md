@@ -12,50 +12,6 @@
 
 </div>
 
-## Quickstart
-
-### Install
-
-```bash
-curl -fsSL https://mcpr.app/install.sh | sh
-```
-
-### Run
-
-```bash
-cat > mcpr.toml <<'EOF'
-mcp = "http://localhost:9000/mcp"
-port = 3000
-EOF
-
-mcpr proxy run mcpr.toml
-```
-
-Traffic flows through `http://localhost:3000` and send it to your mcp server at `http://localhost:9000/mcp`.
-
-Note: We also has useful dashboard that you stream your data to and view your mcp server anywhere:
-
-To stream events into the cloud dashboard, run `mcpr proxy setup` once.
-
-### Docker
-
-```bash
-cat > mcpr.toml <<'EOF'
-mcp = "http://host.docker.internal:9000"
-port = 3000
-EOF
-
-docker run -d --name mcpr \
-  -v "$(pwd)/mcpr.toml:/etc/mcpr/mcpr.toml:ro" \
-  -v mcpr-state:/var/lib/mcpr \
-  -p 3000:3000 \
-  ghcr.io/pragmalabs-tech/mcpr:latest
-```
-
-See [docs/DOCKER.md](docs/DOCKER.md) for volumes, environment variables, and compose / Kubernetes examples, and [`docker-compose.yml`](docker-compose.yml) for the sidecar pattern.
-
----
-
 ## What mcpr does
 
 mcpr sits in front of your MCP app and does three things, in order of how much work each one saves you:
@@ -65,6 +21,80 @@ mcpr sits in front of your MCP app and does three things, in order of how much w
 3. **Authenticate** *(in progress)*: OAuth 2.1 and API key handling at the proxy layer. Your app receives a verified `x-user-id` header instead of implementing auth flows itself.
 
 Running in front of [mcp.usestudykit.com/mcp](https://mcp.usestudykit.com/mcp) today.
+
+## Quickstart
+
+mcpr runs in two shapes:
+
+- **Local development.** Install the CLI and point it at your MCP server.
+- **Production.** Run the published Docker image as a sidecar via `docker compose` (or any container orchestrator).
+
+### Local: install the CLI
+
+```bash
+curl -fsSL https://mcpr.app/install.sh | sh
+```
+
+Write a config and run the proxy in the foreground:
+
+```bash
+cat > mcpr.toml <<'EOF'
+mcp  = "http://localhost:9000/mcp"
+port = 3000
+EOF
+
+mcpr proxy run mcpr.toml
+```
+
+Clients connect to `http://localhost:3000`; mcpr forwards to `http://localhost:9000/mcp` and records every JSON-RPC for you to inspect later.
+
+To stream events to the cloud dashboard, run `mcpr proxy setup` once.
+
+### Production: docker compose
+
+The published image (`ghcr.io/pragmalabs-tech/mcpr`) runs `mcpr proxy run` as PID 1. Drop it next to your MCP server in a compose file:
+
+```yaml
+services:
+  mcp-server:
+    image: your-mcp-server:latest
+    expose:
+      - "9000"
+
+  mcpr:
+    image: ghcr.io/pragmalabs-tech/mcpr:0.5
+    restart: unless-stopped
+    depends_on:
+      - mcp-server
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./mcpr.toml:/etc/mcpr/mcpr.toml:ro
+      - mcpr-state:/var/lib/mcpr
+
+volumes:
+  mcpr-state:
+```
+
+```toml
+# mcpr.toml (alongside the compose file)
+mcp  = "http://mcp-server:9000"
+port = 3000
+```
+
+`docker compose up -d`, then point clients at the host on port 3000. State persists in the `mcpr-state` volume across restarts.
+
+Pin to `X.Y.Z` (or `X.Y` for the latest patch in a minor line) in production; `latest` is for evaluation.
+
+#### Kubernetes / Helm
+
+There is no official Helm chart yet. The image is Kubernetes-ready out of the box: non-root UID 10001, SIGTERM forwarded by `tini`, `mcpr proxy run` is PID 1 and drains in-flight requests on shutdown. Use any standard `Deployment` manifest or a generic chart (bitnami/common, k8s-at-home/app-template):
+
+- Bind-mount `mcpr.toml` from a `ConfigMap` to `/etc/mcpr/mcpr.toml`.
+- Persist `/var/lib/mcpr` with a `PersistentVolumeClaim` (UID 10001 must own it; set `fsGroup: 10001`).
+- Expose port 3000 via a `Service`.
+
+See [docs/DOCKER.md](docs/DOCKER.md) for volumes, environment variables, signal behavior, and non-root settings.
 
 ---
 
