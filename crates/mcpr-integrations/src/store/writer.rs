@@ -159,6 +159,7 @@ fn write_events(tx: &Transaction, batch: &[StoreEvent]) -> rusqlite::Result<()> 
             ProxyEvent::Response(re) => write_response(tx, msg.ts, &re.response)?,
             ProxyEvent::Session(info) => write_session(tx, &msg.proxy, info)?,
             ProxyEvent::Schema(change) => write_schema_change(tx, msg.ts, &msg.proxy, change)?,
+            ProxyEvent::Heartbeat(_) => {}
         }
     }
     Ok(())
@@ -453,6 +454,7 @@ mod tests {
             response: resp,
             request_id: String::new(),
             latency_us: 0,
+            timer: mcpr_core::timer::Timer::default(),
             ts: Utc::now(),
         })
     }

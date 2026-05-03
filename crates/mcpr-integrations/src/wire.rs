@@ -9,11 +9,13 @@
 //! ```
 
 use mcpr_core::event::ProxyEvent;
+use mcpr_core::event::types::HeartbeatEvent;
 use mcpr_core::protocol::mcp::{JsonRpcRequest, JsonRpcResult, RequestId};
 use mcpr_core::protocol::schema::{ChangeSchema, Reason};
 use mcpr_core::protocol::session::{SessionInfo, SessionState, session_id_from_headers};
 use mcpr_core::protocol::{Request, Response};
-use serde_json::{Value, json};
+use mcpr_core::timer::Timer;
+use serde_json::{Map, Value, json};
 
 const ENVELOPE_VERSION: u8 = 1;
 
@@ -29,7 +31,7 @@ pub fn encode_envelope(event: &ProxyEvent, server: &str) -> Value {
         ProxyEvent::Response(re) => (
             "response",
             re.ts.to_rfc3339(),
-            encode_response(&re.response, &re.request_id, re.latency_us),
+            encode_response(&re.response, &re.request_id, re.latency_us, &re.timer),
         ),
         ProxyEvent::Session(info) => (
             "session",
@@ -41,6 +43,7 @@ pub fn encode_envelope(event: &ProxyEvent, server: &str) -> Value {
             chrono::Utc::now().to_rfc3339(),
             encode_schema(change),
         ),
+        ProxyEvent::Heartbeat(hb) => ("heartbeat", hb.ts.to_rfc3339(), encode_heartbeat(hb)),
     };
 
     json!({
@@ -100,7 +103,8 @@ fn base_request_payload(request_id: &str, session_id: Option<&str>, rpc: &JsonRp
     })
 }
 
-fn encode_response(resp: &Response, request_id: &str, latency_us: u64) -> Value {
+fn encode_response(resp: &Response, request_id: &str, latency_us: u64, timer: &Timer) -> Value {
+    let timer_value = encode_timer(timer);
     match resp {
         Response::Mcp(parts, result) => {
             let http_status = parts.status.as_u16();
@@ -114,6 +118,7 @@ fn encode_response(resp: &Response, request_id: &str, latency_us: u64) -> Value 
                 "error_code": error_code,
                 "error_detail": error_detail,
                 "response_size": 0,
+                "timer": timer_value,
             })
         }
         Response::McpBatch(parts, results) => {
@@ -128,6 +133,7 @@ fn encode_response(resp: &Response, request_id: &str, latency_us: u64) -> Value 
                 "status": status,
                 "batch_size": results.len(),
                 "response_size": 0,
+                "timer": timer_value,
             })
         }
         Response::Http(http) => {
@@ -143,9 +149,27 @@ fn encode_response(resp: &Response, request_id: &str, latency_us: u64) -> Value 
                 "http_status": http_status,
                 "status": status,
                 "response_size": http.body().len() as u64,
+                "timer": timer_value,
             })
         }
     }
+}
+
+/// Collapse the timer's spans into a flat `{name: duration_us}` object.
+/// Stages that ran more than once on a single request (e.g. response
+/// stages on each frame of a stream) have their durations summed so the
+/// shape stays comparable across requests.
+fn encode_timer(timer: &Timer) -> Value {
+    let mut map: Map<String, Value> = Map::new();
+    for (name, us) in timer.to_spans_us() {
+        let acc = map
+            .get(&name)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
+            .saturating_add(us);
+        map.insert(name, json!(acc));
+    }
+    Value::Object(map)
 }
 
 fn mcp_result_status(result: &JsonRpcResult) -> (&'static str, String, String) {
@@ -208,6 +232,16 @@ fn encode_schema(change: &ChangeSchema) -> Value {
             "resource_template": rt,
         }),
     }
+}
+
+fn encode_heartbeat(hb: &HeartbeatEvent) -> Value {
+    json!({
+        "mcp_status": hb.mcp_status,
+        "tunnel_status": hb.tunnel_status,
+        "tunnel_address": hb.tunnel_address,
+        "upstream": hb.upstream,
+        "export_port": hb.export_port,
+    })
 }
 
 fn request_id_to_value(id: &RequestId) -> Value {
@@ -278,6 +312,7 @@ mod tests {
             response: resp,
             request_id: "req-abc".into(),
             latency_us,
+            timer: Timer::default(),
             ts: Utc::now(),
         }))
     }
@@ -719,6 +754,128 @@ mod tests {
 
         assert_eq!(p["kind"], "resource_template");
         assert_eq!(p["uri_template"], "doc://{id}");
+    }
+
+    // ── encode_heartbeat ─────────────────────────────────────────
+
+    fn heartbeat_event(
+        tunnel_status: &str,
+        tunnel_address: Option<&str>,
+        upstream: &str,
+        export_port: u16,
+    ) -> ProxyEvent {
+        ProxyEvent::Heartbeat(Arc::new(mcpr_core::event::types::HeartbeatEvent {
+            mcp_status: "running".into(),
+            tunnel_status: tunnel_status.into(),
+            tunnel_address: tunnel_address.map(|s| s.into()),
+            upstream: upstream.into(),
+            export_port,
+            ts: Utc::now(),
+        }))
+    }
+
+    #[test]
+    fn encode_envelope__heartbeat_kind_and_fields() {
+        let event = heartbeat_event(
+            "connected",
+            Some("https://abc.tunnel.mcpr.app"),
+            "http://127.0.0.1:8080",
+            3004,
+        );
+        let env = encode_envelope(&event, "prod-server");
+
+        assert_eq!(env["kind"], "heartbeat");
+        assert_eq!(env["server"], "prod-server");
+        assert_eq!(env["payload"]["mcp_status"], "running");
+        assert_eq!(env["payload"]["tunnel_status"], "connected");
+        assert_eq!(
+            env["payload"]["tunnel_address"],
+            "https://abc.tunnel.mcpr.app"
+        );
+        assert_eq!(env["payload"]["upstream"], "http://127.0.0.1:8080");
+        assert_eq!(env["payload"]["export_port"], 3004);
+    }
+
+    #[test]
+    fn encode_envelope__heartbeat_disabled_tunnel_emits_null_address() {
+        let event = heartbeat_event("disabled", None, "http://up:9000", 3000);
+        let p = encode_envelope(&event, "s")["payload"].clone();
+
+        assert_eq!(p["tunnel_status"], "disabled");
+        assert!(p["tunnel_address"].is_null());
+    }
+
+    // ── encode_response timer ────────────────────────────────────
+
+    fn response_event_with_timer(resp: Response, timer: Timer) -> ProxyEvent {
+        ProxyEvent::Response(Arc::new(ResponseEvent {
+            response: resp,
+            request_id: "req-abc".into(),
+            latency_us: 0,
+            timer,
+            ts: Utc::now(),
+        }))
+    }
+
+    #[test]
+    fn encode_response__timer_object_present_with_default_timer() {
+        let resp = Response::Mcp(
+            resp_parts(200),
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                result: Some(json!({})),
+            }),
+        );
+        let event = response_event(resp, 0);
+        let p = encode_envelope(&event, "s")["payload"].clone();
+
+        assert!(p["timer"].is_object());
+        assert_eq!(p["timer"].as_object().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn encode_response__timer_object_carries_recorded_spans() {
+        let timer = Timer::new();
+        let id_a = timer.track_start("Parse");
+        timer.track_end(id_a);
+        let id_b = timer.track_start("Encode");
+        timer.track_end(id_b);
+
+        let resp = Response::Mcp(
+            resp_parts(200),
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                result: None,
+            }),
+        );
+        let event = response_event_with_timer(resp, timer);
+        let p = encode_envelope(&event, "s")["payload"].clone();
+
+        let timer_obj = p["timer"].as_object().expect("timer is object");
+        assert!(timer_obj.contains_key("Parse"));
+        assert!(timer_obj.contains_key("Encode"));
+    }
+
+    #[test]
+    fn encode_response__timer_sums_duplicate_span_names() {
+        let timer = Timer::new();
+        let a = timer.track_start("Stage");
+        timer.track_end(a);
+        let b = timer.track_start("Stage");
+        timer.track_end(b);
+
+        let http = http::Response::builder()
+            .status(200)
+            .body(Bytes::new())
+            .unwrap();
+        let event = response_event_with_timer(Response::Http(http), timer);
+        let p = encode_envelope(&event, "s")["payload"].clone();
+
+        let timer_obj = p["timer"].as_object().expect("timer is object");
+        assert_eq!(timer_obj.len(), 1, "duplicate names collapse to one key");
+        assert!(timer_obj["Stage"].is_u64());
     }
 
     // ── request_id_to_value ──────────────────────────────────────

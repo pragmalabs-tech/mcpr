@@ -64,6 +64,7 @@ impl ResponseStage for ResponseLogStage {
                 response: res.clone(),
                 request_id: request_ctx.request_id.clone(),
                 latency_us,
+                timer: request_ctx.timer.clone(),
                 ts: Utc::now(),
             })));
 

@@ -21,6 +21,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use config::{CliAction, GatewayConfig, Mode};
 use mcpr_core::event::EventManager;
+use mcpr_core::event::types::HeartbeatEvent;
+use mcpr_core::event::{EventBus, ProxyEvent};
 use mcpr_integrations::sinks::cloud_sink::{CloudSink, CloudSinkConfig};
 use mcpr_integrations::store::{Store, StoreConfig, path::resolve_db_path};
 use mcpr_integrations::{StderrSink, sinks::SqliteSink};
@@ -162,7 +164,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
     let event_bus_handler = event_manager.start();
     let event_bus = event_bus_handler.bus.clone();
 
-    let app = match mcpr_core::proxy2::build_app(proxy_cfg, event_bus) {
+    let app = match mcpr_core::proxy2::build_app(proxy_cfg, event_bus.clone()) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("error: failed to build proxy app: {e}");
@@ -186,6 +188,7 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         std::process::exit(1);
     }
 
+    let tunnel_status = Arc::new(std::sync::RwLock::new("disabled".to_string()));
     let public_url = if cfg.tunnel {
         let relay_url = cfg
             .relay_url
@@ -204,12 +207,15 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
             }
         };
 
+        *tunnel_status.write().unwrap() = "disconnected".to_string();
         match mcp_tunnel_client::start_tunnel_client(
             actual_port,
             relay_url,
             token,
             cfg.tunnel_subdomain.as_deref(),
-            StderrTunnelStatus,
+            StderrTunnelStatus {
+                status: tunnel_status.clone(),
+            },
         )
         .await
         {
@@ -248,6 +254,15 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
             .expect("Server failed");
     });
 
+    spawn_heartbeat_task(
+        event_bus.clone(),
+        mcp.clone(),
+        actual_port,
+        public_url.clone(),
+        tunnel_status.clone(),
+        shutdown_tx.subscribe(),
+    );
+
     let shutdown_trigger = shutdown_tx.clone();
     tokio::spawn(async move {
         let ctrl_c = tokio::signal::ctrl_c();
@@ -277,16 +292,55 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
     eprintln!("[mcpr] Shutdown complete.");
 }
 
-struct StderrTunnelStatus;
+struct StderrTunnelStatus {
+    status: std::sync::Arc<std::sync::RwLock<String>>,
+}
 
 impl mcp_tunnel_client::TunnelStatusCallback for StderrTunnelStatus {
     fn on_connected(&self, url: &str) {
+        *self.status.write().unwrap() = "connected".to_string();
         eprintln!("[mcpr] tunnel connected: {url}");
     }
     fn on_disconnected(&self) {
+        *self.status.write().unwrap() = "disconnected".to_string();
         eprintln!("[mcpr] tunnel disconnected");
     }
     fn on_evicted(&self) {
+        *self.status.write().unwrap() = "evicted".to_string();
         eprintln!("[mcpr] tunnel evicted by relay");
     }
+}
+
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+fn spawn_heartbeat_task(
+    bus: EventBus,
+    upstream: String,
+    export_port: u16,
+    tunnel_address: Option<String>,
+    tunnel_status: std::sync::Arc<std::sync::RwLock<String>>,
+    mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(HEARTBEAT_INTERVAL);
+        // Skip the immediate first tick so the first heartbeat fires on the
+        // 30s boundary rather than at startup before anything is settled.
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    let status = tunnel_status.read().unwrap().clone();
+                    bus.emit(ProxyEvent::Heartbeat(std::sync::Arc::new(HeartbeatEvent {
+                        mcp_status: "running".to_string(),
+                        tunnel_status: status,
+                        tunnel_address: tunnel_address.clone(),
+                        upstream: upstream.clone(),
+                        export_port,
+                        ts: chrono::Utc::now(),
+                    })));
+                }
+                _ = shutdown_rx.changed() => break,
+            }
+        }
+    });
 }

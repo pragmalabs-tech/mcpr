@@ -110,6 +110,14 @@ fn format_json(event: &ProxyEvent) -> String {
                 "resource_template": rt,
             }),
         },
+        ProxyEvent::Heartbeat(hb) => json!({
+            "type": "heartbeat",
+            "mcp_status": hb.mcp_status,
+            "tunnel_status": hb.tunnel_status,
+            "tunnel_address": hb.tunnel_address,
+            "upstream": hb.upstream,
+            "export_port": hb.export_port,
+        }),
     };
     serde_json::to_string(&value).unwrap_or_default()
 }
@@ -145,6 +153,7 @@ mod tests {
             response: resp,
             request_id: String::new(),
             latency_us: 0,
+            timer: mcpr_core::timer::Timer::default(),
             ts: Utc::now(),
         })
     }

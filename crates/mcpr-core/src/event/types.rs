@@ -11,6 +11,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 
 use crate::protocol::{Request, Response, schema::ChangeSchema, session::SessionInfo};
+use crate::timer::Timer;
 
 /// Request observation: the parsed request alongside the proxy-internal
 /// `request_id` (for cross-event correlation) and the emission timestamp.
@@ -22,13 +23,28 @@ pub struct RequestEvent {
 }
 
 /// Response observation: the parsed response, the matching `request_id`,
-/// the round-trip latency captured at the response stage, and the
-/// emission timestamp.
+/// the round-trip latency captured at the response stage, the per-stage
+/// timer breakdown, and the emission timestamp.
 #[derive(Clone)]
 pub struct ResponseEvent {
     pub response: Response,
     pub request_id: String,
     pub latency_us: u64,
+    pub timer: Timer,
+    pub ts: DateTime<Utc>,
+}
+
+/// Periodic snapshot of a proxy's runtime status. Emitted on a fixed
+/// cadence by the CLI host (not by the request pipeline) so the cloud
+/// can answer "is this server up and where does it live?" without a
+/// dedicated control-plane connection.
+#[derive(Clone)]
+pub struct HeartbeatEvent {
+    pub mcp_status: String,
+    pub tunnel_status: String,
+    pub tunnel_address: Option<String>,
+    pub upstream: String,
+    pub export_port: u16,
     pub ts: DateTime<Utc>,
 }
 
@@ -42,4 +58,5 @@ pub enum ProxyEvent {
     Response(Arc<ResponseEvent>),
     Session(Arc<SessionInfo>),
     Schema(Arc<ChangeSchema>),
+    Heartbeat(Arc<HeartbeatEvent>),
 }

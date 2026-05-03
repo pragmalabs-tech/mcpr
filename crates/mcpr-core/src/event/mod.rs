@@ -29,7 +29,7 @@ pub mod types;
 pub use bus::{EventBus, EventBusHandle};
 pub use manager::EventManager;
 pub use sink::{EventSink, NoopSink};
-pub use types::{ProxyEvent, RequestEvent, ResponseEvent};
+pub use types::{HeartbeatEvent, ProxyEvent, RequestEvent, ResponseEvent};
 
 #[cfg(test)]
 mod tests {
