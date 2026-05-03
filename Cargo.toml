@@ -10,7 +10,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"
-version = "0.5.1"
+version = "0.5.2"
 repository = "https://github.com/pragmalabs-tech/mcpr"
 homepage = "https://mcpr.app"
 description = "MCPR is a reverse proxy for MCP servers — operating at the JSON-RPC layer to route, authenticate, observe, and secure MCP traffic."
@@ -45,8 +45,8 @@ http = "1"
 http-body-util = "0.1"
 bytes = "1"
 
-mcpr-core = { path = "crates/mcpr-core", version = "0.5.1" }
-mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.5.1" }
+mcpr-core = { path = "crates/mcpr-core", version = "0.5.2" }
+mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.5.2" }
 
 # Release builds — tuned for runtime perf at the cost of build time.
 # `lto = "thin"` enables cross-crate inlining (5–15% perf on hot paths);
