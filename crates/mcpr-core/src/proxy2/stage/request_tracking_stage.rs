@@ -14,14 +14,13 @@ use crate::{
     },
     protocol::Response,
     proxy2::{
-        stage::types::{RequestContext, ResponseStage},
+        stage::{
+            types::{RequestContext, ResponseStage},
+            upstream_us_from_spans,
+        },
         state::ProxyState,
     },
 };
-
-/// Span name set by the pipeline router for the upstream call. Looked up
-/// from the per-request `Timer` to populate `RequestEvent.upstream_us`.
-const UPSTREAM_SPAN: &str = "Router";
 
 pub struct ResponseLogStage;
 
@@ -40,11 +39,7 @@ impl ResponseStage for ResponseLogStage {
         let latency_us =
             u64::try_from(request_ctx.started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
         let spans = request_ctx.timer.to_spans_us();
-        let upstream_us = spans
-            .iter()
-            .find(|(name, _)| name == UPSTREAM_SPAN)
-            .map(|(_, us)| *us)
-            .unwrap_or(0);
+        let upstream_us = upstream_us_from_spans(&spans);
 
         let Some(req_arc) = request_ctx.request.as_ref() else {
             return Ok(res);

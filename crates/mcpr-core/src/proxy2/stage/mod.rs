@@ -22,6 +22,7 @@ pub mod session_tracking_stage;
 pub mod types;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::http::request::Parts as RequestParts;
 use axum::response::Response as AxumResponse;
@@ -41,10 +42,29 @@ use crate::{
     timer::Timer,
 };
 
-/// Span name set by the pipeline router for the upstream call. Looked up
-/// from the per-request `Timer` to populate `RequestEvent.upstream_us`
-/// on the orphan-emit path.
+/// Span name set by the pipeline router for the upstream call. Covers
+/// the time to receive upstream HTTP response *headers*. For SSE
+/// responses the body streams in afterwards, captured by
+/// [`UPSTREAM_BODY_SPAN`].
 const UPSTREAM_SPAN: &str = "Router";
+
+/// Span covering the gap between upstream HEAD receipt and the first SSE
+/// frame being yielded. Only present on `RouterOutput::Stream` paths.
+/// `upstream_us` is the sum of `UPSTREAM_SPAN` + `UPSTREAM_BODY_SPAN` so
+/// SSE responses report honest end-to-end upstream time instead of
+/// time-to-headers.
+pub(crate) const UPSTREAM_BODY_SPAN: &str = "UpstreamBody";
+
+/// Sum the upstream-attributed spans into a single `upstream_us`. For
+/// JSON upstreams `UPSTREAM_BODY_SPAN` is absent and this collapses to
+/// the `Router` span; for SSE both contribute.
+pub(crate) fn upstream_us_from_spans(spans: &[(String, u64)]) -> u64 {
+    spans
+        .iter()
+        .filter(|(name, _)| name == UPSTREAM_SPAN || name == UPSTREAM_BODY_SPAN)
+        .map(|(_, us)| *us)
+        .sum()
+}
 
 pub struct StagePipeline {
     request_stages: Vec<Box<dyn RequestStage>>,
@@ -113,6 +133,12 @@ impl StagePipeline {
                 Ok(RouterOutput::Single(response))
             }
             RouterOutput::Stream(parts, stream) => {
+                // Open the upstream-body span as soon as Router ends. The
+                // first frame yielded closes it; later frames are no-ops
+                // so the span captures time-to-first-frame, not last-frame.
+                let body_span_id = request_ctx.timer.track_start(UPSTREAM_BODY_SPAN);
+                let body_span_closed = Arc::new(AtomicBool::new(false));
+
                 let stages = Arc::clone(&self.response_stages);
                 let ctx = request_ctx;
                 let state = self.state.clone();
@@ -120,7 +146,11 @@ impl StagePipeline {
                     let stages = Arc::clone(&stages);
                     let ctx = ctx.clone();
                     let state = state.clone();
+                    let body_span_closed = Arc::clone(&body_span_closed);
                     async move {
+                        if !body_span_closed.swap(true, Ordering::SeqCst) {
+                            ctx.timer.track_end(body_span_id);
+                        }
                         let mut response = item?;
                         for stage in stages.iter() {
                             response = stage
@@ -161,11 +191,7 @@ fn emit_orphan_event(ctx: &RequestContext, bus: &EventBus) {
     };
     let latency_us = u64::try_from(ctx.started_at.elapsed().as_micros()).unwrap_or(u64::MAX);
     let spans = ctx.timer.to_spans_us();
-    let upstream_us = spans
-        .iter()
-        .find(|(name, _)| name == UPSTREAM_SPAN)
-        .map(|(_, us)| *us)
-        .unwrap_or(0);
+    let upstream_us = upstream_us_from_spans(&spans);
 
     bus.emit(ProxyEvent::Request(Arc::new(RequestEvent {
         request_id: ctx.request_id.clone(),
@@ -524,5 +550,97 @@ mod tests {
         assert_eq!(count, 2);
         // Stage ran once per yielded item.
         assert_eq!(*log.lock().unwrap(), vec!["stage", "stage"]);
+    }
+
+    // ── UpstreamBody span ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn process__stream_records_upstream_body_span_closed_on_first_frame() {
+        // SSE path: timer should record both `Router` (head receipt) and
+        // `UpstreamBody` (head → first frame). Without `UpstreamBody`,
+        // `upstream_us` would be the misleading time-to-headers only.
+        let url = spawn_sse_upstream().await;
+        let pipeline = StagePipeline::new(
+            vec![],
+            vec![],
+            RouterStage::new(config_for(&url)).unwrap(),
+            state(),
+        );
+
+        let timer = Timer::new();
+        let output = pipeline
+            .process(mcp_request(), timer.clone())
+            .await
+            .unwrap();
+        let RouterOutput::Stream(_, stream) = output else {
+            panic!("expected Stream");
+        };
+        futures_util::pin_mut!(stream);
+        while let Some(item) = stream.next().await {
+            item.unwrap();
+        }
+
+        let spans = timer.to_spans_us();
+        assert!(
+            spans.iter().any(|(n, _)| n == UPSTREAM_SPAN),
+            "expected Router span, got {spans:?}"
+        );
+        let body = spans
+            .iter()
+            .find(|(n, _)| n == UPSTREAM_BODY_SPAN)
+            .expect("expected UpstreamBody span on SSE path");
+        // Span closes on the first frame; `to_spans_us` returns 0 for
+        // open spans, so a non-zero µs proves it was closed.
+        assert!(body.1 > 0, "UpstreamBody should be closed, got {body:?}");
+    }
+
+    #[tokio::test]
+    async fn process__single_response_does_not_record_upstream_body_span() {
+        // JSON path: `Router` already covers head + body collection, so
+        // no `UpstreamBody` span is opened. `upstream_us_from_spans`
+        // collapses to `Router` alone.
+        let url = spawn_echo_upstream().await;
+        let pipeline = StagePipeline::new(
+            vec![],
+            vec![],
+            RouterStage::new(config_for(&url)).unwrap(),
+            state(),
+        );
+
+        let timer = Timer::new();
+        pipeline
+            .process(mcp_request(), timer.clone())
+            .await
+            .unwrap();
+
+        let spans = timer.to_spans_us();
+        assert!(spans.iter().any(|(n, _)| n == UPSTREAM_SPAN));
+        assert!(
+            !spans.iter().any(|(n, _)| n == UPSTREAM_BODY_SPAN),
+            "JSON path should not open UpstreamBody, got {spans:?}"
+        );
+    }
+
+    #[test]
+    fn upstream_us_from_spans__sums_router_and_upstream_body() {
+        let spans = vec![
+            ("Parse".to_string(), 10),
+            ("Router".to_string(), 100),
+            ("UpstreamBody".to_string(), 250),
+            ("ResponseLogStage".to_string(), 5),
+        ];
+        assert_eq!(upstream_us_from_spans(&spans), 350);
+    }
+
+    #[test]
+    fn upstream_us_from_spans__collapses_to_router_when_body_absent() {
+        let spans = vec![("Parse".to_string(), 10), ("Router".to_string(), 100)];
+        assert_eq!(upstream_us_from_spans(&spans), 100);
+    }
+
+    #[test]
+    fn upstream_us_from_spans__zero_when_neither_present() {
+        let spans = vec![("Parse".to_string(), 10)];
+        assert_eq!(upstream_us_from_spans(&spans), 0);
     }
 }
