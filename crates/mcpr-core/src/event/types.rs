@@ -5,16 +5,18 @@
 //! `Arc` so fan-out to multiple sinks is a refcount bump rather than a
 //! deep clone.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::http::{
     Method, StatusCode, Uri, request::Parts as RequestParts, response::Parts as ResponseParts,
 };
 use chrono::{DateTime, Utc};
+use serde_json::{Map, Value};
 
 use crate::protocol::{
     Request, Response,
-    mcp::{JsonRpcRequest, JsonRpcResult},
+    mcp::{ClientMethod, JsonRpcRequest, JsonRpcResult, RequestId, ResourcesMethod},
     schema::ChangeSchema,
     session::SessionInfo,
 };
@@ -74,6 +76,84 @@ impl From<&Response> for LoggedResponse {
     }
 }
 
+impl LoggedResponse {
+    /// Strip resource bodies from MCP `resources/{list,templates/list,read}`
+    /// results so events carry only the naming/path fields. Widget HTML and
+    /// blob bodies returned by `resources/read` can be megabytes apiece, and
+    /// list/templates entries carry descriptions and metadata sinks don't
+    /// need. Logging projection only - the response sent to the client is
+    /// untouched (this stage runs after the client copy has already left).
+    pub fn slim_resources_in_place(&mut self, methods: &HashMap<RequestId, ClientMethod>) {
+        match self {
+            Self::Mcp(_, result) => slim_result(result, methods),
+            Self::McpBatch(_, results) => {
+                for r in results {
+                    slim_result(r, methods);
+                }
+            }
+            Self::Http { .. } => {}
+        }
+    }
+}
+
+fn slim_result(result: &mut JsonRpcResult, methods: &HashMap<RequestId, ClientMethod>) {
+    let JsonRpcResult::Response(resp) = result else {
+        return;
+    };
+    let Some(method) = methods.get(&resp.id) else {
+        return;
+    };
+    let Some(value) = resp.result.as_mut() else {
+        return;
+    };
+    match method {
+        ClientMethod::Resources(ResourcesMethod::List) => {
+            slim_array(value, "resources", &["uri", "name"]);
+        }
+        ClientMethod::Resources(ResourcesMethod::TemplatesList) => {
+            slim_array(value, "resourceTemplates", &["uriTemplate", "name"]);
+        }
+        ClientMethod::Resources(ResourcesMethod::Read) => {
+            slim_array(value, "contents", &["uri"]);
+        }
+        _ => {}
+    }
+}
+
+/// Replace `result` with `{ array_key: [{ keep_field: value, ... }, ...] }`,
+/// dropping every other top-level field (e.g. `nextCursor`, `_meta`) and
+/// every per-item field outside `keep`.
+fn slim_array(result: &mut Value, array_key: &str, keep: &[&str]) {
+    let items = result
+        .as_object_mut()
+        .and_then(|obj| obj.remove(array_key))
+        .and_then(|v| match v {
+            Value::Array(arr) => Some(arr),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let slimmed: Vec<Value> = items
+        .into_iter()
+        .map(|item| match item {
+            Value::Object(obj) => {
+                let mut out = Map::new();
+                for k in keep {
+                    if let Some(v) = obj.get(*k) {
+                        out.insert((*k).to_string(), v.clone());
+                    }
+                }
+                Value::Object(out)
+            }
+            _ => Value::Object(Map::new()),
+        })
+        .collect();
+
+    let mut out = Map::new();
+    out.insert(array_key.to_string(), Value::Array(slimmed));
+    *result = Value::Object(out);
+}
+
 /// One full request/response transaction, emitted once after the
 /// response stage completes (`response: Some(...)`) or once on the
 /// error path when the response stage never ran (`response: None`).
@@ -128,4 +208,288 @@ pub enum ProxyEvent {
     Session(Arc<SessionInfo>),
     Schema(Arc<ChangeSchema>),
     Heartbeat(Arc<HeartbeatEvent>),
+}
+
+#[cfg(test)]
+#[allow(non_snake_case)]
+mod tests {
+    use super::*;
+    use crate::protocol::mcp::{
+        JsonRpcError, JsonRpcErrorResponse, JsonRpcResponse, JsonRpcVersion, ToolsMethod,
+    };
+    use serde_json::json;
+
+    fn empty_response_parts() -> ResponseParts {
+        axum::http::Response::new(()).into_parts().0
+    }
+
+    fn methods_for(id: i64, method: ClientMethod) -> HashMap<RequestId, ClientMethod> {
+        let mut m = HashMap::new();
+        m.insert(RequestId::Number(id), method);
+        m
+    }
+
+    fn mcp_response(id: i64, result: Value) -> LoggedResponse {
+        LoggedResponse::Mcp(
+            empty_response_parts(),
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(id),
+                result: Some(result),
+            }),
+        )
+    }
+
+    fn extract_result(resp: &LoggedResponse) -> &Value {
+        match resp {
+            LoggedResponse::Mcp(_, JsonRpcResult::Response(r)) => r.result.as_ref().unwrap(),
+            _ => panic!("expected Mcp response"),
+        }
+    }
+
+    #[test]
+    fn slim_resources_in_place__resources_list_keeps_only_uri_and_name() {
+        let mut resp = mcp_response(
+            1,
+            json!({
+                "resources": [{
+                    "uri": "ui://widget/a",
+                    "name": "Widget A",
+                    "title": "the title",
+                    "description": "long description",
+                    "mimeType": "text/html",
+                    "size": 12345,
+                    "_meta": { "openai/widgetCSP": { "connect_domains": ["x"] } }
+                }],
+                "nextCursor": "cursor-token"
+            }),
+        );
+
+        resp.slim_resources_in_place(&methods_for(
+            1,
+            ClientMethod::Resources(ResourcesMethod::List),
+        ));
+
+        let result = extract_result(&resp);
+        assert_eq!(
+            result,
+            &json!({
+                "resources": [{ "uri": "ui://widget/a", "name": "Widget A" }]
+            })
+        );
+    }
+
+    #[test]
+    fn slim_resources_in_place__resources_templates_list_keeps_uri_template_and_name() {
+        let mut resp = mcp_response(
+            1,
+            json!({
+                "resourceTemplates": [{
+                    "uriTemplate": "ui://widget/{name}.html",
+                    "name": "Widget Template",
+                    "description": "drop me",
+                    "_meta": { "x": 1 }
+                }]
+            }),
+        );
+
+        resp.slim_resources_in_place(&methods_for(
+            1,
+            ClientMethod::Resources(ResourcesMethod::TemplatesList),
+        ));
+
+        assert_eq!(
+            extract_result(&resp),
+            &json!({
+                "resourceTemplates": [{
+                    "uriTemplate": "ui://widget/{name}.html",
+                    "name": "Widget Template"
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn slim_resources_in_place__resources_read_drops_html_text_and_meta() {
+        let mut resp = mcp_response(
+            1,
+            json!({
+                "contents": [{
+                    "uri": "ui://widget/q",
+                    "mimeType": "text/html",
+                    "text": "<html><body>huge widget body</body></html>",
+                    "_meta": { "openai/widgetDomain": "old.example.com" }
+                }]
+            }),
+        );
+
+        resp.slim_resources_in_place(&methods_for(
+            1,
+            ClientMethod::Resources(ResourcesMethod::Read),
+        ));
+
+        assert_eq!(
+            extract_result(&resp),
+            &json!({ "contents": [{ "uri": "ui://widget/q" }] })
+        );
+    }
+
+    #[test]
+    fn slim_resources_in_place__resources_read_drops_blob_payload() {
+        let mut resp = mcp_response(
+            1,
+            json!({
+                "contents": [{
+                    "uri": "file:///x.bin",
+                    "mimeType": "application/octet-stream",
+                    "blob": "AAAA....base64....=="
+                }]
+            }),
+        );
+
+        resp.slim_resources_in_place(&methods_for(
+            1,
+            ClientMethod::Resources(ResourcesMethod::Read),
+        ));
+
+        assert_eq!(
+            extract_result(&resp),
+            &json!({ "contents": [{ "uri": "file:///x.bin" }] })
+        );
+    }
+
+    #[test]
+    fn slim_resources_in_place__non_resource_method_is_untouched() {
+        let original = json!({
+            "tools": [{
+                "name": "search",
+                "description": "kept",
+                "inputSchema": { "type": "object" }
+            }]
+        });
+        let mut resp = mcp_response(1, original.clone());
+
+        resp.slim_resources_in_place(&methods_for(1, ClientMethod::Tools(ToolsMethod::List)));
+
+        assert_eq!(extract_result(&resp), &original);
+    }
+
+    #[test]
+    fn slim_resources_in_place__error_response_is_untouched() {
+        let mut resp = LoggedResponse::Mcp(
+            empty_response_parts(),
+            JsonRpcResult::Error(JsonRpcErrorResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                error: JsonRpcError {
+                    code: -32603,
+                    message: "boom".into(),
+                    data: None,
+                },
+            }),
+        );
+
+        resp.slim_resources_in_place(&methods_for(
+            1,
+            ClientMethod::Resources(ResourcesMethod::Read),
+        ));
+
+        let LoggedResponse::Mcp(_, JsonRpcResult::Error(e)) = &resp else {
+            panic!("expected error variant");
+        };
+        assert_eq!(e.error.code, -32603);
+    }
+
+    #[test]
+    fn slim_resources_in_place__id_with_no_method_mapping_is_untouched() {
+        let original = json!({
+            "contents": [{ "uri": "u", "text": "<html/>" }]
+        });
+        let mut resp = mcp_response(1, original.clone());
+
+        resp.slim_resources_in_place(&HashMap::new());
+
+        assert_eq!(extract_result(&resp), &original);
+    }
+
+    #[test]
+    fn slim_resources_in_place__missing_array_yields_empty_array() {
+        let mut resp = mcp_response(1, json!({ "nextCursor": "abc" }));
+
+        resp.slim_resources_in_place(&methods_for(
+            1,
+            ClientMethod::Resources(ResourcesMethod::List),
+        ));
+
+        assert_eq!(extract_result(&resp), &json!({ "resources": [] }));
+    }
+
+    #[test]
+    fn slim_resources_in_place__http_variant_is_noop() {
+        let mut resp = LoggedResponse::Http {
+            status: StatusCode::OK,
+            body_size: 42,
+        };
+        resp.slim_resources_in_place(&methods_for(
+            1,
+            ClientMethod::Resources(ResourcesMethod::Read),
+        ));
+        let LoggedResponse::Http { status, body_size } = resp else {
+            panic!("expected Http variant");
+        };
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body_size, 42);
+    }
+
+    #[test]
+    fn slim_resources_in_place__batch_slims_each_item_by_its_method() {
+        let mut methods = HashMap::new();
+        methods.insert(
+            RequestId::Number(1),
+            ClientMethod::Resources(ResourcesMethod::Read),
+        );
+        methods.insert(RequestId::Number(2), ClientMethod::Tools(ToolsMethod::List));
+
+        let mut resp = LoggedResponse::McpBatch(
+            empty_response_parts(),
+            vec![
+                JsonRpcResult::Response(JsonRpcResponse {
+                    jsonrpc: JsonRpcVersion,
+                    id: RequestId::Number(1),
+                    result: Some(json!({
+                        "contents": [{
+                            "uri": "ui://w",
+                            "mimeType": "text/html",
+                            "text": "<html/>"
+                        }]
+                    })),
+                }),
+                JsonRpcResult::Response(JsonRpcResponse {
+                    jsonrpc: JsonRpcVersion,
+                    id: RequestId::Number(2),
+                    result: Some(json!({ "tools": [{ "name": "t" }] })),
+                }),
+            ],
+        );
+
+        resp.slim_resources_in_place(&methods);
+
+        let LoggedResponse::McpBatch(_, items) = &resp else {
+            panic!("expected McpBatch");
+        };
+        let JsonRpcResult::Response(r0) = &items[0] else {
+            panic!()
+        };
+        let JsonRpcResult::Response(r1) = &items[1] else {
+            panic!()
+        };
+        assert_eq!(
+            r0.result.as_ref().unwrap(),
+            &json!({ "contents": [{ "uri": "ui://w" }] })
+        );
+        assert_eq!(
+            r1.result.as_ref().unwrap(),
+            &json!({ "tools": [{ "name": "t" }] })
+        );
+    }
 }

@@ -8,7 +8,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::{
-    event::{ProxyEvent, types::RequestEvent},
+    event::{
+        ProxyEvent,
+        types::{LoggedResponse, RequestEvent},
+    },
     protocol::Response,
     proxy2::{
         stage::types::{RequestContext, ResponseStage},
@@ -47,12 +50,15 @@ impl ResponseStage for ResponseLogStage {
             return Ok(res);
         };
 
+        let mut logged: LoggedResponse = (&res).into();
+        logged.slim_resources_in_place(&request_ctx.client_methods);
+
         state
             .event_bus
             .emit(ProxyEvent::Request(Arc::new(RequestEvent {
                 request_id: request_ctx.request_id.clone(),
                 request: req_arc.as_ref().into(),
-                response: Some((&res).into()),
+                response: Some(logged),
                 ts: Utc::now(),
                 latency_us,
                 upstream_us,
