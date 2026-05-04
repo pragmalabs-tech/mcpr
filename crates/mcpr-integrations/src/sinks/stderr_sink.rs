@@ -8,6 +8,7 @@ use chrono::Utc;
 use mcpr_core::event::types::{LoggedRequest, LoggedResponse, RequestEvent};
 use mcpr_core::event::{EventSink, ProxyEvent};
 use mcpr_core::protocol::schema::ChangeSchema;
+use mcpr_core::protocol::session::{SessionId, session_id_from_headers};
 use serde_json::{Value, json};
 
 /// Sink that prints proxy events to stderr as JSON, one event per line.
@@ -111,10 +112,31 @@ fn format_transaction(re: &RequestEvent) -> Value {
         "type": "transaction",
         "ts": re.ts.timestamp(),
         "request_id": re.request_id,
+        "session_id": extract_session_id(&re.request, re.response.as_ref()),
         "request": format_request(&re.request),
         "response": re.response.as_ref().map(format_response),
         "latency_us": re.latency_us,
         "upstream_us": re.upstream_us,
+    })
+}
+
+/// Pull `mcp-session-id` from the request headers, falling back to the
+/// response. The fallback is required for `initialize`: the request has no
+/// session header (server hasn't issued one yet) and the response is where
+/// the new id is announced.
+fn extract_session_id(req: &LoggedRequest, resp: Option<&LoggedResponse>) -> Option<SessionId> {
+    let from_req = match req {
+        LoggedRequest::Mcp(parts, _) => session_id_from_headers(&parts.headers),
+        LoggedRequest::McpBatch(parts, _) => session_id_from_headers(&parts.headers),
+        LoggedRequest::Http { .. } => None,
+    };
+    if from_req.is_some() {
+        return from_req;
+    }
+    resp.and_then(|r| match r {
+        LoggedResponse::Mcp(parts, _) => session_id_from_headers(&parts.headers),
+        LoggedResponse::McpBatch(parts, _) => session_id_from_headers(&parts.headers),
+        LoggedResponse::Http { .. } => None,
     })
 }
 
@@ -175,8 +197,28 @@ mod tests {
             .0
     }
 
+    fn request_parts_with_session(id: &str) -> http::request::Parts {
+        HttpReq::builder()
+            .method("POST")
+            .uri("/")
+            .header("mcp-session-id", id)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0
+    }
+
     fn empty_response_parts() -> http::response::Parts {
         HttpResp::builder().body(()).unwrap().into_parts().0
+    }
+
+    fn response_parts_with_session(id: &str) -> http::response::Parts {
+        HttpResp::builder()
+            .header("mcp-session-id", id)
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0
     }
 
     fn transaction(request: LoggedRequest, response: LoggedResponse) -> ProxyEvent {
@@ -349,6 +391,53 @@ mod tests {
         let v = render(&event);
         assert_eq!(v["type"], "schema");
         assert!(v["ts"].is_i64());
+    }
+
+    #[test]
+    fn json__transaction_session_id_from_request_header() {
+        let req = LoggedRequest::Mcp(
+            request_parts_with_session("sess-abc"),
+            JsonRpcRequest {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                method: ClientMethod::Tools(ToolsMethod::List),
+                params: None,
+            },
+        );
+        let v = render(&transaction(req, mcp_response_ok()));
+        assert_eq!(v["session_id"], "sess-abc");
+    }
+
+    #[test]
+    fn json__transaction_session_id_falls_back_to_response_header() {
+        let req = LoggedRequest::Mcp(
+            empty_request_parts(),
+            JsonRpcRequest {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                method: ClientMethod::Tools(ToolsMethod::List),
+                params: None,
+            },
+        );
+        let resp = LoggedResponse::Mcp(
+            response_parts_with_session("sess-from-resp"),
+            JsonRpcResult::Response(JsonRpcResponse {
+                jsonrpc: JsonRpcVersion,
+                id: RequestId::Number(1),
+                result: Some(json!({})),
+            }),
+        );
+        let v = render(&transaction(req, resp));
+        assert_eq!(v["session_id"], "sess-from-resp");
+    }
+
+    #[test]
+    fn json__transaction_session_id_null_when_absent() {
+        let v = render(&transaction(
+            mcp_request(ClientMethod::Tools(ToolsMethod::List), None),
+            mcp_response_ok(),
+        ));
+        assert!(v["session_id"].is_null());
     }
 
     #[test]
