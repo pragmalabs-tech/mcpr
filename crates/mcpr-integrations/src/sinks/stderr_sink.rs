@@ -4,6 +4,7 @@
 
 use std::io::Write;
 
+use chrono::Utc;
 use mcpr_core::event::types::{LoggedRequest, LoggedResponse, RequestEvent};
 use mcpr_core::event::{EventSink, ProxyEvent};
 use mcpr_core::protocol::schema::ChangeSchema;
@@ -50,6 +51,7 @@ fn format_json(event: &ProxyEvent) -> String {
         ProxyEvent::Request(re) => format_transaction(re),
         ProxyEvent::Session(info) => json!({
             "type": "session",
+            "ts": info.last_active.timestamp(),
             "id": info.id,
             "state": format!("{:?}", info.state),
             "client_name": info.client_info.as_ref().map(|c| c.name.clone()),
@@ -58,34 +60,42 @@ fn format_json(event: &ProxyEvent) -> String {
             "server_version": info.server_info.as_ref().and_then(|s| s.version.clone()),
             "request_count": info.request_count,
         }),
-        ProxyEvent::Schema(change) => match change.as_ref() {
-            ChangeSchema::Tool(reason, tool) => json!({
-                "type": "schema",
-                "kind": "tool",
-                "reason": format!("{reason:?}"),
-                "tool": tool,
-            }),
-            ChangeSchema::Prompt(reason, prompt) => json!({
-                "type": "schema",
-                "kind": "prompt",
-                "reason": format!("{reason:?}"),
-                "prompt": prompt,
-            }),
-            ChangeSchema::Resource(reason, resource) => json!({
-                "type": "schema",
-                "kind": "resource",
-                "reason": format!("{reason:?}"),
-                "resource": resource,
-            }),
-            ChangeSchema::ResourceTemplate(reason, rt) => json!({
-                "type": "schema",
-                "kind": "resource_template",
-                "reason": format!("{reason:?}"),
-                "resource_template": rt,
-            }),
-        },
+        ProxyEvent::Schema(change) => {
+            let ts = Utc::now().timestamp();
+            match change.as_ref() {
+                ChangeSchema::Tool(reason, tool) => json!({
+                    "type": "schema",
+                    "ts": ts,
+                    "kind": "tool",
+                    "reason": format!("{reason:?}"),
+                    "tool": tool,
+                }),
+                ChangeSchema::Prompt(reason, prompt) => json!({
+                    "type": "schema",
+                    "ts": ts,
+                    "kind": "prompt",
+                    "reason": format!("{reason:?}"),
+                    "prompt": prompt,
+                }),
+                ChangeSchema::Resource(reason, resource) => json!({
+                    "type": "schema",
+                    "ts": ts,
+                    "kind": "resource",
+                    "reason": format!("{reason:?}"),
+                    "resource": resource,
+                }),
+                ChangeSchema::ResourceTemplate(reason, rt) => json!({
+                    "type": "schema",
+                    "ts": ts,
+                    "kind": "resource_template",
+                    "reason": format!("{reason:?}"),
+                    "resource_template": rt,
+                }),
+            }
+        }
         ProxyEvent::Heartbeat(hb) => json!({
             "type": "heartbeat",
+            "ts": hb.ts.timestamp(),
             "mcp_status": hb.mcp_status,
             "tunnel_status": hb.tunnel_status,
             "tunnel_address": hb.tunnel_address,
@@ -99,6 +109,7 @@ fn format_json(event: &ProxyEvent) -> String {
 fn format_transaction(re: &RequestEvent) -> Value {
     json!({
         "type": "transaction",
+        "ts": re.ts.timestamp(),
         "request_id": re.request_id,
         "request": format_request(&re.request),
         "response": re.response.as_ref().map(format_response),
@@ -280,6 +291,64 @@ mod tests {
         let v = render(&event);
         assert_eq!(v["latency_us"], 1234);
         assert_eq!(v["upstream_us"], 999);
+    }
+
+    #[test]
+    fn json__transaction_emits_ts_in_seconds_from_event() {
+        let ts = chrono::DateTime::from_timestamp(1_700_000_123, 0).unwrap();
+        let event = ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-3".into(),
+            request: mcp_request(ClientMethod::Tools(ToolsMethod::List), None),
+            response: Some(mcp_response_ok()),
+            ts,
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+        }));
+        let v = render(&event);
+        assert_eq!(v["ts"], 1_700_000_123);
+    }
+
+    #[test]
+    fn json__heartbeat_emits_ts_in_seconds_from_event() {
+        let ts = chrono::DateTime::from_timestamp(1_700_000_456, 0).unwrap();
+        let event = ProxyEvent::Heartbeat(Arc::new(mcpr_core::event::types::HeartbeatEvent {
+            mcp_status: "ok".into(),
+            tunnel_status: "off".into(),
+            tunnel_address: None,
+            upstream: "http://localhost:9000".into(),
+            export_port: 9002,
+            ts,
+        }));
+        let v = render(&event);
+        assert_eq!(v["type"], "heartbeat");
+        assert_eq!(v["ts"], 1_700_000_456);
+    }
+
+    #[test]
+    fn json__session_emits_ts_in_seconds() {
+        let v = render(&session("sess-ts", None));
+        assert!(v["ts"].is_i64());
+    }
+
+    #[test]
+    fn json__schema_emits_ts_in_seconds() {
+        use mcpr_core::protocol::schema::{Reason, Tool};
+        let event = ProxyEvent::Schema(Arc::new(ChangeSchema::Tool(
+            Reason::Added,
+            Tool {
+                name: "search".into(),
+                title: None,
+                description: None,
+                input_schema: json!({"type": "object"}),
+                output_schema: None,
+                annotations: None,
+                meta: None,
+            },
+        )));
+        let v = render(&event);
+        assert_eq!(v["type"], "schema");
+        assert!(v["ts"].is_i64());
     }
 
     #[test]
