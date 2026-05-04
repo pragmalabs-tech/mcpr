@@ -29,7 +29,7 @@ async-trait = { workspace = true }
 url = { workspace = true }
 mcpr-core = { workspace = true }
 mcpr-integrations = { workspace = true }
-mcp-tunnel-client = "0.1"
+mcp-tunnel-client = "0.2"
 inquire = "0.9"
 
 # Faster allocator than the system default — noticeably better latency on

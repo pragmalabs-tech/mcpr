@@ -56,3 +56,9 @@ mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.5.43" }
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+# Use the in-repo mcp-tunnel-client (streaming protocol, v0.2). The
+# crates.io 0.1.x release is incompatible with the new v0.2 relay; deploy
+# both together.
+[patch.crates-io]
+mcp-tunnel-client = { path = "../mcp-tunnel/crates/mcp-tunnel-client" }
