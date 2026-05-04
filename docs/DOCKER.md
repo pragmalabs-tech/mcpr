@@ -96,9 +96,8 @@ docker run --rm -v mcpr-state:/var/lib/mcpr \
 `docker exec` into a running container works the same way:
 
 ```bash
-docker exec mcpr mcpr proxy list
-docker exec mcpr mcpr proxy logs --tail 20
-docker exec mcpr mcpr proxy status
+docker exec mcpr mcpr store stats
+docker exec mcpr mcpr validate -c /etc/mcpr/mcpr.toml
 ```
 
 ## docker-compose
@@ -142,4 +141,4 @@ Pin to `X.Y.Z` in production. `latest` is for evaluation.
 
 - **`mcpr proxy run` takes the config file as a positional argument.** Both inside and outside the container, the form is `mcpr proxy run /path/mcpr.toml`. Omit the path to default to `mcpr.toml` in the working directory.
 - **State lives at `/var/lib/mcpr/.mcpr/`, not `/var/lib/mcpr/`.** The `.mcpr` subdirectory is appended by mcpr. The volume mount point is the parent, not the state directory itself.
-- **No `procps` in the image.** `docker exec ... ps` fails. Use `mcpr proxy list` and `mcpr proxy status` for process information.
+- **No `procps` in the image.** `docker exec ... ps` fails. The proxy runs as PID 1; use `docker ps`, `docker top mcpr`, or your orchestrator's status command for process information.

@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`mcpr.toml` is the single source of truth for **how the proxy behaves** — where to route traffic, how to handle CSP, resource limits, tunnel settings, cloud sync, and storage. It declares proxy behavior; it does not manage the daemon process (that's the [CLI](CLI.md)).
+`mcpr.toml` is the single source of truth for **how the proxy behaves** - where to route traffic, how to handle CSP, resource limits, tunnel settings, and cloud sync. It declares proxy behavior; it does not manage the daemon process (that's the [CLI](CLI.md)).
 
 mcpr searches the current directory, then parent directories, for `mcpr.toml`.
 
@@ -73,30 +73,6 @@ server = "my-server"
 
 # Flush interval in milliseconds
 # flush_interval_ms = 5000
-
-[logging]
-# Enable JSONL file logging
-file = true
-
-# Directory for log files (default: "./logs")
-dir = "./logs"
-
-# Rotation strategy: "daily" or "size:50MB" (default: "daily")
-rotation = "daily"
-
-[store]
-# Enable request storage (default: true)
-# When false, no SQLite database is created and CLI query commands are unavailable.
-# enabled = true
-
-# Override the database file path (default: platform-specific)
-# Linux:   ~/.local/share/mcpr/mcpr.db
-# macOS:   ~/Library/Application Support/mcpr/mcpr.db
-# path = "/var/lib/mcpr/requests.db"
-
-# Proxy name written to every stored request (default: derived from mcp URL)
-# Used by `mcpr proxy logs <name>`, `mcpr proxy status <name>`, etc.
-# name = "api-server"
 ```
 
 ### Field reference
@@ -116,12 +92,8 @@ rotation = "daily"
 | `[cloud].endpoint` | Custom cloud API endpoint |
 | `[cloud].batch_size` | Events per batch |
 | `[cloud].flush_interval_ms` | Flush interval in milliseconds |
-| `[logging].file` | Enable JSONL file logging (bool) |
-| `[logging].dir` | Directory for log files |
-| `[logging].rotation` | Rotation: `"daily"` or `"size:50MB"` |
-| `[store].enabled` | Enable SQLite request storage (default: true) |
-| `[store].path` | Override database file path |
-| `[store].name` | Proxy name for stored requests |
+| `drain_timeout` | Seconds to wait for in-flight requests on SIGTERM (default: 30) |
+| `admin_bind` | Admin server bind address (default: `127.0.0.1:9901`) |
 
 ## Resource Limits & Timeouts
 
@@ -150,17 +122,11 @@ request_timeout = 30
 | `connect_timeout` | `5` (seconds) | TCP connect timeout to upstream |
 | `request_timeout` | `30` (seconds) | Total request timeout including response |
 
-## Backward Compatibility
+## Examples
 
-Legacy flat fields from older config files are still supported:
+A working config sits at [`examples/weather-app/mcpr.toml`](../../examples/weather-app/mcpr.toml).
 
-| Legacy field | New location |
-|-------------|--------------|
-| `relay_url` | `[tunnel].relay_url` |
-| `tunnel_token` | `[tunnel].token` |
-| `tunnel_subdomain` | `[tunnel].subdomain` |
-
-The new grouped format is recommended for new configs. See [`config_examples/`](../config_examples/) for templates.
+The legacy CSP flat shape (`csp.mode` + `csp.domains`) is still parsed and folded into `connectDomains` and `resourceDomains`, but the per-directive form is preferred.
 
 ## Related docs
 

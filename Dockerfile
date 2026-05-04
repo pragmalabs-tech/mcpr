@@ -39,5 +39,5 @@ WORKDIR /var/lib/mcpr
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 
 LABEL org.opencontainers.image.source="https://github.com/pragmalabs-tech/mcpr" \
-      org.opencontainers.image.description="MCP-aware reverse proxy" \
+      org.opencontainers.image.description="Observability-first proxy for MCP servers" \
       org.opencontainers.image.licenses="Apache-2.0"

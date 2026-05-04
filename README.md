@@ -111,8 +111,6 @@ mcpr store stats             # row counts, oldest/newest events, db size
 mcpr store vacuum            # delete old records and reclaim disk
 ```
 
-Schema is documented in [docs/CLI.md](docs/CLI.md).
-
 ---
 
 ## Route
@@ -123,7 +121,7 @@ Each proxy instance fronts one upstream MCP app. mcpr classifies requests by JSO
 mcp = "http://localhost:9000"
 ```
 
-To proxy multiple MCP servers, write one `mcpr.toml` per upstream and launch each with `mcpr proxy run --config <path>`.
+To proxy multiple MCP servers, write one `mcpr.toml` per upstream and launch each with `mcpr proxy run <path>`.
 
 ### Widget CSP
 
@@ -182,8 +180,8 @@ Track progress in the [Roadmap](#roadmap) below. Open an issue if your provider 
 
 ## Reference
 
-- Configuration: [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) (upstream URL, port, CSP, cloud sync, logging, limits)
-- CLI: [docs/CLI.md](docs/CLI.md) (`proxy run/stop/list/delete/setup`, `store stats/vacuum`)
+- Configuration: [docs/proxy/PROXY_CONFIGURATION.md](docs/proxy/PROXY_CONFIGURATION.md) (upstream URL, port, CSP, cloud sync, limits)
+- CLI: [docs/CLI.md](docs/CLI.md) (`proxy run`, `proxy setup`, `store stats/vacuum`, `validate`, `version`)
 - Docker: [docs/DOCKER.md](docs/DOCKER.md) (volumes, health probes, compose/Kubernetes)
 - Bench harness: [benches/README.md](benches/README.md) (initialize + tools/call latency, direct vs proxied)
 

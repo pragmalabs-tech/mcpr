@@ -7,19 +7,18 @@
 //! - **proxy**: `mcpr proxy run <config>` - runs the MCP gateway in the
 //!   foreground. SIGTERM drains gracefully.
 //!
-//! All state (lockfiles, config snapshots, sqlite store) lives under `~/.mcpr/`.
+//! State (the SQLite store) lives under `~/.mcpr/`.
 
 mod cmd;
 mod config;
 mod logic;
 
-mod proxy_lock;
 mod render;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use config::{CliAction, GatewayConfig, Mode};
+use config::{CliAction, GatewayConfig};
 use mcpr_core::event::EventManager;
 use mcpr_core::event::types::HeartbeatEvent;
 use mcpr_core::event::{EventBus, ProxyEvent};
@@ -30,32 +29,6 @@ use mcpr_integrations::{StderrSink, sinks::SqliteSink};
 
 fn main() {
     let action = config::load();
-
-    if let CliAction::ProxyRun {
-        mode: Mode::Gateway(cfg),
-        config_content,
-        config_path: _,
-    } = &action
-    {
-        let proxy_name = &cfg.name;
-        match proxy_lock::check_lock(proxy_name) {
-            proxy_lock::LockStatus::Free => {}
-            proxy_lock::LockStatus::Stale(_) => {
-                proxy_lock::remove_lock(proxy_name);
-            }
-            proxy_lock::LockStatus::Held(info) => {
-                eprintln!(
-                    "error: proxy \"{}\" is already running (pid {}).",
-                    proxy_name, info.pid
-                );
-                std::process::exit(1);
-            }
-        }
-        if let Err(e) = proxy_lock::snapshot_config(proxy_name, config_content) {
-            eprintln!("error: failed to snapshot config: {e}");
-            std::process::exit(1);
-        }
-    }
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -88,14 +61,8 @@ async fn async_main(action: CliAction) {
                 std::process::exit(1);
             }
         }
-        CliAction::Proxy(cmd) => {
-            cmd::handle_proxy_command(cmd);
-        }
-        CliAction::ProxyRun {
-            mode, config_path, ..
-        } => {
-            let Mode::Gateway(cfg) = mode;
-            run_gateway_inner(*cfg, config_path).await;
+        CliAction::ProxyRun { cfg } => {
+            run_gateway_inner(*cfg).await;
         }
         CliAction::Store(cmd) => {
             cmd::handle_store_command(cmd);
@@ -103,7 +70,7 @@ async fn async_main(action: CliAction) {
     }
 }
 
-async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
+async fn run_gateway_inner(cfg: GatewayConfig) {
     use std::sync::Arc;
 
     let mcp = match cfg.mcp {
@@ -186,12 +153,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
         }
     };
     let actual_port = listener.local_addr().unwrap().port();
-
-    #[cfg(unix)]
-    if let Err(e) = proxy_lock::write_lock(&cfg.name, actual_port, &config_path) {
-        eprintln!("error: failed to write lockfile: {e}");
-        std::process::exit(1);
-    }
 
     let tunnel_status = Arc::new(std::sync::RwLock::new("disabled".to_string()));
     let public_url = if cfg.tunnel {
@@ -293,7 +254,6 @@ async fn run_gateway_inner(cfg: GatewayConfig, config_path: String) {
 
     let _ = shutdown_rx.changed().await;
 
-    proxy_lock::remove_lock(&cfg.name);
     eprintln!("[mcpr] Shutdown complete.");
 }
 

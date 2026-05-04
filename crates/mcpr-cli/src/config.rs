@@ -5,27 +5,15 @@ use mcpr_core::proxy2::proxy_config::{FileCspConfig, parse_mode};
 
 const CONFIG_FILE: &str = "mcpr.toml";
 
-// ── Run mode ────────────────────────────────────────────────────────────
-
-pub enum Mode {
-    Gateway(Box<GatewayConfig>),
-}
-
 /// Result of parsing CLI args - either a subcommand action or the run mode.
 pub enum CliAction {
     Validate(ValidateArgs),
     Version,
-    /// Read-only query against the store - no server needed.
-    Proxy(ProxyCommand),
     /// Run a proxy in the foreground. The launching process owns the PID
     /// (systemd, Docker, terminal, Node `child_process.spawn`); SIGTERM
     /// drains gracefully.
     ProxyRun {
-        mode: Mode,
-        /// Raw TOML content for config snapshot.
-        config_content: String,
-        /// Absolute path to the original config file.
-        config_path: String,
+        cfg: Box<GatewayConfig>,
     },
     /// Interactive setup flow (needs async for cloud API calls).
     ProxySetup {
@@ -74,16 +62,15 @@ pub struct ProxyArgs {
 }
 
 /// Proxy lifecycle commands.
+///
+/// mcpr is a sidecar primitive in the envoy / pgbouncer mold. The host
+/// process supervisor (systemd, Docker, k8s) owns the proxy PID, so
+/// listing / stopping / deleting individual proxies is the supervisor's
+/// job - not the CLI's.
 #[derive(Subcommand, Clone)]
 pub enum ProxyCommand {
-    /// Run a proxy in the background from a config file
+    /// Run a proxy in the foreground from a config file
     Run(ProxyRunArgs),
-    /// Stop a running proxy (or all proxies with --all)
-    Stop(ProxyStopArgs),
-    /// List all known proxies and their status
-    List(ProxyListArgs),
-    /// Delete a stopped proxy - removes its on-disk state (must be stopped first)
-    Delete(ProxyDeleteArgs),
     /// Interactive setup - authenticate, pick project, generate config
     Setup(ProxySetupArgs),
 }
@@ -95,36 +82,6 @@ pub enum ProxyCommand {
 pub struct ProxyRunArgs {
     /// Config file path (default: mcpr.toml)
     pub config: Option<String>,
-}
-
-/// Arguments for `mcpr proxy stop [name]`.
-#[derive(Parser, Clone)]
-pub struct ProxyStopArgs {
-    /// Proxy name to stop
-    pub name: Option<String>,
-
-    /// Stop all running proxies
-    #[arg(long)]
-    pub all: bool,
-}
-
-/// Arguments for `mcpr proxy list`.
-#[derive(Parser, Clone)]
-pub struct ProxyListArgs {
-    /// Output as JSON (one object per proxy)
-    #[arg(long)]
-    pub json: bool,
-}
-
-/// Arguments for `mcpr proxy delete <name>`.
-#[derive(Parser, Clone)]
-pub struct ProxyDeleteArgs {
-    /// Proxy name to delete
-    pub name: String,
-
-    /// Skip the confirmation prompt
-    #[arg(long, short = 'y')]
-    pub yes: bool,
 }
 
 /// Arguments for `mcpr proxy setup`.
@@ -346,15 +303,6 @@ pub fn load() -> CliAction {
         })) => {
             let explicit_path = run_args.config.as_deref().or(cli.config.as_deref());
             let (file, cfg_path) = FileConfig::load(explicit_path);
-            let config_content = cfg_path
-                .as_ref()
-                .map(|p| std::fs::read_to_string(p).unwrap_or_default())
-                .unwrap_or_default();
-            let config_path_str = cfg_path
-                .as_ref()
-                .and_then(|p| p.canonicalize().ok())
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
 
             let runtime = RuntimeOptions {
                 drain_timeout: file.drain_timeout.unwrap_or(30),
@@ -364,13 +312,9 @@ pub fn load() -> CliAction {
                     .unwrap_or_else(|| "127.0.0.1:9901".to_string()),
             };
 
-            let mode = load_gateway(file, cfg_path, runtime);
+            let cfg = load_gateway(file, cfg_path, runtime);
 
-            CliAction::ProxyRun {
-                mode,
-                config_content,
-                config_path: config_path_str,
-            }
+            CliAction::ProxyRun { cfg }
         }
         Some(Commands::Proxy(ProxyArgs {
             command: ProxyCommand::Setup(setup_args),
@@ -378,7 +322,6 @@ pub fn load() -> CliAction {
             cloud_url: setup_args.cloud_url,
             output: setup_args.output,
         },
-        Some(Commands::Proxy(args)) => CliAction::Proxy(args.command),
         Some(Commands::Store(args)) => CliAction::Store(args.command),
         None => {
             use clap::CommandFactory;
@@ -525,11 +468,11 @@ fn load_gateway(
     file: FileConfig,
     config_path: Option<std::path::PathBuf>,
     runtime: RuntimeOptions,
-) -> Mode {
+) -> Box<GatewayConfig> {
     let name = resolve_proxy_name(file.name.as_deref(), config_path.as_deref());
     let csp = file.csp.into_runtime();
 
-    Mode::Gateway(Box::new(GatewayConfig {
+    Box::new(GatewayConfig {
         name,
         mcp: file.mcp,
         port: file.port,
@@ -553,7 +496,7 @@ fn load_gateway(
         cloud_batch_size: file.cloud.batch_size,
         cloud_flush_interval_ms: file.cloud.flush_interval_ms,
         runtime,
-    }))
+    })
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────
