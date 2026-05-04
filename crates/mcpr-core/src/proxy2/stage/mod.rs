@@ -30,7 +30,7 @@ use chrono::Utc;
 use futures_util::StreamExt;
 
 use crate::{
-    event::{EventBus, ProxyEvent, types::RequestEvent},
+    event::{EventBus, ProxyEvent, openai::OpenAiClientContext, types::RequestEvent},
     protocol::{Request, session::session_id_from_headers},
     proxy2::{
         stage::{
@@ -193,6 +193,8 @@ fn emit_orphan_event(ctx: &RequestContext, bus: &EventBus) {
     let spans = ctx.timer.to_spans_us();
     let upstream_us = upstream_us_from_spans(&spans);
 
+    let openai = OpenAiClientContext::from_request(req_arc.as_ref());
+
     bus.emit(ProxyEvent::Request(Arc::new(RequestEvent {
         request_id: ctx.request_id.clone(),
         request: req_arc.as_ref().into(),
@@ -201,6 +203,7 @@ fn emit_orphan_event(ctx: &RequestContext, bus: &EventBus) {
         latency_us,
         upstream_us,
         spans,
+        openai,
     })));
 }
 

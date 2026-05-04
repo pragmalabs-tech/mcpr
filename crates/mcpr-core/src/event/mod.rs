@@ -23,11 +23,13 @@
 
 pub mod bus;
 pub mod manager;
+pub mod openai;
 pub mod sink;
 pub mod types;
 
 pub use bus::{EventBus, EventBusHandle};
 pub use manager::EventManager;
+pub use openai::OpenAiClientContext;
 pub use sink::{EventSink, NoopSink};
 pub use types::{HeartbeatEvent, LoggedRequest, LoggedResponse, ProxyEvent, RequestEvent};
 
@@ -115,6 +117,7 @@ mod tests {
             latency_us: 0,
             upstream_us: 0,
             spans: vec![],
+            openai: None,
         }))
     }
 

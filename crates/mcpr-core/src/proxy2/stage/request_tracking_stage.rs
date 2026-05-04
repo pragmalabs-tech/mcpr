@@ -10,6 +10,7 @@ use chrono::Utc;
 use crate::{
     event::{
         ProxyEvent,
+        openai::OpenAiClientContext,
         types::{LoggedResponse, RequestEvent},
     },
     protocol::Response,
@@ -48,6 +49,8 @@ impl ResponseStage for ResponseLogStage {
         let mut logged: LoggedResponse = (&res).into();
         logged.slim_resources_in_place(&request_ctx.client_methods);
 
+        let openai = OpenAiClientContext::from_request(req_arc.as_ref());
+
         state
             .event_bus
             .emit(ProxyEvent::Request(Arc::new(RequestEvent {
@@ -58,6 +61,7 @@ impl ResponseStage for ResponseLogStage {
                 latency_us,
                 upstream_us,
                 spans,
+                openai,
             })));
 
         Ok(res)

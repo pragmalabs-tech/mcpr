@@ -230,6 +230,7 @@ mod tests {
             latency_us: 0,
             upstream_us: 0,
             spans: vec![],
+            openai: None,
         }))
     }
 
@@ -242,6 +243,7 @@ mod tests {
             latency_us: 100,
             upstream_us: 0,
             spans: vec![],
+            openai: None,
         }))
     }
 
@@ -329,6 +331,7 @@ mod tests {
             latency_us: 1234,
             upstream_us: 999,
             spans: vec![],
+            openai: None,
         }));
         let v = render(&event);
         assert_eq!(v["latency_us"], 1234);
@@ -346,6 +349,7 @@ mod tests {
             latency_us: 0,
             upstream_us: 0,
             spans: vec![],
+            openai: None,
         }));
         let v = render(&event);
         assert_eq!(v["ts"], 1_700_000_123);

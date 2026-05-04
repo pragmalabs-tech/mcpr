@@ -14,6 +14,7 @@ use axum::http::{
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
+use crate::event::openai::OpenAiClientContext;
 use crate::protocol::{
     Request, Response,
     mcp::{ClientMethod, JsonRpcRequest, JsonRpcResult, RequestId, ResourcesMethod},
@@ -173,6 +174,9 @@ fn slim_array(result: &mut Value, array_key: &str, keep: &[&str]) {
 ///   `upstream_us` is 0 when the router never ran (orphan).
 /// - `ts` is captured at emit time so cloud-sink batching delay doesn't
 ///   skew analytics.
+/// - `openai` is `Some` when the inbound request carried `_meta.openai/*`
+///   keys (ChatGPT Apps SDK / Connectors). `None` for every other client.
+///   See [`OpenAiClientContext`] for the field-by-field mapping.
 #[derive(Clone)]
 pub struct RequestEvent {
     pub request_id: String,
@@ -182,6 +186,7 @@ pub struct RequestEvent {
     pub latency_us: u64,
     pub upstream_us: u64,
     pub spans: Vec<(String, u64)>,
+    pub openai: Option<OpenAiClientContext>,
 }
 
 /// Periodic snapshot of a proxy's runtime status. Emitted on a fixed

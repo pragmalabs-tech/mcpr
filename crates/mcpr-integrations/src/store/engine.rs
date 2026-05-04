@@ -278,6 +278,7 @@ mod tests {
                 latency_us: 0,
                 upstream_us: 0,
                 spans: vec![],
+                openai: None,
             })),
         });
 

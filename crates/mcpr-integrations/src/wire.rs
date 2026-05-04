@@ -21,6 +21,7 @@
 use std::collections::HashMap;
 
 use mcpr_core::event::ProxyEvent;
+use mcpr_core::event::openai::OpenAiClientContext;
 use mcpr_core::event::types::{HeartbeatEvent, LoggedRequest, LoggedResponse, RequestEvent};
 use mcpr_core::protocol::mcp::{JsonRpcRequest, JsonRpcResult, RequestId};
 use mcpr_core::protocol::schema::{ChangeSchema, Reason};
@@ -85,6 +86,7 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
                 &session_id,
                 re.latency_us,
                 re.upstream_us,
+                re.openai.as_ref(),
             );
             vec![envelope("request", ts, server, payload)]
         }
@@ -108,6 +110,7 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
                         &session_id,
                         re.latency_us,
                         re.upstream_us,
+                        re.openai.as_ref(),
                     );
                     envelope("request", ts.clone(), server, payload)
                 })
@@ -197,6 +200,7 @@ fn mcp_payload(
     session_id: &str,
     latency_us: u64,
     upstream_us: u64,
+    openai: Option<&OpenAiClientContext>,
 ) -> Value {
     let mut p = Map::new();
     p.insert("kind".into(), json!("mcp"));
@@ -217,6 +221,12 @@ fn mcp_payload(
     }
     p.insert("latency_us".into(), json!(latency_us));
     p.insert("upstream_us".into(), json!(upstream_us));
+    if let Some(openai) = openai {
+        p.insert(
+            "openai".into(),
+            serde_json::to_value(openai).unwrap_or(Value::Null),
+        );
+    }
     Value::Object(p)
 }
 
@@ -352,6 +362,7 @@ mod tests {
             latency_us,
             upstream_us,
             spans: vec![],
+            openai: None,
         }))
     }
 
@@ -364,7 +375,36 @@ mod tests {
             latency_us: 50,
             upstream_us: 0,
             spans: vec![],
+            openai: None,
         }))
+    }
+
+    fn transaction_with_openai(
+        req: LoggedRequest,
+        resp: LoggedResponse,
+        openai: OpenAiClientContext,
+    ) -> ProxyEvent {
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-openai".into(),
+            request: req,
+            response: Some(resp),
+            ts: Utc::now(),
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+            openai: Some(openai),
+        }))
+    }
+
+    fn sample_openai() -> OpenAiClientContext {
+        OpenAiClientContext {
+            session_id: Some("v1/sess".into()),
+            subject_id: Some("v1/subj".into()),
+            organization_id: Some("v1/org".into()),
+            locale: Some("en-US".into()),
+            user_agent: Some("chatgpt/test".into()),
+            user_location: Some(json!({ "country": "VN", "city": "Vũng Tàu" })),
+        }
     }
 
     // ── envelope shape ───────────────────────────────────────────
@@ -556,6 +596,103 @@ mod tests {
         assert!(envs[0]["payload"].get("result").is_none());
     }
 
+    // ── openai client context ────────────────────────────────────
+
+    #[test]
+    fn encode_envelope__omits_openai_key_when_event_has_none() {
+        let event = transaction(
+            LoggedRequest::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::Call), None),
+            ),
+            ok_response(1),
+            0,
+            0,
+        );
+        let p = encode_envelopes(&event, "s")[0]["payload"].clone();
+        assert!(p.get("openai").is_none());
+    }
+
+    #[test]
+    fn encode_envelope__includes_openai_block_when_present() {
+        let event = transaction_with_openai(
+            LoggedRequest::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::Call), None),
+            ),
+            ok_response(1),
+            sample_openai(),
+        );
+        let p = encode_envelopes(&event, "s")[0]["payload"].clone();
+
+        assert_eq!(p["openai"]["session_id"], "v1/sess");
+        assert_eq!(p["openai"]["subject_id"], "v1/subj");
+        assert_eq!(p["openai"]["organization_id"], "v1/org");
+        assert_eq!(p["openai"]["locale"], "en-US");
+        assert_eq!(p["openai"]["user_agent"], "chatgpt/test");
+        assert_eq!(p["openai"]["user_location"]["country"], "VN");
+    }
+
+    #[test]
+    fn encode_envelope__partial_openai_omits_none_fields() {
+        let event = transaction_with_openai(
+            LoggedRequest::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::Call), None),
+            ),
+            ok_response(1),
+            OpenAiClientContext {
+                session_id: Some("v1/only".into()),
+                ..Default::default()
+            },
+        );
+        let p = encode_envelopes(&event, "s")[0]["payload"].clone();
+
+        assert_eq!(p["openai"]["session_id"], "v1/only");
+        assert!(p["openai"].get("subject_id").is_none());
+        assert!(p["openai"].get("user_location").is_none());
+    }
+
+    #[test]
+    fn encode_envelope__batch_attaches_same_openai_to_each_envelope() {
+        let batch_req = LoggedRequest::McpBatch(
+            req_parts(),
+            vec![
+                {
+                    let mut r = rpc(ClientMethod::Tools(ToolsMethod::List), None);
+                    r.id = RequestId::Number(1);
+                    r
+                },
+                {
+                    let mut r = rpc(ClientMethod::Tools(ToolsMethod::Call), None);
+                    r.id = RequestId::Number(2);
+                    r
+                },
+            ],
+        );
+        let batch_resp = LoggedResponse::McpBatch(
+            resp_parts(200),
+            vec![
+                JsonRpcResult::Response(JsonRpcResponse {
+                    jsonrpc: JsonRpcVersion,
+                    id: RequestId::Number(1),
+                    result: Some(json!({})),
+                }),
+                JsonRpcResult::Response(JsonRpcResponse {
+                    jsonrpc: JsonRpcVersion,
+                    id: RequestId::Number(2),
+                    result: Some(json!({})),
+                }),
+            ],
+        );
+        let event = transaction_with_openai(batch_req, batch_resp, sample_openai());
+
+        let envs = encode_envelopes(&event, "s");
+        assert_eq!(envs.len(), 2);
+        assert_eq!(envs[0]["payload"]["openai"]["session_id"], "v1/sess");
+        assert_eq!(envs[1]["payload"]["openai"]["session_id"], "v1/sess");
+    }
+
     // ── request: Http ────────────────────────────────────────────
 
     fn http_req(method: &str, uri: &str, body: &'static [u8]) -> LoggedRequest {
@@ -680,6 +817,7 @@ mod tests {
             latency_us: 0,
             upstream_us: 0,
             spans: vec![],
+            openai: None,
         }));
         let envs = encode_envelopes(&event, "s");
         assert_eq!(envs[0]["ts"], "2024-01-15T12:30:45.123+00:00");
