@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::csp::{CspConfig, DirectivePolicy, Mode as CspMode, WidgetScoped};
+use crate::auth::ProtectedResourceMetadata;
 
 // ── File shape ─────────────────────────────────────────────────────────
 
@@ -35,6 +36,34 @@ pub struct FileProxyConfig {
     pub max_concurrent_upstream: Option<usize>,
     pub connect_timeout: Option<u64>,
     pub request_timeout: Option<u64>,
+
+    /// Optional `[auth]` block. Presence activates the
+    /// `/.well-known/oauth-protected-resource` discovery endpoint and
+    /// makes the proxy advertise itself as an RFC 9728 protected
+    /// resource. Absence leaves the proxy purely transparent for
+    /// auth-related traffic.
+    pub auth: Option<FileAuthConfig>,
+}
+
+/// `[auth]` table - mcpr's own OAuth 2.1 protected-resource declaration.
+///
+/// When present, the proxy mounts `/.well-known/oauth-protected-resource`
+/// (RFC 9728) and advertises which authorization server clients should
+/// talk to. Validation of presented bearers is opt-in via concrete
+/// providers in Phase 2 (JWKS, Auth0, Supabase).
+#[derive(Deserialize, Default, Clone, Debug)]
+#[serde(default)]
+pub struct FileAuthConfig {
+    /// One or more authorization server URLs. Required when `[auth]`
+    /// is present.
+    pub authorization_servers: Vec<String>,
+    /// Defaults to `["header"]` per RFC 9728.
+    pub bearer_methods_supported: Option<Vec<String>>,
+    pub scopes_supported: Option<Vec<String>>,
+    /// Override the resource URL advertised in metadata. Defaults to
+    /// the proxy's listening origin (computed from `port`).
+    pub resource: Option<String>,
+    pub resource_documentation: Option<String>,
 }
 
 /// `[csp]` table.
@@ -175,7 +204,12 @@ impl FileCspConfig {
 // ── Resolved runtime form ──────────────────────────────────────────────
 
 /// Resolved proxy configuration consumed by the runtime.
-#[derive(Clone)]
+///
+/// `Default` is derived so tests can build configs ergonomically with
+/// `..Default::default()`. Adding a new field to `ProxyConfig` no
+/// longer cascades into every test fixture - they pick up the default
+/// automatically.
+#[derive(Clone, Default)]
 pub struct ProxyConfig {
     pub name: String,
     pub mcp: String,
@@ -187,6 +221,46 @@ pub struct ProxyConfig {
     pub max_concurrent_upstream: Option<usize>,
     pub connect_timeout: Option<u64>,
     pub request_timeout: Option<u64>,
+
+    pub auth: Option<AuthConfig>,
+}
+
+impl ProxyConfig {
+    /// Sensible default for unit tests. Wraps an empty config and
+    /// overrides only the upstream `mcp` URL, leaving every other
+    /// field at its default. Adding fields to `ProxyConfig` does not
+    /// break callers of this helper.
+    pub fn for_tests(mcp: impl Into<String>) -> Self {
+        Self {
+            name: "test".into(),
+            mcp: mcp.into(),
+            ..Self::default()
+        }
+    }
+}
+
+/// Resolved `[auth]` configuration.
+#[derive(Clone, Debug, Default)]
+pub struct AuthConfig {
+    pub resource: String,
+    pub authorization_servers: Vec<String>,
+    pub bearer_methods_supported: Vec<String>,
+    pub scopes_supported: Option<Vec<String>>,
+    pub resource_documentation: Option<String>,
+}
+
+impl AuthConfig {
+    /// Build the RFC 9728 metadata document advertised at
+    /// `/.well-known/oauth-protected-resource`.
+    pub fn metadata(&self) -> ProtectedResourceMetadata {
+        ProtectedResourceMetadata {
+            resource: self.resource.clone(),
+            authorization_servers: self.authorization_servers.clone(),
+            bearer_methods_supported: self.bearer_methods_supported.clone(),
+            scopes_supported: self.scopes_supported.clone(),
+            resource_documentation: self.resource_documentation.clone(),
+        }
+    }
 }
 
 impl FileProxyConfig {
@@ -196,17 +270,46 @@ impl FileProxyConfig {
     /// (filename stem; `mcpr.toml` becomes `default`).
     pub fn resolve(self, config_path: Option<&Path>) -> ProxyConfig {
         let name = resolve_proxy_name(self.name.as_deref(), config_path);
+        let port = self.port;
+        let auth = self.auth.and_then(|a| a.into_runtime(port));
         ProxyConfig {
             name,
             mcp: self.mcp,
-            port: self.port,
+            port,
             csp: self.csp.into_runtime(),
             max_request_body_size: self.max_request_body_size,
             max_response_body_size: self.max_response_body_size,
             max_concurrent_upstream: self.max_concurrent_upstream,
             connect_timeout: self.connect_timeout,
             request_timeout: self.request_timeout,
+            auth,
         }
+    }
+}
+
+impl FileAuthConfig {
+    /// Lower the file form into [`AuthConfig`]. Returns `None` when the
+    /// block is empty enough that mounting the discovery endpoint would
+    /// be misleading - specifically, when no authorization servers are
+    /// declared (RFC 9728 requires at least one).
+    pub fn into_runtime(self, port: Option<u16>) -> Option<AuthConfig> {
+        if self.authorization_servers.is_empty() {
+            return None;
+        }
+        let resource = self.resource.unwrap_or_else(|| {
+            let p = port.unwrap_or(0);
+            format!("http://localhost:{p}")
+        });
+        let bearer_methods_supported = self
+            .bearer_methods_supported
+            .unwrap_or_else(|| vec!["header".to_string()]);
+        Some(AuthConfig {
+            resource,
+            authorization_servers: self.authorization_servers,
+            bearer_methods_supported,
+            scopes_supported: self.scopes_supported,
+            resource_documentation: self.resource_documentation,
+        })
     }
 }
 
@@ -516,5 +619,110 @@ mod tests {
             .err()
             .expect("expected deserialize error when mcp is missing");
         assert!(err.to_string().contains("mcp"), "error was: {err}");
+    }
+
+    // ── [auth] block ──────────────────────────────────────────────────
+
+    #[test]
+    fn file_auth_config__optional_when_absent() {
+        let toml_str = r#"mcp = "http://localhost:9000""#;
+        let file: FileProxyConfig = toml::from_str(toml_str).unwrap();
+        assert!(file.auth.is_none());
+    }
+
+    #[test]
+    fn file_auth_config__parses_authorization_servers() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+            [auth]
+            authorization_servers = ["https://auth.example.com"]
+        "#;
+        let file: FileProxyConfig = toml::from_str(toml_str).unwrap();
+        let auth = file.auth.expect("auth block");
+        assert_eq!(auth.authorization_servers, vec!["https://auth.example.com"]);
+    }
+
+    #[test]
+    fn auth_config__defaults_resource_from_port() {
+        let file = FileAuthConfig {
+            authorization_servers: vec!["https://auth.example.com".into()],
+            ..Default::default()
+        };
+        let runtime = file.into_runtime(Some(3000)).unwrap();
+        assert_eq!(runtime.resource, "http://localhost:3000");
+    }
+
+    #[test]
+    fn auth_config__defaults_bearer_methods_to_header() {
+        let file = FileAuthConfig {
+            authorization_servers: vec!["https://auth.example.com".into()],
+            ..Default::default()
+        };
+        let runtime = file.into_runtime(Some(3000)).unwrap();
+        assert_eq!(runtime.bearer_methods_supported, vec!["header"]);
+    }
+
+    #[test]
+    fn auth_config__honours_explicit_resource_override() {
+        let file = FileAuthConfig {
+            authorization_servers: vec!["https://auth.example.com".into()],
+            resource: Some("https://api.public.example.com".into()),
+            ..Default::default()
+        };
+        let runtime = file.into_runtime(Some(3000)).unwrap();
+        assert_eq!(runtime.resource, "https://api.public.example.com");
+    }
+
+    #[test]
+    fn auth_config__rejects_empty_authorization_servers() {
+        let file = FileAuthConfig::default();
+        let runtime = file.into_runtime(Some(3000));
+        assert!(
+            runtime.is_none(),
+            "auth without authorization_servers should yield None"
+        );
+    }
+
+    #[test]
+    fn auth_config__metadata_round_trip() {
+        let runtime = AuthConfig {
+            resource: "http://localhost:3000".into(),
+            authorization_servers: vec!["https://auth.example.com".into()],
+            bearer_methods_supported: vec!["header".into()],
+            scopes_supported: Some(vec!["mcp:tools".into()]),
+            resource_documentation: Some("https://docs.example.com".into()),
+        };
+        let m = runtime.metadata();
+        assert_eq!(m.resource, "http://localhost:3000");
+        assert_eq!(m.authorization_servers, vec!["https://auth.example.com"]);
+        assert_eq!(m.scopes_supported, Some(vec!["mcp:tools".to_string()]));
+    }
+
+    #[test]
+    fn resolve__threads_auth_through() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+            port = 3000
+
+            [auth]
+            authorization_servers = ["https://auth.example.com"]
+            scopes_supported = ["mcp:tools", "mcp:resources"]
+        "#;
+        let file: FileProxyConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.resolve(None);
+        let auth = cfg.auth.expect("auth resolved");
+        assert_eq!(auth.resource, "http://localhost:3000");
+        assert_eq!(
+            auth.scopes_supported,
+            Some(vec!["mcp:tools".to_string(), "mcp:resources".to_string()])
+        );
+    }
+
+    #[test]
+    fn resolve__auth_absent_when_block_missing() {
+        let toml_str = r#"mcp = "http://localhost:9000""#;
+        let file: FileProxyConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.resolve(None);
+        assert!(cfg.auth.is_none());
     }
 }

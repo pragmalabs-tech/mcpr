@@ -14,6 +14,7 @@
 //!   widget bundle serving, CSP rewriting, SSE, forwarding, per-proxy health.
 //! - [`time`]: Shared time formatting utilities.
 
+pub mod auth;
 pub mod config;
 pub mod env;
 pub mod event;

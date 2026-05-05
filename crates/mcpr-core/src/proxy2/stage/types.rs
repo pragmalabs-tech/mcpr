@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use axum::http::Method;
 
 use crate::{
+    auth::{self, AuthRequest},
     protocol::{
         Request, Response,
         mcp::{ClientInfo, ClientMethod, LifecycleMethod, RequestId},
@@ -76,6 +77,10 @@ pub struct RequestContextInner {
     /// `track_end` to mark spans; the pipeline can dump it after the
     /// response comes back to attribute latency to specific stages.
     pub timer: Timer,
+    /// Credential observed on the inbound `Authorization` header.
+    /// Populated by [`auth::parse_request_auth`] at pipeline entry.
+    /// Defaults to a `None` credential when the header is absent.
+    pub auth: AuthRequest,
 }
 
 impl Default for RequestContextInner {
@@ -89,6 +94,7 @@ impl Default for RequestContextInner {
             request: None,
             started_at: Instant::now(),
             timer: Timer::default(),
+            auth: AuthRequest::default(),
         }
     }
 }
@@ -144,6 +150,7 @@ impl RequestContext {
                     request: Some(request_arc),
                     started_at,
                     timer,
+                    auth: auth::parse_request_auth(&parts.headers),
                 }
             }
             Request::McpBatch(parts, rpcs) => RequestContextInner {
@@ -164,6 +171,7 @@ impl RequestContext {
                 request: Some(request_arc),
                 started_at,
                 timer,
+                auth: auth::parse_request_auth(&parts.headers),
             },
             Request::Http(http) => RequestContextInner {
                 client_methods: HashMap::new(),
@@ -174,6 +182,7 @@ impl RequestContext {
                 request: Some(request_arc),
                 started_at,
                 timer,
+                auth: auth::parse_request_auth(http.headers()),
             },
         };
         inner.into()

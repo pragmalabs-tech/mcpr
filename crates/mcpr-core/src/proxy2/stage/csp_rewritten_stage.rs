@@ -493,15 +493,9 @@ mod tests {
 
     fn proxy_config_with_csp(csp: CspConfig) -> ProxyConfig {
         ProxyConfig {
-            name: "test".into(),
-            mcp: "http://upstream.internal:9000".into(),
             port: Some(9002),
             csp,
-            max_request_body_size: None,
-            max_response_body_size: None,
-            max_concurrent_upstream: None,
-            connect_timeout: None,
-            request_timeout: None,
+            ..ProxyConfig::for_tests("http://upstream.internal:9000")
         }
     }
 

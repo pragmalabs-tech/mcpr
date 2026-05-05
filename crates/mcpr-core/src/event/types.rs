@@ -14,6 +14,7 @@ use axum::http::{
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
+use crate::auth::{AuthRequest, WwwAuthenticateChallenge};
 use crate::event::openai::OpenAiClientContext;
 use crate::protocol::{
     Request, Response,
@@ -187,6 +188,11 @@ pub struct RequestEvent {
     pub upstream_us: u64,
     pub spans: Vec<(String, u64)>,
     pub openai: Option<OpenAiClientContext>,
+    /// Credential observed on the inbound `Authorization` header.
+    /// `AuthRequest::default()` when no credential was presented.
+    pub auth: AuthRequest,
+    /// `WWW-Authenticate` challenge captured from the upstream response.
+    pub www_authenticate: Option<WwwAuthenticateChallenge>,
 }
 
 /// Periodic snapshot of a proxy's runtime status. Emitted on a fixed

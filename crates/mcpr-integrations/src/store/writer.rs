@@ -468,6 +468,8 @@ mod tests {
             upstream_us: 0,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }))
     }
 
@@ -481,6 +483,8 @@ mod tests {
             upstream_us: 0,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }))
     }
 

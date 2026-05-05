@@ -112,17 +112,7 @@ mod tests {
     use crate::proxy2::csp::CspConfig;
 
     fn proxy_cfg() -> Arc<ProxyConfig> {
-        Arc::new(ProxyConfig {
-            name: "test".into(),
-            mcp: "http://localhost:9000".into(),
-            port: None,
-            csp: CspConfig::default(),
-            max_request_body_size: None,
-            max_response_body_size: None,
-            max_concurrent_upstream: None,
-            connect_timeout: None,
-            request_timeout: None,
-        })
+        Arc::new(ProxyConfig::for_tests("http://localhost:9000"))
     }
 
     // ── new ───────────────────────────────────────────────────
@@ -190,25 +180,11 @@ mod tests {
 
         let cfg_a = Arc::new(ProxyConfig {
             name: "a".into(),
-            mcp: url_a.clone(),
-            port: None,
-            csp: CspConfig::default(),
-            max_request_body_size: None,
-            max_response_body_size: None,
-            max_concurrent_upstream: None,
-            connect_timeout: None,
-            request_timeout: None,
+            ..ProxyConfig::for_tests(url_a.clone())
         });
         let cfg_b = Arc::new(ProxyConfig {
             name: "b".into(),
-            mcp: url_b.clone(),
-            port: None,
-            csp: CspConfig::default(),
-            max_request_body_size: None,
-            max_response_body_size: None,
-            max_concurrent_upstream: None,
-            connect_timeout: None,
-            request_timeout: None,
+            ..ProxyConfig::for_tests(url_b.clone())
         });
 
         let pool_a = UpstreamPool::new(cfg_a).unwrap();

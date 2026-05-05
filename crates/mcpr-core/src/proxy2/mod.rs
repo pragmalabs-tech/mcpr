@@ -10,11 +10,12 @@ use axum::{
     Router,
     extract::{Request as AxumRequest, State},
     response::{IntoResponse, Response as AxumResponse},
-    routing::any,
+    routing::{any, get},
 };
 use tower_http::cors::CorsLayer;
 
 use crate::{
+    auth::{AuthProvider, protected_resource_metadata_handler},
     env::Environment,
     event::EventBus,
     protocol::{Request, Response, is_event_stream, mcp::JsonRpcResult, sse},
@@ -48,6 +49,8 @@ pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<R
 
     // Build Stages
     let csp_rewritter = CspRewritter::new(CspRewriteConfig::from_proxy_config(&cfg));
+    let auth_provider: Option<Arc<AuthProvider>> =
+        cfg.auth.as_ref().map(|a| AuthProvider::new(a.metadata()));
     let router_stage = RouterStage::new(cfg)?;
     let request_stages: Vec<Box<dyn RequestStage>> = vec![];
     let response_stages: Vec<Box<dyn ResponseStage>> = vec![
@@ -61,13 +64,28 @@ pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<R
         request_stages,
         response_stages,
         router_stage,
-        Arc::new(InnerProxyState::new(event_bus, SessionStore::new())),
+        Arc::new(InnerProxyState::new(
+            event_bus,
+            SessionStore::new(),
+            auth_provider.clone(),
+        )),
     ));
 
-    Ok(Router::new()
+    let mut router: Router = Router::new()
         .fallback(any(handle_request))
-        .with_state(pipeline)
-        .layer(cors))
+        .with_state(pipeline);
+
+    if let Some(provider) = auth_provider {
+        let discovery: Router = Router::new()
+            .route(
+                "/.well-known/oauth-protected-resource",
+                get(protected_resource_metadata_handler),
+            )
+            .with_state(provider);
+        router = router.merge(discovery);
+    }
+
+    Ok(router.layer(cors))
 }
 
 async fn handle_request(
@@ -444,17 +462,7 @@ mod tests {
     use axum::routing::get as axum_get;
 
     fn pipeline_for(url: &str) -> Arc<StagePipeline> {
-        let cfg = Arc::new(ProxyConfig {
-            name: "test".into(),
-            mcp: url.to_string(),
-            port: None,
-            csp: CspConfig::default(),
-            max_request_body_size: None,
-            max_response_body_size: None,
-            max_concurrent_upstream: None,
-            connect_timeout: None,
-            request_timeout: None,
-        });
+        let cfg = Arc::new(ProxyConfig::for_tests(url));
         Arc::new(StagePipeline::new(
             vec![],
             vec![],
@@ -462,6 +470,7 @@ mod tests {
             Arc::new(InnerProxyState::new(
                 EventBus::for_tests(),
                 SessionStore::new(),
+                None,
             )),
         ))
     }
@@ -544,5 +553,68 @@ mod tests {
         let resp = handle_request(AxumState(pipeline), req).await;
 
         assert_eq!(resp.headers()["content-type"], "text/event-stream");
+    }
+
+    // ── build_app: discovery route mounting ───────────────────
+
+    use crate::proxy2::proxy_config::AuthConfig;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn cfg_with_auth(upstream_url: String, auth: Option<AuthConfig>) -> Arc<ProxyConfig> {
+        Arc::new(ProxyConfig {
+            port: Some(3000),
+            auth,
+            ..ProxyConfig::for_tests(upstream_url)
+        })
+    }
+
+    fn sample_auth() -> AuthConfig {
+        AuthConfig {
+            resource: "http://localhost:3000".into(),
+            authorization_servers: vec!["https://auth.example.com".into()],
+            bearer_methods_supported: vec!["header".into()],
+            scopes_supported: Some(vec!["mcp:tools".into()]),
+            resource_documentation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn build_app__mounts_discovery_route_when_auth_configured() {
+        // Spawn a 404-only upstream so the fallback path is observably
+        // different from the proxy-served discovery route.
+        let upstream = spawn_upstream(Router::new()).await;
+        let cfg = cfg_with_auth(upstream, Some(sample_auth()));
+        let app = build_app(cfg, EventBus::for_tests()).unwrap();
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-protected-resource")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["resource"], "http://localhost:3000");
+        assert_eq!(v["authorization_servers"][0], "https://auth.example.com");
+    }
+
+    #[tokio::test]
+    async fn build_app__discovery_route_absent_falls_through_to_upstream() {
+        // No `[auth]`: the discovery path is forwarded to the upstream
+        // (which here returns 404), proving the route is not mounted.
+        let upstream = spawn_upstream(Router::new()).await;
+        let cfg = cfg_with_auth(upstream, None);
+        let app = build_app(cfg, EventBus::for_tests()).unwrap();
+
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/.well-known/oauth-protected-resource")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
     }
 }

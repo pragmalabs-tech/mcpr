@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 
+use mcpr_core::auth::{AuthRequest, WwwAuthenticateChallenge};
 use mcpr_core::event::ProxyEvent;
 use mcpr_core::event::openai::OpenAiClientContext;
 use mcpr_core::event::types::{HeartbeatEvent, LoggedRequest, LoggedResponse, RequestEvent};
@@ -76,7 +77,7 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
             let session_id = resolve_session_id(req_session, re.response.as_ref());
             let result = single_result(re.response.as_ref());
             let http_status = mcp_response_status(re.response.as_ref());
-            let payload = mcp_payload(
+            let mut payload = mcp_payload(
                 &re.request_id,
                 req_parts.method.as_str(),
                 &req_parts.uri.to_string(),
@@ -88,6 +89,7 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
                 re.upstream_us,
                 re.openai.as_ref(),
             );
+            attach_auth_blocks(&mut payload, re);
             vec![envelope("request", ts, server, payload)]
         }
         LoggedRequest::McpBatch(req_parts, rpcs) => {
@@ -100,7 +102,7 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
             rpcs.iter()
                 .map(|rpc| {
                     let result = by_id.get(&rpc.id).copied();
-                    let payload = mcp_payload(
+                    let mut payload = mcp_payload(
                         &re.request_id,
                         http_method,
                         &uri,
@@ -112,6 +114,7 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
                         re.upstream_us,
                         re.openai.as_ref(),
                     );
+                    attach_auth_blocks(&mut payload, re);
                     envelope("request", ts.clone(), server, payload)
                 })
                 .collect()
@@ -125,7 +128,7 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
                 Some(LoggedResponse::Http { status, body_size }) => (status.as_u16(), *body_size),
                 _ => (0, 0),
             };
-            let payload = json!({
+            let mut payload = json!({
                 "kind": "http",
                 "request_id": re.request_id,
                 "session_id": "",
@@ -137,9 +140,36 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
                 "latency_us": re.latency_us,
                 "upstream_us": re.upstream_us,
             });
+            attach_auth_blocks(&mut payload, re);
             vec![envelope("request", ts, server, payload)]
         }
     }
+}
+
+/// Inject `auth` / `oauth` / `www_authenticate` sub-objects into a
+/// payload when present. Each key is omitted when its source is empty
+/// so envelopes for traffic without auth stay unchanged.
+fn attach_auth_blocks(payload: &mut Value, re: &RequestEvent) {
+    let Value::Object(obj) = payload else {
+        return;
+    };
+    if let Some(v) = encode_auth(&re.auth) {
+        obj.insert("auth".into(), v);
+    }
+    if let Some(c) = &re.www_authenticate {
+        obj.insert("www_authenticate".into(), encode_www_authenticate(c));
+    }
+}
+
+fn encode_auth(auth: &AuthRequest) -> Option<Value> {
+    if auth.is_none() {
+        return None;
+    }
+    serde_json::to_value(auth).ok()
+}
+
+fn encode_www_authenticate(challenge: &WwwAuthenticateChallenge) -> Value {
+    serde_json::to_value(challenge).unwrap_or(Value::Null)
 }
 
 /// Use the request-header session id when present; otherwise fall back to
@@ -363,6 +393,8 @@ mod tests {
             upstream_us,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }))
     }
 
@@ -376,6 +408,8 @@ mod tests {
             upstream_us: 0,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }))
     }
 
@@ -393,6 +427,8 @@ mod tests {
             upstream_us: 0,
             spans: vec![],
             openai: Some(openai),
+            auth: Default::default(),
+            www_authenticate: None,
         }))
     }
 
@@ -818,6 +854,8 @@ mod tests {
             upstream_us: 0,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }));
         let envs = encode_envelopes(&event, "s");
         assert_eq!(envs[0]["ts"], "2024-01-15T12:30:45.123+00:00");
@@ -928,6 +966,79 @@ mod tests {
     }
 
     // ── heartbeat ────────────────────────────────────────────────
+
+    // ── auth / www_authenticate blocks ───────────────────────────
+
+    fn mcp_event_with_auth(
+        auth: mcpr_core::auth::AuthRequest,
+        www_authenticate: Option<mcpr_core::auth::WwwAuthenticateChallenge>,
+    ) -> ProxyEvent {
+        ProxyEvent::Request(Arc::new(RequestEvent {
+            request_id: "rid-auth".into(),
+            request: LoggedRequest::Mcp(
+                req_parts(),
+                rpc(ClientMethod::Tools(ToolsMethod::List), None),
+            ),
+            response: Some(ok_response(1)),
+            ts: Utc::now(),
+            latency_us: 0,
+            upstream_us: 0,
+            spans: vec![],
+            openai: None,
+            auth,
+            www_authenticate,
+        }))
+    }
+
+    #[test]
+    fn envelope__omits_auth_keys_when_absent() {
+        let env = encode_envelopes(&mcp_event_with_auth(Default::default(), None), "srv").remove(0);
+        assert!(env["payload"].get("auth").is_none());
+        assert!(env["payload"].get("www_authenticate").is_none());
+    }
+
+    #[test]
+    fn envelope__includes_auth_block_when_credential_present() {
+        use mcpr_core::auth::parse_request_auth;
+
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            "Bearer opaque-token".parse().unwrap(),
+        );
+        let auth = parse_request_auth(&headers);
+
+        let env = encode_envelopes(&mcp_event_with_auth(auth, None), "srv").remove(0);
+        let block = &env["payload"]["auth"];
+        assert_eq!(block["scheme"], "Bearer");
+        assert_eq!(block["header_name"], "Authorization");
+        assert!(block["fingerprint"].is_string());
+        assert_eq!(block["fingerprint"].as_str().unwrap().len(), 16);
+        // opaque bearer: no jwt block emitted
+        assert!(block.get("jwt").is_none());
+    }
+
+    #[test]
+    fn envelope__includes_www_authenticate_when_challenged() {
+        use mcpr_core::auth::parse_www_authenticate;
+
+        let mut h = http::HeaderMap::new();
+        h.insert(
+            "www-authenticate",
+            r#"Bearer realm="mcpr", resource_metadata="https://auth.example.com/.well-known/oauth-protected-resource", error="invalid_token""#.parse().unwrap(),
+        );
+        let challenge = parse_www_authenticate(&h);
+        let env =
+            encode_envelopes(&mcp_event_with_auth(Default::default(), challenge), "srv").remove(0);
+        let block = &env["payload"]["www_authenticate"];
+        assert_eq!(block["scheme"], "Bearer");
+        assert_eq!(block["realm"], "mcpr");
+        assert_eq!(
+            block["resource_metadata"],
+            "https://auth.example.com/.well-known/oauth-protected-resource"
+        );
+        assert_eq!(block["error"], "invalid_token");
+    }
 
     #[test]
     fn encode_heartbeat__carries_status_and_address() {

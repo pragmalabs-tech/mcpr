@@ -1,8 +1,9 @@
-//! Stderr event sink — prints proxy events to stderr as JSON for real-time visibility.
+//! Stderr event sink - prints proxy events to stderr as JSON for real-time visibility.
 //!
 //! Used in both daemon and foreground modes. Docker/k8s scrape stderr.
 
 use std::io::Write;
+use std::sync::OnceLock;
 
 use chrono::Utc;
 use mcpr_core::event::types::{LoggedRequest, LoggedResponse, RequestEvent};
@@ -108,7 +109,7 @@ fn format_json(event: &ProxyEvent) -> String {
 }
 
 fn format_transaction(re: &RequestEvent) -> Value {
-    json!({
+    let mut obj = json!({
         "type": "transaction",
         "ts": re.ts.timestamp(),
         "request_id": re.request_id,
@@ -117,7 +118,36 @@ fn format_transaction(re: &RequestEvent) -> Value {
         "response": re.response.as_ref().map(format_response),
         "latency_us": re.latency_us,
         "upstream_us": re.upstream_us,
-    })
+    });
+    if auth_logging_enabled() {
+        attach_auth_fields(&mut obj, re);
+    }
+    obj
+}
+
+/// Cached read of `MCPR_LOG_AUTH=1`. Auth observation fields (parsed
+/// JWT claims, OAuth endpoint classification, `WWW-Authenticate`) are
+/// off by default to keep the stderr stream lean; set the env var to
+/// surface them.
+fn auth_logging_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("MCPR_LOG_AUTH").is_ok_and(|v| v == "1"))
+}
+
+fn attach_auth_fields(payload: &mut Value, re: &RequestEvent) {
+    let Value::Object(obj) = payload else {
+        return;
+    };
+    if !re.auth.is_none()
+        && let Ok(v) = serde_json::to_value(&re.auth)
+    {
+        obj.insert("auth".into(), v);
+    }
+    if let Some(c) = &re.www_authenticate
+        && let Ok(v) = serde_json::to_value(c)
+    {
+        obj.insert("www_authenticate".into(), v);
+    }
 }
 
 /// Pull `mcp-session-id` from the request headers, falling back to the
@@ -231,6 +261,8 @@ mod tests {
             upstream_us: 0,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }))
     }
 
@@ -244,6 +276,8 @@ mod tests {
             upstream_us: 0,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }))
     }
 
@@ -332,6 +366,8 @@ mod tests {
             upstream_us: 999,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }));
         let v = render(&event);
         assert_eq!(v["latency_us"], 1234);
@@ -350,6 +386,8 @@ mod tests {
             upstream_us: 0,
             spans: vec![],
             openai: None,
+            auth: Default::default(),
+            www_authenticate: None,
         }));
         let v = render(&event);
         assert_eq!(v["ts"], 1_700_000_123);

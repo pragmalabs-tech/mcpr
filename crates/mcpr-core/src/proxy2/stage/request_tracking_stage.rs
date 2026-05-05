@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::{
+    auth,
     event::{
         ProxyEvent,
         openai::OpenAiClientContext,
@@ -51,6 +52,13 @@ impl ResponseStage for ResponseLogStage {
 
         let openai = OpenAiClientContext::from_request(req_arc.as_ref());
 
+        let www_authenticate = match &res {
+            Response::Mcp(parts, _) | Response::McpBatch(parts, _) => {
+                auth::parse_www_authenticate(&parts.headers)
+            }
+            Response::Http(http) => auth::parse_www_authenticate(http.headers()),
+        };
+
         state
             .event_bus
             .emit(ProxyEvent::Request(Arc::new(RequestEvent {
@@ -62,6 +70,8 @@ impl ResponseStage for ResponseLogStage {
                 upstream_us,
                 spans,
                 openai,
+                auth: request_ctx.auth.clone(),
+                www_authenticate,
             })));
 
         Ok(res)

@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 pub use mcpr_core::proxy2::csp::CspConfig;
-use mcpr_core::proxy2::proxy_config::{FileCspConfig, parse_mode};
+use mcpr_core::proxy2::proxy_config::{AuthConfig, FileAuthConfig, FileCspConfig, parse_mode};
 
 const CONFIG_FILE: &str = "mcpr.toml";
 
@@ -185,6 +185,9 @@ struct FileConfig {
     mcp: Option<String>,
     csp: FileCspConfig,
 
+    // -- OAuth 2.1 protected resource (RFC 9728) --
+    auth: Option<FileAuthConfig>,
+
     // -- Tunnel client --
     tunnel: FileTunnelConfig,
 
@@ -280,6 +283,7 @@ pub struct GatewayConfig {
     pub max_concurrent_upstream: Option<usize>,
     pub connect_timeout: Option<u64>,
     pub request_timeout: Option<u64>,
+    pub auth: Option<AuthConfig>,
     pub cloud_token: Option<String>,
     pub cloud_server: Option<String>,
     // Default is https://api.mcpr.app/api/ingest-events
@@ -471,6 +475,7 @@ fn load_gateway(
 ) -> Box<GatewayConfig> {
     let name = resolve_proxy_name(file.name.as_deref(), config_path.as_deref());
     let csp = file.csp.into_runtime();
+    let auth = file.auth.and_then(|a| a.into_runtime(file.port));
 
     Box::new(GatewayConfig {
         name,
@@ -490,6 +495,7 @@ fn load_gateway(
         max_concurrent_upstream: file.max_concurrent_upstream,
         connect_timeout: file.connect_timeout,
         request_timeout: file.request_timeout,
+        auth,
         cloud_token: file.cloud.token,
         cloud_server: file.cloud.server,
         cloud_endpoint: file.cloud.endpoint,

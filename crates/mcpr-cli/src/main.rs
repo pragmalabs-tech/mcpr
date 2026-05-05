@@ -91,6 +91,7 @@ async fn run_gateway_inner(cfg: GatewayConfig) {
         max_concurrent_upstream: cfg.max_concurrent_upstream,
         connect_timeout: cfg.connect_timeout,
         request_timeout: cfg.request_timeout,
+        auth: cfg.auth.clone(),
     });
 
     let db_path = match resolve_db_path(None) {

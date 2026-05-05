@@ -204,6 +204,8 @@ fn emit_orphan_event(ctx: &RequestContext, bus: &EventBus) {
         upstream_us,
         spans,
         openai,
+        auth: ctx.auth.clone(),
+        www_authenticate: None,
     })));
 }
 
@@ -293,17 +295,7 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────
 
     fn config_for(url: &str) -> Arc<ProxyConfig> {
-        Arc::new(ProxyConfig {
-            name: "test".into(),
-            mcp: url.to_string(),
-            port: None,
-            csp: CspConfig::default(),
-            max_request_body_size: None,
-            max_response_body_size: None,
-            max_concurrent_upstream: None,
-            connect_timeout: None,
-            request_timeout: None,
-        })
+        Arc::new(ProxyConfig::for_tests(url))
     }
 
     fn state() -> ProxyState {
@@ -464,6 +456,7 @@ mod tests {
         let state = Arc::new(InnerProxyState::new(
             handle.bus.clone(),
             SessionStore::new(),
+            None,
         ));
         (state, sink, handle)
     }

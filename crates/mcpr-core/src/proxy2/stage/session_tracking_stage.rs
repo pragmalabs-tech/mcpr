@@ -176,6 +176,7 @@ mod tests {
         let state = Arc::new(InnerProxyState::new(
             handle.bus.clone(),
             SessionStore::new(),
+            None,
         ));
         (state, sink, handle)
     }
