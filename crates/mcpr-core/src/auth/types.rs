@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::protocol::http_request::HttpRequest;
+
 /// Captured auth context for a single inbound request.
 ///
 /// Flat by design: every field is independently optional. `scheme` is
@@ -142,6 +144,51 @@ where
         _ => return Ok(None),
     };
     Ok((!scopes.is_empty()).then_some(scopes))
+}
+
+// ────────── Inbound OAuth request classification ──────────
+
+/// Inbound request classified as an OAuth protocol call by URL path.
+/// Carries the raw [`HttpRequest`] so forwarding stays identical to
+/// regular HTTP traffic when the provider returns
+/// [`OAuthResponse::Forward`].
+#[derive(Clone, Debug)]
+pub struct OAuthRequest {
+    pub endpoint: OAuthEndpoint,
+    pub http: HttpRequest,
+}
+
+/// Well-known OAuth endpoint paths an MCP-fronting proxy might see.
+/// Tight set: only the discovery paths a protected resource (or its
+/// co-located authorization server) typically exposes. `/token`,
+/// `/authorize`, `/register` etc. live on the auth server, not on
+/// the proxy, and are deliberately not classified.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum OAuthEndpoint {
+    /// `/.well-known/oauth-protected-resource` (RFC 9728).
+    ProtectedResourceMetadata,
+    /// `/.well-known/oauth-authorization-server` (RFC 8414).
+    AuthorizationServerMetadata,
+    /// `/.well-known/openid-configuration` (OIDC discovery).
+    OpenIdConfiguration,
+    /// `/.well-known/jwks.json`.
+    Jwks,
+}
+
+impl OAuthEndpoint {
+    /// Classify a URI path against well-known OAuth paths. Returns
+    /// `None` for paths outside the recognised set.
+    pub fn from_path(path: &str) -> Option<Self> {
+        match path {
+            "/.well-known/oauth-protected-resource" => Some(Self::ProtectedResourceMetadata),
+            "/.well-known/oauth-authorization-server" => Some(Self::AuthorizationServerMetadata),
+            "/.well-known/openid-configuration" => Some(Self::OpenIdConfiguration),
+            "/.well-known/jwks.json" => Some(Self::Jwks),
+            _ => None,
+        }
+    }
 }
 
 // ────────── OAuth 2.1 protected resource surface ──────────

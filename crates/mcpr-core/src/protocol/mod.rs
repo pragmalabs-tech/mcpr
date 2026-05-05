@@ -37,6 +37,11 @@ use http_body_util::BodyExt;
 pub enum Request {
     Mcp(RequestParts, mcp::JsonRpcRequest),
     McpBatch(RequestParts, Vec<mcp::JsonRpcRequest>),
+    /// Inbound HTTP whose URL path matches a well-known OAuth path.
+    /// Same forwarding behaviour as `Http` by default; the
+    /// [`crate::auth::AuthProvider`] in [`crate::proxy2::state`] can
+    /// short-circuit with an inline response.
+    OAuth(crate::auth::OAuthRequest),
     Http(http_request::HttpRequest),
 }
 
@@ -50,6 +55,13 @@ impl Request {
         let bytes = axum::body::to_bytes(body, usize::MAX)
             .await
             .map_err(ParseError::ReadBody)?;
+
+        // OAuth path classification first - cheaper than parsing a JSON
+        // body and OAuth discovery responses aren't JSON-RPC.
+        if let Some(endpoint) = crate::auth::OAuthEndpoint::from_path(parts.uri.path()) {
+            let http = axum::http::Request::from_parts(parts, bytes);
+            return Ok(Self::OAuth(crate::auth::OAuthRequest { endpoint, http }));
+        }
 
         if is_json(parts.headers.get(CONTENT_TYPE)) {
             match json_shape(&bytes) {

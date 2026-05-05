@@ -173,6 +173,17 @@ impl RequestContext {
                 timer,
                 auth: auth::parse_request_auth(&parts.headers),
             },
+            Request::OAuth(oauth) => RequestContextInner {
+                client_methods: HashMap::new(),
+                session_id: session_id_from_headers(oauth.http.headers()),
+                initialize: None,
+                is_session_close: oauth.http.method() == Method::DELETE,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                request: Some(request_arc),
+                started_at,
+                timer,
+                auth: auth::parse_request_auth(oauth.http.headers()),
+            },
             Request::Http(http) => RequestContextInner {
                 client_methods: HashMap::new(),
                 session_id: session_id_from_headers(http.headers()),

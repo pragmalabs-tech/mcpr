@@ -1,109 +1,40 @@
-//! Auth provider - the proxy's runtime view of the configured OAuth
-//! protected resource.
+//! Auth provider trait — the proxy's runtime view of how to respond
+//! to an OAuth-classified request.
 //!
-//! v1 ships a single concrete struct: it serves the static metadata
-//! configured under `[auth]` and extracts a user id from the JWT `sub`
-//! claim. When Phase 2 introduces signature-verifying providers
-//! (`JwksProvider`, `Auth0Provider`, `SupabaseProvider`), this struct
-//! becomes a `trait` with concrete impls.
+//! v1 ships two concrete impls in sibling modules:
+//! - [`super::StaticAuthProvider`] - serves operator-supplied metadata.
+//! - [`super::ReflectAuthProvider`] - probes the upstream MCP origin
+//!   at startup and serves the cached metadata.
+//!
+//! Phase 2 adds signature-verifying providers (`JwksProvider`,
+//! `Auth0Provider`, `SupabaseProvider`) by implementing the same trait.
 
-use std::sync::Arc;
+use super::types::{AuthRequest, OAuthRequest};
 
-use super::types::{AuthRequest, ProtectedResourceMetadata};
-
-/// Runtime auth provider. Wraps the resource metadata served at
-/// `/.well-known/oauth-protected-resource` and exposes a user-identity
-/// lookup (`user_id`).
-pub struct AuthProvider {
-    metadata: ProtectedResourceMetadata,
+/// How a provider responds to an [`OAuthRequest`].
+///
+/// `Serve` short-circuits forwarding; `Forward` falls through to the
+/// HTTP forwarder; `NotFound` returns 404 inline.
+#[non_exhaustive]
+pub enum OAuthResponse {
+    /// Provider produced the body inline. Served as 200 OK with
+    /// `Content-Type: application/json`.
+    Serve(serde_json::Value),
+    /// Forward to upstream as if it were a regular HTTP request.
+    Forward,
+    /// Provider explicitly doesn't serve this endpoint; respond 404.
+    NotFound,
 }
 
-impl AuthProvider {
-    pub fn new(metadata: ProtectedResourceMetadata) -> Arc<Self> {
-        Arc::new(Self { metadata })
-    }
+/// Plug-in surface for OAuth 2.1 providers.
+pub trait AuthProvider: Send + Sync {
+    /// Decide how to respond to an OAuth-classified request.
+    fn handle(&self, req: &OAuthRequest) -> OAuthResponse;
 
-    /// Discovery document advertised at the well-known path.
-    pub fn protected_resource_metadata(&self) -> ProtectedResourceMetadata {
-        self.metadata.clone()
-    }
-
-    /// Extract the user id from the parsed credential. v1 reads JWT
-    /// `sub` when present; concrete providers in Phase 2 may override
-    /// this path with introspection.
-    pub fn user_id(&self, auth: &AuthRequest) -> Option<String> {
+    /// Default: extract `sub` from a parsed JWT. Concrete providers
+    /// can override to introspect opaque tokens or cross-reference
+    /// an internal store.
+    fn user_id(&self, auth: &AuthRequest) -> Option<String> {
         auth.jwt.as_ref().and_then(|j| j.claims.sub.clone())
-    }
-}
-
-#[cfg(test)]
-#[allow(non_snake_case)]
-mod tests {
-    use super::*;
-    use crate::auth::types::{JwtClaims, JwtCredential, JwtHeader};
-
-    fn sample_metadata() -> ProtectedResourceMetadata {
-        ProtectedResourceMetadata {
-            resource: "http://localhost:3000".into(),
-            authorization_servers: vec!["https://auth.example.com".into()],
-            bearer_methods_supported: vec!["header".into()],
-            scopes_supported: Some(vec!["mcp:tools".into()]),
-            resource_documentation: None,
-        }
-    }
-
-    fn auth_with_jwt_sub(sub: Option<&str>) -> AuthRequest {
-        AuthRequest {
-            scheme: Some("bearer".into()),
-            header_name: Some("Authorization".into()),
-            fingerprint: None,
-            jwt: Some(Box::new(JwtCredential {
-                header: JwtHeader::default(),
-                claims: JwtClaims {
-                    sub: sub.map(String::from),
-                    ..JwtClaims::default()
-                },
-            })),
-        }
-    }
-
-    #[test]
-    fn protected_resource_metadata__returns_configured_metadata() {
-        let provider = AuthProvider::new(sample_metadata());
-        let m = provider.protected_resource_metadata();
-        assert_eq!(m.resource, "http://localhost:3000");
-        assert_eq!(m.authorization_servers, vec!["https://auth.example.com"]);
-    }
-
-    #[test]
-    fn user_id__extracts_jwt_sub() {
-        let provider = AuthProvider::new(sample_metadata());
-        let user = provider.user_id(&auth_with_jwt_sub(Some("alice@example.com")));
-        assert_eq!(user.as_deref(), Some("alice@example.com"));
-    }
-
-    #[test]
-    fn user_id__none_when_jwt_has_no_sub() {
-        let provider = AuthProvider::new(sample_metadata());
-        let user = provider.user_id(&auth_with_jwt_sub(None));
-        assert!(user.is_none());
-    }
-
-    #[test]
-    fn user_id__none_when_no_jwt() {
-        let provider = AuthProvider::new(sample_metadata());
-        let user = provider.user_id(&AuthRequest::default());
-        assert!(user.is_none());
-    }
-
-    #[test]
-    fn user_id__none_for_non_bearer_scheme() {
-        let provider = AuthProvider::new(sample_metadata());
-        let auth = AuthRequest {
-            scheme: Some("Token".into()),
-            ..AuthRequest::default()
-        };
-        let user = provider.user_id(&auth);
-        assert!(user.is_none());
     }
 }

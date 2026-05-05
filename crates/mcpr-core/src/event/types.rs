@@ -14,7 +14,7 @@ use axum::http::{
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 
-use crate::auth::{AuthRequest, WwwAuthenticateChallenge};
+use crate::auth::{AuthRequest, OAuthEndpoint, WwwAuthenticateChallenge};
 use crate::event::openai::OpenAiClientContext;
 use crate::protocol::{
     Request, Response,
@@ -31,6 +31,14 @@ use crate::protocol::{
 pub enum LoggedRequest {
     Mcp(RequestParts, JsonRpcRequest),
     McpBatch(RequestParts, Vec<JsonRpcRequest>),
+    /// Inbound HTTP that hit a recognised OAuth path. Same shape as
+    /// `Http` plus the endpoint label for downstream filtering.
+    OAuth {
+        endpoint: OAuthEndpoint,
+        method: Method,
+        uri: Uri,
+        body_size: usize,
+    },
     Http {
         method: Method,
         uri: Uri,
@@ -43,6 +51,12 @@ impl From<&Request> for LoggedRequest {
         match req {
             Request::Mcp(parts, rpc) => Self::Mcp(parts.clone(), rpc.clone()),
             Request::McpBatch(parts, rpcs) => Self::McpBatch(parts.clone(), rpcs.clone()),
+            Request::OAuth(oauth) => Self::OAuth {
+                endpoint: oauth.endpoint,
+                method: oauth.http.method().clone(),
+                uri: oauth.http.uri().clone(),
+                body_size: oauth.http.body().len(),
+            },
             Request::Http(http) => Self::Http {
                 method: http.method().clone(),
                 uri: http.uri().clone(),

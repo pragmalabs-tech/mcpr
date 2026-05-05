@@ -158,7 +158,7 @@ fn extract_session_id(req: &LoggedRequest, resp: Option<&LoggedResponse>) -> Opt
     let from_req = match req {
         LoggedRequest::Mcp(parts, _) => session_id_from_headers(&parts.headers),
         LoggedRequest::McpBatch(parts, _) => session_id_from_headers(&parts.headers),
-        LoggedRequest::Http { .. } => None,
+        LoggedRequest::OAuth { .. } | LoggedRequest::Http { .. } => None,
     };
     if from_req.is_some() {
         return from_req;
@@ -174,6 +174,18 @@ fn format_request(req: &LoggedRequest) -> Value {
     match req {
         LoggedRequest::Mcp(_, rpc) => json!({"kind": "mcp", "rpc": rpc}),
         LoggedRequest::McpBatch(_, rpcs) => json!({"kind": "mcp_batch", "rpcs": rpcs}),
+        LoggedRequest::OAuth {
+            endpoint,
+            method,
+            uri,
+            body_size,
+        } => json!({
+            "kind": "oauth",
+            "endpoint": endpoint,
+            "method": method.as_str(),
+            "path": uri.path(),
+            "size": body_size,
+        }),
         LoggedRequest::Http {
             method,
             uri,

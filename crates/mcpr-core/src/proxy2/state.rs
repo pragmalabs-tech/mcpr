@@ -12,14 +12,14 @@ pub struct InnerProxyState {
     /// OAuth 2.1 provider. `None` when the proxy is running without
     /// `[auth]` configured; in that case the discovery route is not
     /// mounted and the proxy stays auth-transparent.
-    pub auth_provider: Option<Arc<AuthProvider>>,
+    pub auth_provider: Option<Arc<dyn AuthProvider>>,
 }
 
 impl InnerProxyState {
     pub fn new(
         event_bus: EventBus,
         sessions: SessionStore,
-        auth_provider: Option<Arc<AuthProvider>>,
+        auth_provider: Option<Arc<dyn AuthProvider>>,
     ) -> Self {
         Self {
             event_bus,

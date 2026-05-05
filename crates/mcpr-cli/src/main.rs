@@ -137,7 +137,7 @@ async fn run_gateway_inner(cfg: GatewayConfig) {
     let event_bus_handler = event_manager.start();
     let event_bus = event_bus_handler.bus.clone();
 
-    let app = match mcpr_core::proxy2::build_app(proxy_cfg, event_bus.clone()) {
+    let app = match mcpr_core::proxy2::build_app(proxy_cfg, event_bus.clone()).await {
         Ok(a) => a,
         Err(e) => {
             eprintln!("error: failed to build proxy app: {e}");

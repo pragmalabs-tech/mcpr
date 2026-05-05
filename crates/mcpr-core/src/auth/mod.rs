@@ -2,25 +2,25 @@
 //!
 //! - [`types`]: data model for parsed credentials and RFC 9728 metadata.
 //! - [`parse`]: parsers invoked from the proxy pipeline (observation only).
-//! - [`provider`]: the [`AuthProvider`] runtime view of the configured
-//!   protected resource. Phase 2 turns this into a trait when concrete
-//!   integrations (`JwksProvider`, `Auth0Provider`, `SupabaseProvider`)
-//!   land; v1 has one impl so the abstraction is held back.
-//! - [`discovery`]: HTTP handler that serves the protected-resource
-//!   metadata document at `/.well-known/oauth-protected-resource`.
+//! - [`provider`]: the [`AuthProvider`] trait and [`OAuthResponse`] reply.
+//! - [`provider_static`]: serves operator-supplied metadata.
+//! - [`provider_reflect`]: probes upstream's well-known URL and serves
+//!   the cached metadata.
 //!
-//! Observation only at this layer: nothing validates signatures,
-//! enforces policy, or rewrites traffic.
+//! Phase 2 will add concrete validating providers (`JwksProvider`,
+//! `Auth0Provider`, `SupabaseProvider`) by implementing the same trait.
 
-pub mod discovery;
 pub mod parse;
 pub mod provider;
+pub mod provider_reflect;
+pub mod provider_static;
 pub mod types;
 
-pub use discovery::protected_resource_metadata_handler;
 pub use parse::{parse_request_auth, parse_www_authenticate};
-pub use provider::AuthProvider;
+pub use provider::{AuthProvider, OAuthResponse};
+pub use provider_reflect::{ReflectAuthProvider, discovery_url_for};
+pub use provider_static::StaticAuthProvider;
 pub use types::{
-    Audience, AuthRequest, JwtClaims, JwtCredential, JwtHeader, ProtectedResourceMetadata,
-    WwwAuthenticateChallenge,
+    Audience, AuthRequest, JwtClaims, JwtCredential, JwtHeader, OAuthEndpoint, OAuthRequest,
+    ProtectedResourceMetadata, WwwAuthenticateChallenge,
 };

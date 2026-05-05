@@ -87,7 +87,7 @@ impl OpenAiClientContext {
         match req {
             Request::Mcp(_, rpc) => Self::from_jsonrpc_request(rpc),
             Request::McpBatch(_, rpcs) => rpcs.first().and_then(Self::from_jsonrpc_request),
-            Request::Http(_) => None,
+            Request::OAuth(_) | Request::Http(_) => None,
         }
     }
 }

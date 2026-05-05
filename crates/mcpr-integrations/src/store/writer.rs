@@ -202,7 +202,7 @@ fn write_request(
             }
             Ok(())
         }
-        LoggedRequest::Http { .. } => Ok(()),
+        LoggedRequest::OAuth { .. } | LoggedRequest::Http { .. } => Ok(()),
     }
 }
 

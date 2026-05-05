@@ -24,6 +24,7 @@ use http_body_util::{BodyDataStream, BodyExt, Full, combinators::BoxBody};
 use hyper::Method;
 
 use crate::{
+    auth::{OAuthRequest, OAuthResponse},
     protocol::{
         Request, Response,
         http_request::HttpRequest,
@@ -93,6 +94,7 @@ impl RouterStage {
             Request::McpBatch(parts, reqs) => {
                 handle_mcp_requests(parts, reqs, &state, &self.pool).await
             }
+            Request::OAuth(req) => handle_oauth_request(req, &state, &self.pool).await,
             Request::Http(req) => handle_http_request(req, &state, &self.pool).await,
         }
     }
@@ -285,6 +287,46 @@ fn empty_response_parts() -> ResponseParts {
     axum::http::Response::new(()).into_parts().0
 }
 
+/// Handle a `Request::OAuth` by consulting the configured
+/// [`crate::auth::AuthProvider`]. Provider returns:
+/// - `Serve(json)` -> respond inline with 200 + JSON.
+/// - `NotFound`     -> respond inline with 404.
+/// - `Forward` (or no provider configured) -> behave exactly like
+///   `Request::Http` and forward to upstream.
+async fn handle_oauth_request(
+    req: OAuthRequest,
+    state: &ProxyState,
+    pool: &UpstreamPool,
+) -> anyhow::Result<RouterOutput> {
+    let response = state.auth_provider.as_ref().map(|p| p.handle(&req));
+    match response {
+        Some(OAuthResponse::Serve(body)) => {
+            Ok(RouterOutput::Single(Response::Http(serve_json_200(body))))
+        }
+        Some(OAuthResponse::NotFound) => Ok(RouterOutput::Single(Response::Http(serve_status(
+            axum::http::StatusCode::NOT_FOUND,
+        )))),
+        None | Some(OAuthResponse::Forward) => handle_http_request(req.http, state, pool).await,
+    }
+}
+
+fn serve_json_200(body: serde_json::Value) -> axum::http::Response<Bytes> {
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    let mut resp = axum::http::Response::new(Bytes::from(bytes));
+    *resp.status_mut() = axum::http::StatusCode::OK;
+    resp.headers_mut().insert(
+        CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    resp
+}
+
+fn serve_status(status: axum::http::StatusCode) -> axum::http::Response<Bytes> {
+    let mut resp = axum::http::Response::new(Bytes::new());
+    *resp.status_mut() = status;
+    resp
+}
+
 async fn handle_http_request(
     request: HttpRequest,
     _state: &ProxyState,
@@ -332,7 +374,6 @@ mod tests {
         protocol::mcp::{
             ClientMethod, JsonRpcRequest, JsonRpcResult, JsonRpcVersion, RequestId, ToolsMethod,
         },
-        proxy2::csp::CspConfig,
         proxy2::state::InnerProxyState,
     };
     use axum::{

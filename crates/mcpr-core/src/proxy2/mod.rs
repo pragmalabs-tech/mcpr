@@ -10,12 +10,13 @@ use axum::{
     Router,
     extract::{Request as AxumRequest, State},
     response::{IntoResponse, Response as AxumResponse},
-    routing::{any, get},
+    routing::any,
 };
 use tower_http::cors::CorsLayer;
+use url::Url;
 
 use crate::{
-    auth::{AuthProvider, protected_resource_metadata_handler},
+    auth::{AuthProvider, ReflectAuthProvider, StaticAuthProvider, discovery_url_for},
     env::Environment,
     event::EventBus,
     protocol::{Request, Response, is_event_stream, mcp::JsonRpcResult, sse},
@@ -44,13 +45,13 @@ use futures_util::stream::{BoxStream, StreamExt};
 /// flows: axum → `Request::from_axum` → `StagePipeline::process` → axum
 /// response. The CSP rewrite stage runs after the router so widget metas
 /// in upstream responses are mutated before they reach the client.
-pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<Router> {
+pub async fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<Router> {
     let cors = CorsLayer::permissive();
+
+    let auth_provider = build_auth_provider(&cfg).await;
 
     // Build Stages
     let csp_rewritter = CspRewritter::new(CspRewriteConfig::from_proxy_config(&cfg));
-    let auth_provider: Option<Arc<AuthProvider>> =
-        cfg.auth.as_ref().map(|a| AuthProvider::new(a.metadata()));
     let router_stage = RouterStage::new(cfg)?;
     let request_stages: Vec<Box<dyn RequestStage>> = vec![];
     let response_stages: Vec<Box<dyn ResponseStage>> = vec![
@@ -67,25 +68,50 @@ pub fn build_app(cfg: Arc<ProxyConfig>, event_bus: EventBus) -> anyhow::Result<R
         Arc::new(InnerProxyState::new(
             event_bus,
             SessionStore::new(),
-            auth_provider.clone(),
+            auth_provider,
         )),
     ));
 
-    let mut router: Router = Router::new()
+    // Discovery now flows through the pipeline (classified as
+    // `Request::OAuth` and answered by `RouterStage`), so a single
+    // fallback-only router is enough.
+    Ok(Router::new()
         .fallback(any(handle_request))
-        .with_state(pipeline);
+        .with_state(pipeline)
+        .layer(cors))
+}
 
-    if let Some(provider) = auth_provider {
-        let discovery: Router = Router::new()
-            .route(
-                "/.well-known/oauth-protected-resource",
-                get(protected_resource_metadata_handler),
-            )
-            .with_state(provider);
-        router = router.merge(discovery);
+/// Build the runtime auth provider from `[auth]` config.
+///
+/// - When `authorization_servers` is set, use [`StaticAuthProvider`].
+/// - Otherwise probe upstream's well-known URL and use
+///   [`ReflectAuthProvider`].
+/// - Probe failure (or invalid `mcp` URL) warns and degrades to
+///   `None`; mcpr starts but no discovery is served.
+async fn build_auth_provider(cfg: &ProxyConfig) -> Option<Arc<dyn AuthProvider>> {
+    let auth = cfg.auth.as_ref()?;
+
+    if !auth.authorization_servers.is_empty() {
+        return Some(StaticAuthProvider::new(auth.metadata()) as Arc<dyn AuthProvider>);
     }
 
-    Ok(router.layer(cors))
+    let mcp_url: Url = match cfg.mcp.parse() {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::warn!("auth: invalid mcp URL '{}': {e}", cfg.mcp);
+            return None;
+        }
+    };
+    let url = discovery_url_for(&mcp_url);
+    match ReflectAuthProvider::probe(url.clone()).await {
+        Ok(p) => Some(p as Arc<dyn AuthProvider>),
+        Err(e) => {
+            tracing::warn!(
+                "auth: reflect probe of {url} failed: {e}; discovery will not be served"
+            );
+            None
+        }
+    }
 }
 
 async fn handle_request(
@@ -456,7 +482,6 @@ mod tests {
     // ── handle_request: GET SSE branching ─────────────────────
 
     use crate::event::EventBus;
-    use crate::proxy2::csp::CspConfig;
     use crate::proxy2::stage::router_stage::RouterStage;
     use axum::extract::{Request as AxumRequestExtract, State as AxumState};
     use axum::routing::get as axum_get;
@@ -585,7 +610,7 @@ mod tests {
         // different from the proxy-served discovery route.
         let upstream = spawn_upstream(Router::new()).await;
         let cfg = cfg_with_auth(upstream, Some(sample_auth()));
-        let app = build_app(cfg, EventBus::for_tests()).unwrap();
+        let app = build_app(cfg, EventBus::for_tests()).await.unwrap();
 
         let req = axum::http::Request::builder()
             .method("GET")
@@ -607,7 +632,7 @@ mod tests {
         // (which here returns 404), proving the route is not mounted.
         let upstream = spawn_upstream(Router::new()).await;
         let cfg = cfg_with_auth(upstream, None);
-        let app = build_app(cfg, EventBus::for_tests()).unwrap();
+        let app = build_app(cfg, EventBus::for_tests()).await.unwrap();
 
         let req = axum::http::Request::builder()
             .method("GET")

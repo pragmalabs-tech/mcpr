@@ -119,6 +119,32 @@ fn encode_transaction_envelopes(re: &RequestEvent, server: &str) -> Vec<Value> {
                 })
                 .collect()
         }
+        LoggedRequest::OAuth {
+            endpoint,
+            method,
+            uri,
+            body_size,
+        } => {
+            let (http_status, response_size) = match re.response.as_ref() {
+                Some(LoggedResponse::Http { status, body_size }) => (status.as_u16(), *body_size),
+                _ => (0, 0),
+            };
+            let mut payload = json!({
+                "kind": "oauth",
+                "oauth": { "endpoint": endpoint },
+                "request_id": re.request_id,
+                "session_id": "",
+                "http_method": method.as_str(),
+                "uri": uri.to_string(),
+                "http_status": http_status,
+                "request_size": body_size,
+                "response_size": response_size,
+                "latency_us": re.latency_us,
+                "upstream_us": re.upstream_us,
+            });
+            attach_auth_blocks(&mut payload, re);
+            vec![envelope("request", ts, server, payload)]
+        }
         LoggedRequest::Http {
             method,
             uri,

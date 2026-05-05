@@ -109,7 +109,6 @@ fn build_client(upstream: &UpstreamConfig) -> anyhow::Result<ProxyClient> {
 #[allow(non_snake_case)]
 mod tests {
     use super::*;
-    use crate::proxy2::csp::CspConfig;
 
     fn proxy_cfg() -> Arc<ProxyConfig> {
         Arc::new(ProxyConfig::for_tests("http://localhost:9000"))
