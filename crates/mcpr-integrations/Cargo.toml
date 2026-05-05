@@ -19,7 +19,7 @@ colored = "3"
 
 # SQLite with bundled feature — compiles SQLite from C source into the binary.
 # Zero system dependencies: no libsqlite3 required on the host.
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # Platform-specific default paths (XDG on Linux, ~/Library on macOS, %APPDATA% on Windows).
 dirs = "6"
