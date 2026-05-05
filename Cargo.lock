@@ -1237,7 +1237,9 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp-tunnel-client"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90e87387619cf628a67013f54aa3fc6035223002ba546f03044ca369dd3ff8c9"
 dependencies = [
  "base64",
  "bytes",
