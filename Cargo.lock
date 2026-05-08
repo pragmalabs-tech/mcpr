@@ -159,7 +159,7 @@ dependencies = [
  "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.28.0",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -920,7 +920,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.6",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1260,25 +1260,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
-name = "mcp-tunnel-client"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90e87387619cf628a67013f54aa3fc6035223002ba546f03044ca369dd3ff8c9"
-dependencies = [
- "base64",
- "bytes",
- "colored",
- "dashmap",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.29.0",
- "tokio-util",
-]
-
-[[package]]
 name = "mcpr-core"
 version = "0.5.43"
 dependencies = [
@@ -1347,7 +1328,6 @@ dependencies = [
  "colored",
  "dirs",
  "inquire",
- "mcp-tunnel-client",
  "mcpr-core",
  "mcpr-integrations",
  "mimalloc",
@@ -1766,7 +1746,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.6",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2319,23 +2299,7 @@ dependencies = [
  "futures-util",
  "log",
  "tokio",
- "tungstenite 0.28.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "rustls",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
- "tungstenite 0.29.0",
- "webpki-roots 0.26.11",
+ "tungstenite",
 ]
 
 [[package]]
@@ -2522,24 +2486,6 @@ dependencies = [
  "sha1",
  "thiserror",
  "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand",
- "rustls",
- "rustls-pki-types",
- "sha1",
- "thiserror",
 ]
 
 [[package]]
@@ -2794,15 +2740,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.6",
 ]
 
 [[package]]

@@ -155,58 +155,10 @@ async fn run_gateway_inner(cfg: GatewayConfig) {
     };
     let actual_port = listener.local_addr().unwrap().port();
 
-    let tunnel_status = Arc::new(std::sync::RwLock::new("disabled".to_string()));
-    let public_url = if cfg.tunnel {
-        let relay_url = cfg
-            .relay_url
-            .as_deref()
-            .unwrap_or("https://tunnel.mcpr.app");
-
-        let token = match cfg.tunnel_token.as_deref() {
-            Some(t) => t,
-            None => {
-                eprintln!(
-                    "  {}: tunnel.enabled = true but no tunnel.token configured. \
-                     Register at https://mcpr.app to get one, then set tunnel.token in mcpr.toml.",
-                    colored::Colorize::red("error"),
-                );
-                std::process::exit(1);
-            }
-        };
-
-        *tunnel_status.write().unwrap() = "disconnected".to_string();
-        match mcp_tunnel_client::start_tunnel_client(
-            actual_port,
-            relay_url,
-            token,
-            cfg.tunnel_subdomain.as_deref(),
-            StderrTunnelStatus {
-                status: tunnel_status.clone(),
-            },
-        )
-        .await
-        {
-            Ok(url) => Some(url),
-            Err(e) => {
-                eprintln!(
-                    "  {}: failed to connect to relay: {e}",
-                    colored::Colorize::red("error"),
-                );
-                eprintln!("  hint: set tunnel.enabled = false in mcpr.toml to use proxy-only mode");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        None
-    };
-
     eprintln!(
         "  {} mcpr proxy running on http://localhost:{actual_port} -> {mcp}",
         colored::Colorize::green("ready"),
     );
-    if let Some(url) = public_url.as_deref() {
-        eprintln!("  {} public URL: {url}", colored::Colorize::green("tunnel"),);
-    }
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -225,8 +177,6 @@ async fn run_gateway_inner(cfg: GatewayConfig) {
         event_bus.clone(),
         mcp.clone(),
         actual_port,
-        public_url.clone(),
-        tunnel_status.clone(),
         shutdown_tx.subscribe(),
     );
 
@@ -258,33 +208,12 @@ async fn run_gateway_inner(cfg: GatewayConfig) {
     eprintln!("[mcpr] Shutdown complete.");
 }
 
-struct StderrTunnelStatus {
-    status: std::sync::Arc<std::sync::RwLock<String>>,
-}
-
-impl mcp_tunnel_client::TunnelStatusCallback for StderrTunnelStatus {
-    fn on_connected(&self, url: &str) {
-        *self.status.write().unwrap() = "connected".to_string();
-        eprintln!("[mcpr] tunnel connected: {url}");
-    }
-    fn on_disconnected(&self) {
-        *self.status.write().unwrap() = "disconnected".to_string();
-        eprintln!("[mcpr] tunnel disconnected");
-    }
-    fn on_evicted(&self) {
-        *self.status.write().unwrap() = "evicted".to_string();
-        eprintln!("[mcpr] tunnel evicted by relay");
-    }
-}
-
 const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn spawn_heartbeat_task(
     bus: EventBus,
     upstream: String,
     export_port: u16,
-    tunnel_address: Option<String>,
-    tunnel_status: std::sync::Arc<std::sync::RwLock<String>>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) {
     tokio::spawn(async move {
@@ -295,11 +224,10 @@ fn spawn_heartbeat_task(
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    let status = tunnel_status.read().unwrap().clone();
                     bus.emit(ProxyEvent::Heartbeat(std::sync::Arc::new(HeartbeatEvent {
                         mcp_status: "running".to_string(),
-                        tunnel_status: status,
-                        tunnel_address: tunnel_address.clone(),
+                        tunnel_status: "disabled".to_string(),
+                        tunnel_address: None,
                         upstream: upstream.clone(),
                         export_port,
                         ts: chrono::Utc::now(),

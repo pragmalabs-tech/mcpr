@@ -45,7 +45,6 @@ hyper-rustls = { version = "0.27", default-features = false, features = ["http1"
 http = "1"
 http-body-util = "0.1"
 bytes = "1"
-mcp-tunnel-client = "0.2.1"
 
 mcpr-core = { path = "crates/mcpr-core", version = "0.5.43" }
 mcpr-integrations = { path = "crates/mcpr-integrations", version = "0.5.43" }
