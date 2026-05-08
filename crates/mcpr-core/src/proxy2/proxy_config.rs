@@ -106,6 +106,13 @@ pub struct FileCspConfig {
     pub resource_domains: Option<FileDirectivePolicy>,
     #[serde(rename = "frameDomains")]
     pub frame_domains: Option<FileDirectivePolicy>,
+    /// MCP Apps spec only (emitted under `_meta.ui.csp.baseUriDomains`).
+    #[serde(rename = "baseUriDomains")]
+    pub base_uri_domains: Option<FileDirectivePolicy>,
+    /// OpenAI Apps SDK only (emitted under
+    /// `_meta.openai/widgetCSP.redirect_domains`).
+    #[serde(rename = "redirectDomains")]
+    pub redirect_domains: Option<FileDirectivePolicy>,
 
     /// Bare public host (no scheme) for this proxy. Feeds the
     /// `openai/widgetDomain` meta field and the proxy-URL CSP injection.
@@ -186,11 +193,21 @@ impl FileCspConfig {
             Some(p) => p.into_policy(CspMode::Replace),
             None => DirectivePolicy::strict(),
         };
+        let base_uri = self
+            .base_uri_domains
+            .map(|p| p.into_policy(CspMode::Extend))
+            .unwrap_or_default();
+        let redirect = self
+            .redirect_domains
+            .map(|p| p.into_policy(CspMode::Extend))
+            .unwrap_or_default();
 
         CspConfig {
             connect_domains: connect,
             resource_domains: resource,
             frame_domains: frame,
+            base_uri_domains: base_uri,
+            redirect_domains: redirect,
             widgets: self.widgets,
             domain: self
                 .domain
@@ -436,6 +453,49 @@ mod tests {
         assert_eq!(cfg.widgets[0].match_pattern, "ui://widget/payment*");
         assert_eq!(cfg.widgets[0].connect_domains, vec!["api.stripe.com"]);
         assert_eq!(cfg.widgets[0].connect_domains_mode, CspMode::Extend);
+    }
+
+    #[test]
+    fn csp_config__base_uri_and_redirect_directives_parse() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+
+            [csp.baseUriDomains]
+            domains = ["cdn.example.com"]
+            mode    = "extend"
+
+            [csp.redirectDomains]
+            domains = ["docs.example.com"]
+            mode    = "replace"
+
+            [[csp.widget]]
+            match               = "ui://widget/payment*"
+            baseUriDomains      = ["base.stripe.com"]
+            baseUriDomainsMode  = "extend"
+            redirectDomains     = ["help.stripe.com"]
+            redirectDomainsMode = "extend"
+        "#;
+        let file: FileProxyConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.csp.into_runtime();
+        assert_eq!(cfg.base_uri_domains.domains, vec!["cdn.example.com"]);
+        assert_eq!(cfg.base_uri_domains.mode, CspMode::Extend);
+        assert_eq!(cfg.redirect_domains.domains, vec!["docs.example.com"]);
+        assert_eq!(cfg.redirect_domains.mode, CspMode::Replace);
+        assert_eq!(cfg.widgets[0].base_uri_domains, vec!["base.stripe.com"]);
+        assert_eq!(cfg.widgets[0].redirect_domains, vec!["help.stripe.com"]);
+    }
+
+    #[test]
+    fn csp_config__base_uri_and_redirect_default_to_empty_extend() {
+        let toml_str = r#"
+            mcp = "http://localhost:9000"
+        "#;
+        let file: FileProxyConfig = toml::from_str(toml_str).unwrap();
+        let cfg = file.csp.into_runtime();
+        assert!(cfg.base_uri_domains.domains.is_empty());
+        assert_eq!(cfg.base_uri_domains.mode, CspMode::Extend);
+        assert!(cfg.redirect_domains.domains.is_empty());
+        assert_eq!(cfg.redirect_domains.mode, CspMode::Extend);
     }
 
     #[test]

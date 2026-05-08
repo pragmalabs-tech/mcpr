@@ -5,13 +5,15 @@
 //!
 //! ## Model
 //!
-//! A widget's CSP has three independent directive arrays:
+//! A widget's CSP has five independent directive arrays:
 //!
-//! - `connectDomains` — allowed targets for `fetch`, `WebSocket`, `EventSource`.
-//! - `resourceDomains` — allowed sources for scripts, styles, images, fonts, media.
-//! - `frameDomains` — allowed sources for nested `<iframe>` content.
+//! - `connectDomains`: allowed targets for `fetch`, `WebSocket`, `EventSource`.
+//! - `resourceDomains`: allowed sources for scripts, styles, images, fonts, media.
+//! - `frameDomains`: allowed sources for nested `<iframe>` content.
+//! - `baseUriDomains`: allowed targets for `<base href>` (MCP Apps spec only).
+//! - `redirectDomains`: allow-list for `window.openai.openExternal` (OpenAI only).
 //!
-//! Each directive carries its own [`DirectivePolicy`] — a list of domains and a
+//! Each directive carries its own [`DirectivePolicy`]: a list of domains and a
 //! [`Mode`] (`extend` or `replace`) that decides how to combine declared domains
 //! with whatever the upstream MCP server already returned.
 //!
@@ -30,10 +32,11 @@
 //! 3. For each widget entry whose `match` glob matches the resource URI, in
 //!    config order, either extend (append) or replace (overwrite) the working
 //!    list with the widget's domains for this directive.
-//! 4. For `connect` and `resource`, prepend the proxy URL and dedupe. `frame`
-//!    does not receive the proxy URL — widgets don't iframe the proxy back into
-//!    themselves, and prepending it would make every widget look like an
-//!    iframe-embedder to hosts that flag that shape for extra review.
+//! 4. For `connect` and `resource`, prepend the proxy URL and dedupe. `frame`,
+//!    `baseUri`, and `redirect` do NOT receive the proxy URL: widgets don't
+//!    iframe the proxy back into themselves, the proxy isn't a `<base href>`
+//!    target, and `openExternal` redirects target user-facing destinations,
+//!    not the proxy.
 //!
 //! Replace semantics are scoped: a global replace only ignores upstream; a
 //! widget replace wipes everything accumulated above it.
@@ -81,12 +84,19 @@ impl std::fmt::Display for Mode {
     }
 }
 
-/// Which of the three CSP directive arrays a policy targets.
+/// Which CSP directive array a policy targets.
+///
+/// `Connect`, `Resource`, and `Frame` are defined by both the MCP Apps spec
+/// and the OpenAI Apps SDK. `BaseUri` is MCP-spec only (`baseUriDomains`).
+/// `Redirect` is OpenAI-only (`redirect_domains`, governs
+/// `window.openai.openExternal` allow-listing).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Directive {
     Connect,
     Resource,
     Frame,
+    BaseUri,
+    Redirect,
 }
 
 /// A domain list paired with a merge mode.
@@ -139,6 +149,16 @@ pub struct WidgetScoped {
     pub frame_domains: Vec<String>,
     #[serde(rename = "frameDomainsMode")]
     pub frame_domains_mode: Mode,
+
+    #[serde(rename = "baseUriDomains")]
+    pub base_uri_domains: Vec<String>,
+    #[serde(rename = "baseUriDomainsMode")]
+    pub base_uri_domains_mode: Mode,
+
+    #[serde(rename = "redirectDomains")]
+    pub redirect_domains: Vec<String>,
+    #[serde(rename = "redirectDomainsMode")]
+    pub redirect_domains_mode: Mode,
 }
 
 impl WidgetScoped {
@@ -148,16 +168,20 @@ impl WidgetScoped {
             Directive::Connect => (&self.connect_domains, self.connect_domains_mode),
             Directive::Resource => (&self.resource_domains, self.resource_domains_mode),
             Directive::Frame => (&self.frame_domains, self.frame_domains_mode),
+            Directive::BaseUri => (&self.base_uri_domains, self.base_uri_domains_mode),
+            Directive::Redirect => (&self.redirect_domains, self.redirect_domains_mode),
         }
     }
 }
 
-/// Complete CSP configuration: three global directives plus widget overrides.
+/// Complete CSP configuration: five global directives plus widget overrides.
 #[derive(Clone, Debug)]
 pub struct CspConfig {
     pub connect_domains: DirectivePolicy,
     pub resource_domains: DirectivePolicy,
     pub frame_domains: DirectivePolicy,
+    pub base_uri_domains: DirectivePolicy,
+    pub redirect_domains: DirectivePolicy,
     pub widgets: Vec<WidgetScoped>,
     /// Bare public host (no scheme) declared by the operator — feeds the
     /// `openai/widgetDomain` meta field and the proxy-URL injection into
@@ -170,14 +194,17 @@ pub struct CspConfig {
 }
 
 impl Default for CspConfig {
-    /// Defaults to permissive extend for connect and resource, and strict
-    /// replace for frame. Frames default strict because nested iframes are
-    /// rare in MCP widgets and the blast radius of an accidental allow is high.
+    /// Defaults to permissive extend for connect, resource, baseUri, and
+    /// redirect, and strict replace for frame. Frames default strict because
+    /// nested iframes are rare in MCP widgets and the blast radius of an
+    /// accidental allow is high.
     fn default() -> Self {
         Self {
             connect_domains: DirectivePolicy::default(),
             resource_domains: DirectivePolicy::default(),
             frame_domains: DirectivePolicy::strict(),
+            base_uri_domains: DirectivePolicy::default(),
+            redirect_domains: DirectivePolicy::default(),
             widgets: Vec::new(),
             domain: None,
         }
@@ -187,10 +214,17 @@ impl Default for CspConfig {
 /// True when `url` is a non-empty origin worth injecting into widget CSP.
 ///
 /// Local addresses (`localhost`, `127.0.0.1`) and empty strings are treated
-/// as "no public origin" — widgets submitted to ChatGPT or Claude can't reach
+/// as "no public origin" - widgets submitted to ChatGPT or Claude can't reach
 /// them, and leaving localhost in the emitted CSP just ships garbage.
 pub(crate) fn is_public_proxy_origin(url: &str) -> bool {
     !url.is_empty() && !url.contains("localhost") && !url.contains("127.0.0.1")
+}
+
+/// True when `uri` identifies an MCP UI widget resource. The MCP Apps spec
+/// requires the `ui://` scheme for widgets; any other scheme (`file://`,
+/// `https://`, etc.) is a regular resource and must not receive widget CSP.
+pub(crate) fn is_ui_resource(uri: &str) -> bool {
+    uri.starts_with("ui://")
 }
 
 impl CspConfig {
@@ -199,6 +233,8 @@ impl CspConfig {
             Directive::Connect => &self.connect_domains,
             Directive::Resource => &self.resource_domains,
             Directive::Frame => &self.frame_domains,
+            Directive::BaseUri => &self.base_uri_domains,
+            Directive::Redirect => &self.redirect_domains,
         }
     }
 }
@@ -212,8 +248,10 @@ impl CspConfig {
 ///   self-references that would leak localhost into the proxied CSP.
 /// - `proxy_url` is prepended for `connect` and `resource` so widgets can
 ///   reach the proxy for API calls and asset loads. It is NOT prepended for
-///   `frame` — widgets don't iframe the proxy back into themselves, and
-///   including it there makes every widget look like an iframe-embedder.
+///   `frame`, `baseUri`, or `redirect`: widgets don't iframe the proxy back
+///   into themselves (frame), the proxy isn't a `<base href>` target
+///   (baseUri), and `openExternal` redirects target user-facing destinations
+///   not the proxy (redirect).
 pub fn effective_domains(
     cfg: &CspConfig,
     directive: Directive,
@@ -262,12 +300,17 @@ pub fn effective_domains(
     }
 
     // 4. Prepend the proxy URL for directives that need to reach the proxy
-    //    itself (API calls, asset loads). Frame is intentionally skipped —
-    //    see module docs. The prepend is also suppressed when `proxy_url`
-    //    is empty or loopback: widgets shipped to ChatGPT/Claude can't reach
-    //    a local dev address, so leaving it in the CSP just pollutes the
-    //    submitted template. Dedupe preserving first-seen order.
-    let mut out = if directive == Directive::Frame || !is_public_proxy_origin(proxy_url) {
+    //    itself (API calls, asset loads). `Frame`, `BaseUri`, and `Redirect`
+    //    are intentionally skipped: see module docs. The prepend is also
+    //    suppressed when `proxy_url` is empty or loopback: widgets shipped to
+    //    ChatGPT/Claude can't reach a local dev address, so leaving it in
+    //    the CSP just pollutes the submitted template. Dedupe preserving
+    //    first-seen order.
+    let mut out = if matches!(
+        directive,
+        Directive::Frame | Directive::BaseUri | Directive::Redirect
+    ) || !is_public_proxy_origin(proxy_url)
+    {
         Vec::new()
     } else {
         vec![proxy_url.to_string()]
@@ -934,5 +977,132 @@ mod tests {
         };
         let out = effective_domains(&cfg, Directive::Connect, None, &[], "", "");
         assert_eq!(out, domains(&["https://api.example.com"]));
+    }
+
+    // ── is_ui_resource ─────────────────────────────────────────────────────
+
+    #[test]
+    fn ui_resource__accepts_ui_scheme() {
+        assert!(is_ui_resource("ui://widget/x"));
+        assert!(is_ui_resource("ui://anything"));
+    }
+
+    #[test]
+    fn ui_resource__rejects_other_schemes() {
+        assert!(!is_ui_resource("file:///foo.txt"));
+        assert!(!is_ui_resource("https://example.com/x"));
+        assert!(!is_ui_resource("http://localhost"));
+        assert!(!is_ui_resource(""));
+        assert!(!is_ui_resource("UI://widget/x")); // case-sensitive per spec
+    }
+
+    // ── effective_domains: BaseUri (MCP-only, no proxy prepend) ────────────
+
+    #[test]
+    fn effective__base_uri_directive_default_is_empty_not_proxy() {
+        let cfg = CspConfig::default();
+        let out = effective_domains(
+            &cfg,
+            Directive::BaseUri,
+            None,
+            &[],
+            "upstream.internal",
+            "https://proxy.example.com",
+        );
+        assert!(out.is_empty(), "expected empty, got {out:?}");
+    }
+
+    #[test]
+    fn effective__base_uri_directive_passes_declared_without_proxy() {
+        let cfg = CspConfig {
+            base_uri_domains: policy(&["https://cdn.example.com"], Mode::Extend),
+            ..CspConfig::default()
+        };
+        let out = effective_domains(
+            &cfg,
+            Directive::BaseUri,
+            None,
+            &[],
+            "upstream.internal",
+            "https://proxy.example.com",
+        );
+        assert_eq!(out, domains(&["https://cdn.example.com"]));
+    }
+
+    #[test]
+    fn effective__base_uri_widget_override_applies() {
+        let cfg = CspConfig {
+            widgets: vec![WidgetScoped {
+                match_pattern: "ui://widget/payment*".into(),
+                base_uri_domains: vec!["https://stripe.example.com".into()],
+                base_uri_domains_mode: Mode::Extend,
+                ..Default::default()
+            }],
+            ..CspConfig::default()
+        };
+        let out = effective_domains(
+            &cfg,
+            Directive::BaseUri,
+            Some("ui://widget/payment-form"),
+            &[],
+            "upstream.internal",
+            "https://proxy.example.com",
+        );
+        assert_eq!(out, domains(&["https://stripe.example.com"]));
+    }
+
+    // ── effective_domains: Redirect (OpenAI-only, no proxy prepend) ────────
+
+    #[test]
+    fn effective__redirect_directive_default_is_empty_not_proxy() {
+        let cfg = CspConfig::default();
+        let out = effective_domains(
+            &cfg,
+            Directive::Redirect,
+            None,
+            &[],
+            "upstream.internal",
+            "https://proxy.example.com",
+        );
+        assert!(out.is_empty(), "expected empty, got {out:?}");
+    }
+
+    #[test]
+    fn effective__redirect_directive_passes_declared_without_proxy() {
+        let cfg = CspConfig {
+            redirect_domains: policy(&["https://docs.example.com"], Mode::Extend),
+            ..CspConfig::default()
+        };
+        let out = effective_domains(
+            &cfg,
+            Directive::Redirect,
+            None,
+            &[],
+            "upstream.internal",
+            "https://proxy.example.com",
+        );
+        assert_eq!(out, domains(&["https://docs.example.com"]));
+    }
+
+    #[test]
+    fn effective__redirect_widget_override_applies() {
+        let cfg = CspConfig {
+            widgets: vec![WidgetScoped {
+                match_pattern: "ui://widget/*".into(),
+                redirect_domains: vec!["https://help.example.com".into()],
+                redirect_domains_mode: Mode::Extend,
+                ..Default::default()
+            }],
+            ..CspConfig::default()
+        };
+        let out = effective_domains(
+            &cfg,
+            Directive::Redirect,
+            Some("ui://widget/x"),
+            &[],
+            "upstream.internal",
+            "https://proxy.example.com",
+        );
+        assert_eq!(out, domains(&["https://help.example.com"]));
     }
 }

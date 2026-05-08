@@ -11,6 +11,22 @@ MCP Apps widgets run in a sandboxed iframe. The host synthesises the iframe CSP 
 
 The proxy solves both by taking a single declarative policy and emitting it to both shapes after merging with whatever the upstream declared.
 
+## Where rewriting happens
+
+Per spec, CSP belongs on the **resource**, not on the tool. The MCP Apps spec places `_meta.ui.csp` on the resource (surfaced via `resources/read`), and the OpenAI Apps SDK puts `_meta.openai/widgetCSP` on `registerResource`. Tools carry only a pointer (`_meta.openai/outputTemplate` or `_meta.ui.resourceUri`), and the host enforces CSP when it loads the widget resource.
+
+The proxy follows the spec and rewrites CSP only on resource responses:
+
+| MCP method | Rewrite target |
+|---|---|
+| `resources/list` | `result.resources[]._meta` |
+| `resources/templates/list` | `result.resourceTemplates[]._meta` |
+| `resources/read` | `result.contents[]._meta` |
+
+Tool responses (`tools/list`, `tools/call`) are not synthesis sites: the proxy never adds CSP fields to them. As a defensive backstop, a deep-scan still adds the proxy origin to any CSP-shaped array a misbehaving upstream put on a tool descriptor or tool result, but no fields are synthesised.
+
+A resource is treated as a widget when its URI uses the spec-mandated `ui://` scheme, or when its `_meta` already declares a widget indicator key. A `file://` or `https://` resource without widget meta passes through untouched - widget CSP only attaches to actual widgets.
+
 ## Minimal config
 
 ```toml
@@ -44,13 +60,17 @@ Only `openai/widgetDomain` is written. `_meta.ui.domain` carries Claude-specific
 
 ## Directives
 
-Three independent directive arrays, each a sub-table:
+Five independent directive arrays, each a sub-table:
 
-| Directive | Controls | Default mode |
-|---|---|---|
-| `connectDomains` | `fetch`, `WebSocket`, `EventSource` | `extend` |
-| `resourceDomains` | scripts, styles, images, fonts, media | `extend` |
-| `frameDomains` | nested `<iframe>` content | `replace` |
+| Directive | Controls | Default mode | Emitted under |
+|---|---|---|---|
+| `connectDomains` | `fetch`, `WebSocket`, `EventSource` | `extend` | `openai/widgetCSP` and `ui.csp` |
+| `resourceDomains` | scripts, styles, images, fonts, media | `extend` | `openai/widgetCSP` and `ui.csp` |
+| `frameDomains` | nested `<iframe>` content | `replace` | `openai/widgetCSP` and `ui.csp` |
+| `baseUriDomains` | allowed targets for `<base href>` | `extend` | `ui.csp` only (MCP Apps spec) |
+| `redirectDomains` | allow-list for `window.openai.openExternal` | `extend` | `openai/widgetCSP` only (OpenAI) |
+
+`baseUriDomains` and `redirectDomains` are emitted only into the shape that defines them. The OpenAI Apps SDK has no `baseUri` field, and the MCP Apps spec has no `redirect` field, so cross-emitting would just inject keys hosts ignore.
 
 Each directive takes two fields:
 
@@ -94,7 +114,7 @@ For each directive, per response:
 
 Replace semantics are scoped: a global replace only ignores upstream; a widget replace wipes everything accumulated before it.
 
-The proxy URL is deliberately **not** prepended to `frame`. Widgets don't iframe the proxy back into themselves, so including it there is dead weight — and it makes every mcpr-proxied widget look like an iframe-embedder to hosts like ChatGPT, which flag that shape for additional security review.
+The proxy URL is deliberately **not** prepended to `frame`, `baseUri`, or `redirect`. Widgets don't iframe the proxy back into themselves (frame), the proxy isn't a `<base href>` target (baseUri), and `openExternal` redirects target user-facing destinations (redirect). Including the proxy URL in any of these would either confuse the host or pollute the submitted template.
 
 ## What the proxy emits
 
@@ -107,13 +127,15 @@ The merged CSP list lands in both shapes on every widget meta. The widget domain
     "openai/widgetCSP": {
       "connect_domains": ["https://proxy.example.com", "https://api.example.com"],
       "resource_domains": [...],
-      "frame_domains": [...]
+      "frame_domains": [...],
+      "redirect_domains": [...]
     },
     "ui": {
       "csp": {
         "connectDomains": ["https://proxy.example.com", "https://api.example.com"],
         "resourceDomains": [...],
-        "frameDomains": [...]
+        "frameDomains": [...],
+        "baseUriDomains": [...]
       }
     }
   }
@@ -122,9 +144,9 @@ The merged CSP list lands in both shapes on every widget meta. The widget domain
 
 Hosts ignore keys they do not understand, so emitting both is safe everywhere.
 
-The proxy URL appears first in `connect_domains` / `connectDomains` and `resource_domains` / `resourceDomains` so widgets can call back to the proxy and load their assets from it. `frame_domains` / `frameDomains` contains only what the operator (and upstream, when not in replace mode) declared.
+The proxy URL appears first in `connect_domains` / `connectDomains` and `resource_domains` / `resourceDomains` so widgets can call back to the proxy and load their assets from it. `frame_domains` / `frameDomains`, `baseUriDomains`, and `redirect_domains` contain only what the operator (and upstream, when not in replace mode) declared.
 
-Non-widget meta (for example, a `tools/call` result with no widget indicators) is left untouched.
+Non-widget meta (for example, a plain `file:///` resource, or a `tools/call` result with no widget indicators) is left untouched.
 
 ## Example — full config
 
@@ -172,6 +194,10 @@ Loads into `connectDomains` and `resourceDomains` with the given mode. `mode = "
 | `[csp.resourceDomains].mode` | `"extend" \| "replace"` | `"extend"` | Merge mode with upstream |
 | `[csp.frameDomains].domains` | `string[]` | `[]` | Domains allowed for nested iframes |
 | `[csp.frameDomains].mode` | `"extend" \| "replace"` | `"replace"` | Merge mode with upstream |
+| `[csp.baseUriDomains].domains` | `string[]` | `[]` | Domains allowed for `<base href>` (MCP Apps spec) |
+| `[csp.baseUriDomains].mode` | `"extend" \| "replace"` | `"extend"` | Merge mode with upstream |
+| `[csp.redirectDomains].domains` | `string[]` | `[]` | Allow-list for `window.openai.openExternal` (OpenAI) |
+| `[csp.redirectDomains].mode` | `"extend" \| "replace"` | `"extend"` | Merge mode with upstream |
 | `[[csp.widget]].match` | `string` | — (required) | URI glob selecting which resources this override applies to |
 | `[[csp.widget]].connectDomains` | `string[]` | `[]` | Override domains for `connect` |
 | `[[csp.widget]].connectDomainsMode` | `"extend" \| "replace"` | `"extend"` | Override mode for `connect` |
@@ -179,3 +205,7 @@ Loads into `connectDomains` and `resourceDomains` with the given mode. `mode = "
 | `[[csp.widget]].resourceDomainsMode` | `"extend" \| "replace"` | `"extend"` | Override mode for `resource` |
 | `[[csp.widget]].frameDomains` | `string[]` | `[]` | Override domains for `frame` |
 | `[[csp.widget]].frameDomainsMode` | `"extend" \| "replace"` | `"extend"` | Override mode for `frame` |
+| `[[csp.widget]].baseUriDomains` | `string[]` | `[]` | Override domains for `baseUri` |
+| `[[csp.widget]].baseUriDomainsMode` | `"extend" \| "replace"` | `"extend"` | Override mode for `baseUri` |
+| `[[csp.widget]].redirectDomains` | `string[]` | `[]` | Override domains for `redirect` |
+| `[[csp.widget]].redirectDomainsMode` | `"extend" \| "replace"` | `"extend"` | Override mode for `redirect` |

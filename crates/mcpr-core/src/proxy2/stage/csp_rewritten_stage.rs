@@ -1,27 +1,38 @@
 //! Response stage that rewrites widget CSP directives in MCP results.
 //!
-//! Dispatch is method-driven via [`RequestContext::client_methods`] —
-//! the originating MCP method, looked up by response id, decides which
-//! rewrite walk applies. Same idiom as
-//! [`super::schema_tracking_stage`].
+//! Dispatch is method-driven via [`RequestContext::client_methods`]: the
+//! originating MCP method, looked up by response id, decides which rewrite
+//! walk applies. Same idiom as [`super::schema_tracking_stage`].
 //!
 //! | Originating method            | Rewrites                              |
 //! |-------------------------------|---------------------------------------|
-//! | `tools/list`                  | `result.tools[]._meta`                |
-//! | `tools/call`                  | `result._meta`                        |
 //! | `resources/list`              | `result.resources[]._meta` (uri)      |
 //! | `resources/templates/list`    | `result.resourceTemplates[]._meta`    |
 //! | `resources/read`              | `result.contents[]._meta` (uri)       |
 //!
+//! Why only `resources/*`: both the MCP Apps spec and the OpenAI Apps SDK
+//! place CSP on the resource itself, not on tool descriptors or tool-call
+//! results. Tools carry a pointer (`openai/outputTemplate` /
+//! `_meta.ui.resourceUri`); the CSP that the host actually enforces lives
+//! on the resource and is read at `resources/read` time.
+//!
+//! Widget detection: an entry is treated as a widget only when its URI
+//! uses the spec-mandated `ui://` scheme (per
+//! [`crate::proxy2::csp::is_ui_resource`]) or its `_meta` already carries
+//! a widget indicator key. A `file://`/`https://` resource without widget
+//! meta passes through untouched.
+//!
 //! After the targeted walk we run [`inject_proxy_into_all_csp`] as a
-//! safety net — it prepends the proxy URL to any CSP-shaped array the
-//! targeted walk missed. This runs for every method we recognise, so
-//! stray nested CSP arrays still get repaired.
+//! safety net: it prepends the proxy URL to any CSP-shaped array the
+//! targeted walk missed (including in `tools/*` results, where misplaced
+//! upstream CSP still benefits from the proxy origin).
 //!
 //! Both CSP shapes are emitted from a single declared config: ChatGPT
 //! reads `openai/widgetCSP` (snake_case) and Claude/VS Code read
-//! `ui.csp` (camelCase). Unknown keys are ignored, so emitting both
-//! means one declaration works on every host.
+//! `ui.csp` (camelCase). `redirect_domains` is OpenAI-only and emitted
+//! only under `openai/widgetCSP`. `baseUriDomains` is MCP-only and
+//! emitted only under `ui.csp`. Unknown keys are ignored, so emitting
+//! both shapes means one declaration works on every host.
 
 use std::sync::Arc;
 
@@ -32,9 +43,11 @@ use serde_json::{Map, Value};
 use crate::{
     protocol::{
         Response,
-        mcp::{ClientMethod, JsonRpcResponse, JsonRpcResult, ResourcesMethod, ToolsMethod},
+        mcp::{ClientMethod, JsonRpcResponse, JsonRpcResult, ResourcesMethod},
     },
-    proxy2::csp::{CspConfig, Directive, effective_domains, is_public_proxy_origin},
+    proxy2::csp::{
+        CspConfig, Directive, effective_domains, is_public_proxy_origin, is_ui_resource,
+    },
     proxy2::{
         proxy_config::ProxyConfig,
         stage::types::{RequestContext, ResponseStage},
@@ -156,18 +169,6 @@ fn rewrite_if_known(
     };
 
     match method {
-        ClientMethod::Tools(ToolsMethod::List) => {
-            for_each_meta_in(result, "tools", |meta| {
-                rewrite_widget_meta(meta, None, config)
-            });
-        }
-        ClientMethod::Tools(ToolsMethod::Call) => {
-            // Only rewrite if upstream actually emitted `_meta` — synthesising
-            // it would pollute non-widget tool results.
-            if let Some(meta) = result.get_mut("_meta") {
-                rewrite_widget_meta(meta, None, config);
-            }
-        }
         ClientMethod::Resources(ResourcesMethod::List) => {
             for_each_uri_keyed(result, "resources", "uri", config);
         }
@@ -177,29 +178,19 @@ fn rewrite_if_known(
         ClientMethod::Resources(ResourcesMethod::Read) => {
             for_each_uri_keyed(result, "contents", "uri", config);
         }
+        ClientMethod::Tools(_) => {
+            // CSP belongs on the resource per both specs (MCP Apps and
+            // OpenAI Apps SDK). Tools carry only a pointer
+            // (`openai/outputTemplate` / `_meta.ui.resourceUri`), not CSP,
+            // so no synthesis happens here. Fall through to the safety net
+            // below so misplaced upstream CSP still gets the proxy origin.
+        }
         _ => return,
     }
 
     // Safety net: any nested CSP array the targeted walks missed gets
     // the proxy URL prepended.
     let _ = inject_proxy_into_all_csp(result, config);
-}
-
-/// Walk `result[array_key][]._meta` (existing entries only) and apply
-/// `f` to each. Used for shapes where every entry is already an object
-/// with its own `_meta` site (e.g. `tools/list`).
-fn for_each_meta_in<F>(result: &mut Value, array_key: &str, mut f: F)
-where
-    F: FnMut(&mut Value),
-{
-    let Some(items) = result.get_mut(array_key).and_then(|v| v.as_array_mut()) else {
-        return;
-    };
-    for item in items {
-        if let Some(meta) = item.get_mut("_meta") {
-            f(meta);
-        }
-    }
 }
 
 /// Walk `result[array_key][]` and rewrite each entry's `_meta`,
@@ -221,15 +212,19 @@ fn for_each_uri_keyed(
 }
 
 /// Synthesise `_meta` when the URI alone marks a container as a widget
-/// resource — under-declaring upstream servers are common, and without this
-/// declared CSP would silently never apply.
+/// resource (the spec-mandated `ui://` scheme), or when upstream already
+/// declared a `_meta` we should rewrite. Non-widget resources (`file://`,
+/// `https://`) without existing `_meta` pass through untouched: under-
+/// declaring is common but the spec is clear that widgets use `ui://`,
+/// and synthesising widget CSP onto plain resources misrepresents them.
 fn rewrite_uri_keyed_meta(container: &mut Value, uri_key: &str, config: &CspRewriteConfig) {
     let uri = container
         .get(uri_key)
         .and_then(|v| v.as_str())
         .map(String::from);
     let has_existing_meta = container.get("_meta").is_some();
-    if (uri.is_some() || has_existing_meta)
+    let is_widget_uri = uri.as_deref().is_some_and(is_ui_resource);
+    if (is_widget_uri || has_existing_meta)
         && let Some(meta) = ensure_meta(container)
     {
         rewrite_widget_meta(meta, uri.as_deref(), config);
@@ -264,15 +259,26 @@ fn rewrite_widget_meta(meta: &mut Value, explicit_uri: Option<&str>, config: &Cs
     let connect = merged_domains(meta, Directive::Connect, uri, &upstream_host, config);
     let resource = merged_domains(meta, Directive::Resource, uri, &upstream_host, config);
     let frame = merged_domains(meta, Directive::Frame, uri, &upstream_host, config);
+    let base_uri = merged_domains(meta, Directive::BaseUri, uri, &upstream_host, config);
+    let redirect = merged_domains(meta, Directive::Redirect, uri, &upstream_host, config);
 
-    write_openai_csp(meta, &connect, &resource, &frame);
-    write_spec_csp(meta, &connect, &resource, &frame);
+    write_openai_csp(meta, &connect, &resource, &frame, &redirect);
+    write_spec_csp(meta, &connect, &resource, &frame, &base_uri);
 
     let _ = inject_proxy_into_all_csp(meta, config);
 }
 
+/// True when the meta belongs to a widget. Two valid signals:
+///
+/// 1. The accompanying URI uses the spec-mandated `ui://` scheme. A
+///    `file://` or `https://` URI is a regular resource and must not be
+///    promoted to widget just because it has a URI.
+/// 2. The meta itself already carries a widget indicator key. This handles
+///    upstreams that put widget meta on non-`ui://` URIs and also covers
+///    tool descriptors with `openai/outputTemplate` (only used by the
+///    `tools/*` deep-scan path now).
 fn is_widget_meta(meta: &Value, explicit_uri: Option<&str>) -> bool {
-    if explicit_uri.is_some() {
+    if explicit_uri.is_some_and(is_ui_resource) {
         return true;
     }
     meta.get("openai/widgetCSP").is_some()
@@ -310,14 +316,17 @@ fn merged_domains(
     )
 }
 
-/// Union of upstream-declared domains across both CSP shapes — a server that
+/// Union of upstream-declared domains across both CSP shapes. A server that
 /// only declared `ui.csp` still informs the merge for `openai/widgetCSP`
-/// output and vice versa.
+/// output and vice versa. `BaseUri` is MCP-only (no key under
+/// `openai/widgetCSP`); `Redirect` is OpenAI-only (no key under `ui.csp`).
 fn collect_upstream(meta: &Value, directive: Directive) -> Vec<String> {
     let (openai_key, spec_key) = match directive {
-        Directive::Connect => ("connect_domains", "connectDomains"),
-        Directive::Resource => ("resource_domains", "resourceDomains"),
-        Directive::Frame => ("frame_domains", "frameDomains"),
+        Directive::Connect => (Some("connect_domains"), Some("connectDomains")),
+        Directive::Resource => (Some("resource_domains"), Some("resourceDomains")),
+        Directive::Frame => (Some("frame_domains"), Some("frameDomains")),
+        Directive::BaseUri => (None, Some("baseUriDomains")),
+        Directive::Redirect => (Some("redirect_domains"), None),
     };
 
     let mut out: Vec<String> = Vec::new();
@@ -332,17 +341,19 @@ fn collect_upstream(meta: &Value, directive: Directive) -> Vec<String> {
         }
     };
 
-    if let Some(arr) = meta
-        .get("openai/widgetCSP")
-        .and_then(|c| c.get(openai_key))
-        .and_then(|v| v.as_array())
+    if let Some(key) = openai_key
+        && let Some(arr) = meta
+            .get("openai/widgetCSP")
+            .and_then(|c| c.get(key))
+            .and_then(|v| v.as_array())
     {
         append(arr);
     }
-    if let Some(arr) = meta
-        .pointer("/ui/csp")
-        .and_then(|c| c.get(spec_key))
-        .and_then(|v| v.as_array())
+    if let Some(key) = spec_key
+        && let Some(arr) = meta
+            .pointer("/ui/csp")
+            .and_then(|c| c.get(key))
+            .and_then(|v| v.as_array())
     {
         append(arr);
     }
@@ -359,7 +370,13 @@ fn write_widget_domain(meta: &mut Value, domain: &str) {
     );
 }
 
-fn write_openai_csp(meta: &mut Value, connect: &[String], resource: &[String], frame: &[String]) {
+fn write_openai_csp(
+    meta: &mut Value,
+    connect: &[String],
+    resource: &[String],
+    frame: &[String],
+    redirect: &[String],
+) {
     let Some(obj) = meta.as_object_mut() else {
         return;
     };
@@ -369,11 +386,18 @@ fn write_openai_csp(meta: &mut Value, connect: &[String], resource: &[String], f
             "connect_domains": connect,
             "resource_domains": resource,
             "frame_domains": frame,
+            "redirect_domains": redirect,
         }),
     );
 }
 
-fn write_spec_csp(meta: &mut Value, connect: &[String], resource: &[String], frame: &[String]) {
+fn write_spec_csp(
+    meta: &mut Value,
+    connect: &[String],
+    resource: &[String],
+    frame: &[String],
+    base_uri: &[String],
+) {
     let Some(obj) = meta.as_object_mut() else {
         return;
     };
@@ -390,6 +414,7 @@ fn write_spec_csp(meta: &mut Value, connect: &[String], resource: &[String], fra
             "connectDomains": connect,
             "resourceDomains": resource,
             "frameDomains": frame,
+            "baseUriDomains": base_uri,
         }),
     );
 }
@@ -460,6 +485,7 @@ mod tests {
     use crate::{
         protocol::mcp::{
             JsonRpcError, JsonRpcErrorResponse, JsonRpcResponse, JsonRpcVersion, RequestId,
+            ToolsMethod,
         },
         proxy2::{
             csp::{CspConfig, DirectivePolicy, Mode, WidgetScoped},
@@ -534,13 +560,13 @@ mod tests {
         ctx_for(ClientMethod::Resources(ResourcesMethod::Read))
     }
 
-    /// Context for a batch where every id maps to `tools/list`.
-    fn tools_list_batch_ctx(ids: &[i64]) -> RequestContext {
+    /// Context for a batch where every id maps to `resources/list`.
+    fn resources_list_batch_ctx(ids: &[i64]) -> RequestContext {
         let mut m = std::collections::HashMap::new();
         for id in ids {
             m.insert(
                 RequestId::Number(*id),
-                ClientMethod::Tools(ToolsMethod::List),
+                ClientMethod::Resources(ResourcesMethod::List),
             );
         }
         RequestContextInner {
@@ -644,7 +670,7 @@ mod tests {
             .body(Bytes::from_static(b"<html/>"))
             .unwrap();
         let out = stage
-            .process(Response::Http(http), tools_list_ctx(), state())
+            .process(Response::Http(http), resources_list_ctx(), state())
             .await
             .unwrap();
         let Response::Http(resp) = out else {
@@ -669,7 +695,7 @@ mod tests {
             }),
         );
         let out = stage
-            .process(resp, tools_list_ctx(), state())
+            .process(resp, resources_list_ctx(), state())
             .await
             .unwrap();
         let Response::Mcp(_, JsonRpcResult::Error(e)) = out else {
@@ -682,7 +708,7 @@ mod tests {
     async fn process__missing_result_is_left_none() {
         let stage = CspRewritter::new(config());
         let out = stage
-            .process(mcp_with_no_result(), tools_list_ctx(), state())
+            .process(mcp_with_no_result(), resources_list_ctx(), state())
             .await
             .unwrap();
         let Response::Mcp(_, JsonRpcResult::Response(r)) = out else {
@@ -691,20 +717,20 @@ mod tests {
         assert!(r.result.is_none());
     }
 
-    // ── tools/list shape ──────────────────────────────────────
+    // ── tools/list and tools/call: no synthesis ──────────────
+    //
+    // Both specs place CSP on the resource, not on tools. The stage no
+    // longer synthesises CSP at these methods; only the deep-scan
+    // safety net runs (and only adds the proxy origin to existing
+    // CSP-shaped arrays).
 
     #[tokio::test]
-    async fn process__tools_list_rewrites_widget_meta() {
+    async fn process__tools_list_no_longer_synthesizes_widget_meta() {
         let stage = CspRewritter::new(config());
         let resp = mcp_with_result(json!({
             "tools": [{
                 "name": "search",
-                "_meta": {
-                    "openai/widgetDomain": "old.example.com",
-                    "openai/widgetCSP": {
-                        "connect_domains": ["http://localhost:9000", "https://api.external.com"]
-                    }
-                }
+                "_meta": { "openai/outputTemplate": "ui://widget/search.html" }
             }]
         }));
 
@@ -713,24 +739,28 @@ mod tests {
             .await
             .unwrap();
         let meta = &extract_result(&out)["tools"][0]["_meta"];
+        // The pointer is preserved verbatim; no CSP keys are synthesised.
         assert_eq!(
-            meta["openai/widgetDomain"].as_str().unwrap(),
-            "proxy.example.com"
+            meta["openai/outputTemplate"].as_str().unwrap(),
+            "ui://widget/search.html"
         );
-        let connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
-        assert!(connect.contains(&"https://proxy.example.com"));
-        assert!(connect.contains(&"https://api.external.com"));
-        assert!(!connect.iter().any(|d| d.contains("localhost")));
+        assert!(meta.get("openai/widgetCSP").is_none());
+        assert!(meta.get("openai/widgetDomain").is_none());
+        assert!(meta.get("ui").is_none());
     }
 
     #[tokio::test]
-    async fn process__tools_list_emits_both_csp_shapes() {
+    async fn process__tools_list_deep_scan_repairs_misplaced_csp() {
+        // Upstream put a CSP-shaped array on the tool descriptor (not
+        // spec-compliant). The deep-scan still prepends the proxy URL so
+        // hosts that mistakenly read CSP from the tool descriptor get a
+        // working setup.
         let stage = CspRewritter::new(config());
         let resp = mcp_with_result(json!({
             "tools": [{
                 "name": "search",
                 "_meta": {
-                    "ui": { "csp": { "connectDomains": ["https://api.spec.com"] } }
+                    "openai/widgetCSP": { "connect_domains": ["https://api.external.com"] }
                 }
             }]
         }));
@@ -739,25 +769,21 @@ mod tests {
             .process(resp, tools_list_ctx(), state())
             .await
             .unwrap();
-        let meta = &extract_result(&out)["tools"][0]["_meta"];
-        let oa = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
-        let spec = as_strs(&meta["ui"]["csp"]["connectDomains"]);
-        assert_eq!(oa, spec);
-        assert!(oa.contains(&"https://api.spec.com"));
-        assert!(oa.contains(&"https://proxy.example.com"));
+        let connect = as_strs(
+            &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
+        );
+        assert_eq!(
+            connect,
+            vec!["https://proxy.example.com", "https://api.external.com"]
+        );
     }
 
-    // ── tools/call shape ──────────────────────────────────────
-
     #[tokio::test]
-    async fn process__tools_call_rewrites_top_level_widget_meta() {
+    async fn process__tools_call_no_longer_synthesizes_widget_meta() {
         let stage = CspRewritter::new(config());
         let resp = mcp_with_result(json!({
             "content": [{"type": "text", "text": "result"}],
-            "_meta": {
-                "openai/widgetDomain": "old.example.com",
-                "openai/widgetCSP": { "connect_domains": ["http://localhost:9000"] }
-            }
+            "_meta": { "openai/outputTemplate": "ui://widget/result.html" }
         }));
 
         let out = stage
@@ -766,11 +792,12 @@ mod tests {
             .unwrap();
         let meta = &extract_result(&out)["_meta"];
         assert_eq!(
-            meta["openai/widgetDomain"].as_str().unwrap(),
-            "proxy.example.com"
+            meta["openai/outputTemplate"].as_str().unwrap(),
+            "ui://widget/result.html"
         );
-        let connect = as_strs(&meta["openai/widgetCSP"]["connect_domains"]);
-        assert!(!connect.iter().any(|d| d.contains("localhost")));
+        assert!(meta.get("openai/widgetCSP").is_none());
+        assert!(meta.get("openai/widgetDomain").is_none());
+        assert!(meta.get("ui").is_none());
     }
 
     #[tokio::test]
@@ -869,6 +896,50 @@ mod tests {
         assert!(extract_result(&out)["resources"][0].get("_meta").is_none());
     }
 
+    #[tokio::test]
+    async fn process__resources_list_skips_non_ui_uri() {
+        // A non-`ui://` resource is not a widget per spec. The stage must
+        // not synthesise widget meta for it, even when it has a URI.
+        let stage = CspRewritter::new(config());
+        let resp = mcp_with_result(json!({
+            "resources": [
+                { "uri": "file:///foo.txt", "name": "Plain text" },
+                { "uri": "https://example.com/data.json", "name": "JSON resource" }
+            ]
+        }));
+
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
+        let result = extract_result(&out);
+        assert!(result["resources"][0].get("_meta").is_none());
+        assert!(result["resources"][1].get("_meta").is_none());
+    }
+
+    #[tokio::test]
+    async fn process__resources_list_rewrites_non_ui_uri_when_meta_declares_widget() {
+        // Upstreams sometimes host widgets at non-`ui://` URIs. When the
+        // resource's `_meta` already declares widget CSP, honor the
+        // declaration even though the URI scheme is not `ui://`.
+        let stage = CspRewritter::new(config());
+        let resp = mcp_with_result(json!({
+            "resources": [{
+                "uri": "https://widgets.example.com/search.html",
+                "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
+            }]
+        }));
+
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
+        let connect = as_strs(
+            &extract_result(&out)["resources"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
+        );
+        assert!(connect.contains(&"https://proxy.example.com"));
+    }
+
     // ── resources/templates/list shape ───────────────────────
 
     #[tokio::test]
@@ -921,6 +992,28 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn process__resources_read_skips_non_ui_uri() {
+        // A `https://` content is a regular resource. No widget meta gets
+        // synthesised, even when the host requested it via `resources/read`.
+        let stage = CspRewritter::new(config());
+        let resp = mcp_with_result(json!({
+            "contents": [{
+                "uri": "https://example.com/data.json",
+                "mimeType": "application/json",
+                "text": "{\"k\":1}"
+            }]
+        }));
+
+        let out = stage
+            .process(resp, resources_read_ctx(), state())
+            .await
+            .unwrap();
+        let entry = &extract_result(&out)["contents"][0];
+        assert!(entry.get("_meta").is_none());
+        assert_eq!(entry["text"].as_str().unwrap(), "{\"k\":1}");
+    }
+
     // ── Frame directive ──────────────────────────────────────
 
     #[tokio::test]
@@ -932,20 +1025,151 @@ mod tests {
         };
         let stage = CspRewritter::new(cfg);
         let resp = mcp_with_result(json!({
-            "tools": [{
-                "name": "x",
+            "resources": [{
+                "uri": "ui://widget/x",
                 "_meta": { "openai/widgetCSP": { "frame_domains": [] } }
             }]
         }));
 
         let out = stage
-            .process(resp, tools_list_ctx(), state())
+            .process(resp, resources_list_ctx(), state())
             .await
             .unwrap();
         let frames = as_strs(
-            &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["frame_domains"],
+            &extract_result(&out)["resources"][0]["_meta"]["openai/widgetCSP"]["frame_domains"],
         );
         assert_eq!(frames, vec!["https://embed.partner.com"]);
+    }
+
+    // ── baseUriDomains (MCP-only) ────────────────────────────
+
+    #[tokio::test]
+    async fn process__base_uri_domains_round_trip() {
+        // Upstream-declared baseUriDomains survive the merge and emit
+        // under `_meta.ui.csp.baseUriDomains` only. The OpenAI shape has no
+        // equivalent field, so `openai/widgetCSP` must NOT carry one.
+        let stage = CspRewritter::new(config());
+        let resp = mcp_with_result(json!({
+            "resources": [{
+                "uri": "ui://widget/x",
+                "_meta": {
+                    "ui": { "csp": { "baseUriDomains": ["https://cdn.example.com"] } }
+                }
+            }]
+        }));
+
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
+        let meta = &extract_result(&out)["resources"][0]["_meta"];
+        let base = as_strs(&meta["ui"]["csp"]["baseUriDomains"]);
+        assert_eq!(base, vec!["https://cdn.example.com"]);
+        // Proxy URL is NOT prepended for baseUri.
+        assert!(!base.iter().any(|d| d.contains("proxy.example.com")));
+        // OpenAI shape has no baseUriDomains field.
+        assert!(meta["openai/widgetCSP"].get("base_uri_domains").is_none());
+        assert!(meta["openai/widgetCSP"].get("baseUriDomains").is_none());
+    }
+
+    #[tokio::test]
+    async fn process__operator_base_uri_extends_upstream() {
+        let mut cfg = config();
+        cfg.csp.base_uri_domains = DirectivePolicy {
+            domains: vec!["https://operator.example.com".into()],
+            mode: Mode::Extend,
+        };
+        let stage = CspRewritter::new(cfg);
+        let resp = mcp_with_result(json!({
+            "resources": [{
+                "uri": "ui://widget/x",
+                "_meta": {
+                    "ui": { "csp": { "baseUriDomains": ["https://upstream.example.com"] } }
+                }
+            }]
+        }));
+
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
+        let base =
+            as_strs(&extract_result(&out)["resources"][0]["_meta"]["ui"]["csp"]["baseUriDomains"]);
+        assert_eq!(
+            base,
+            vec![
+                "https://upstream.example.com",
+                "https://operator.example.com"
+            ]
+        );
+    }
+
+    // ── redirect_domains (OpenAI-only) ───────────────────────
+
+    #[tokio::test]
+    async fn process__redirect_domains_round_trip() {
+        // Upstream-declared redirect_domains survive the merge and emit
+        // under `_meta.openai/widgetCSP.redirect_domains` only. The MCP
+        // spec shape has no equivalent, so `ui.csp` must NOT carry one.
+        let stage = CspRewritter::new(config());
+        let resp = mcp_with_result(json!({
+            "resources": [{
+                "uri": "ui://widget/x",
+                "_meta": {
+                    "openai/widgetCSP": {
+                        "redirect_domains": ["https://docs.example.com"]
+                    }
+                }
+            }]
+        }));
+
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
+        let meta = &extract_result(&out)["resources"][0]["_meta"];
+        let redir = as_strs(&meta["openai/widgetCSP"]["redirect_domains"]);
+        assert_eq!(redir, vec!["https://docs.example.com"]);
+        // Proxy URL is NOT prepended for redirect.
+        assert!(!redir.iter().any(|d| d.contains("proxy.example.com")));
+        // MCP spec shape has no redirectDomains field.
+        assert!(meta["ui"]["csp"].get("redirectDomains").is_none());
+        assert!(meta["ui"]["csp"].get("redirect_domains").is_none());
+    }
+
+    #[tokio::test]
+    async fn process__operator_redirect_extends_upstream() {
+        let mut cfg = config();
+        cfg.csp.redirect_domains = DirectivePolicy {
+            domains: vec!["https://operator.example.com".into()],
+            mode: Mode::Extend,
+        };
+        let stage = CspRewritter::new(cfg);
+        let resp = mcp_with_result(json!({
+            "resources": [{
+                "uri": "ui://widget/x",
+                "_meta": {
+                    "openai/widgetCSP": {
+                        "redirect_domains": ["https://upstream.example.com"]
+                    }
+                }
+            }]
+        }));
+
+        let out = stage
+            .process(resp, resources_list_ctx(), state())
+            .await
+            .unwrap();
+        let redir = as_strs(
+            &extract_result(&out)["resources"][0]["_meta"]["openai/widgetCSP"]["redirect_domains"],
+        );
+        assert_eq!(
+            redir,
+            vec![
+                "https://upstream.example.com",
+                "https://operator.example.com"
+            ]
+        );
     }
 
     // ── Local-only mode ──────────────────────────────────────
@@ -982,8 +1206,8 @@ mod tests {
                 jsonrpc: JsonRpcVersion,
                 id: RequestId::Number(id),
                 result: Some(json!({
-                    "tools": [{
-                        "name": "t",
+                    "resources": [{
+                        "uri": "ui://widget/x",
                         "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
                     }]
                 })),
@@ -992,7 +1216,7 @@ mod tests {
         let resp = Response::McpBatch(empty_response_parts(), vec![make(1), make(2)]);
 
         let out = stage
-            .process(resp, tools_list_batch_ctx(&[1, 2]), state())
+            .process(resp, resources_list_batch_ctx(&[1, 2]), state())
             .await
             .unwrap();
         let Response::McpBatch(_, items) = out else {
@@ -1004,7 +1228,7 @@ mod tests {
                 panic!("expected Response");
             };
             let connect = as_strs(
-                &r.result.as_ref().unwrap()["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
+                &r.result.as_ref().unwrap()["resources"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
             );
             assert!(connect.contains(&"https://proxy.example.com"));
         }
@@ -1017,7 +1241,10 @@ mod tests {
             jsonrpc: JsonRpcVersion,
             id: RequestId::Number(1),
             result: Some(json!({
-                "tools": [{ "name": "t", "_meta": { "openai/widgetCSP": { "connect_domains": [] } } }]
+                "resources": [{
+                    "uri": "ui://widget/x",
+                    "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
+                }]
             })),
         });
         let err = JsonRpcResult::Error(JsonRpcErrorResponse {
@@ -1032,7 +1259,7 @@ mod tests {
         let resp = Response::McpBatch(empty_response_parts(), vec![ok, err]);
 
         let out = stage
-            .process(resp, tools_list_batch_ctx(&[1, 2]), state())
+            .process(resp, resources_list_batch_ctx(&[1, 2]), state())
             .await
             .unwrap();
         let Response::McpBatch(_, items) = out else {
@@ -1055,17 +1282,17 @@ mod tests {
         }));
 
         let resp = mcp_with_result(json!({
-            "tools": [{
-                "name": "x",
+            "resources": [{
+                "uri": "ui://widget/x",
                 "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
             }]
         }));
         let out = stage
-            .process(resp, tools_list_ctx(), state())
+            .process(resp, resources_list_ctx(), state())
             .await
             .unwrap();
         let connect = as_strs(
-            &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
+            &extract_result(&out)["resources"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
         );
         assert!(connect.contains(&"https://v2.example.com"));
         assert!(!connect.iter().any(|d| d.contains("proxy.example.com")));
@@ -1083,17 +1310,17 @@ mod tests {
         }));
 
         let resp = mcp_with_result(json!({
-            "tools": [{
-                "name": "x",
+            "resources": [{
+                "uri": "ui://widget/x",
                 "_meta": { "openai/widgetCSP": { "connect_domains": [] } }
             }]
         }));
         let out = stage
-            .process(resp, tools_list_ctx(), state())
+            .process(resp, resources_list_ctx(), state())
             .await
             .unwrap();
         let connect = as_strs(
-            &extract_result(&out)["tools"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
+            &extract_result(&out)["resources"][0]["_meta"]["openai/widgetCSP"]["connect_domains"],
         );
         assert!(connect.contains(&"https://shared.example.com"));
     }
@@ -1138,5 +1365,32 @@ mod tests {
             .unwrap();
         let frames = as_strs(&extract_result(&out)["tools"][0]["_meta"]["deeply"]["frame_domains"]);
         assert_eq!(frames, vec!["https://embed.partner.com"]);
+    }
+
+    // ── is_widget_meta gate ──────────────────────────────────
+
+    #[test]
+    fn is_widget_meta__ui_uri_is_widget_even_with_empty_meta() {
+        let meta = json!({});
+        assert!(is_widget_meta(&meta, Some("ui://widget/x")));
+    }
+
+    #[test]
+    fn is_widget_meta__non_ui_uri_alone_is_not_widget() {
+        let meta = json!({});
+        assert!(!is_widget_meta(&meta, Some("file:///foo.txt")));
+        assert!(!is_widget_meta(&meta, Some("https://example.com/x.html")));
+    }
+
+    #[test]
+    fn is_widget_meta__widget_meta_keys_promote_non_ui_uri() {
+        let meta = json!({ "openai/widgetCSP": { "connect_domains": [] } });
+        assert!(is_widget_meta(&meta, Some("https://example.com/x.html")));
+    }
+
+    #[test]
+    fn is_widget_meta__plain_meta_with_non_ui_uri_is_not_widget() {
+        let meta = json!({ "requestId": "abc" });
+        assert!(!is_widget_meta(&meta, Some("https://example.com/x.html")));
     }
 }
