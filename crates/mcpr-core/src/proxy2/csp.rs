@@ -163,10 +163,9 @@ pub struct CspConfig {
     /// `openai/widgetDomain` meta field and the proxy-URL injection into
     /// widget CSP. `_meta.ui.domain` is intentionally left untouched: Claude
     /// derives that value from the proxy URL itself and rejects any value
-    /// supplied by an MCP layer. When `None`, the runtime falls back to the
-    /// tunnel URL, and when no public origin is available at all (local-only
-    /// dev) the injection is suppressed rather than polluting widget config
-    /// with `localhost`.
+    /// supplied by an MCP layer. When `None` (e.g. local-only dev) the
+    /// injection is suppressed rather than polluting widget config with
+    /// `localhost`.
     pub domain: Option<String>,
 }
 

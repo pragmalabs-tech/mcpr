@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use base64::Engine;
 use colored::Colorize;
 use inquire::{Confirm, Select, Text};
-use mcpr_integrations::cloud_client::{CloudClient, DEFAULT_CLOUD_URL, Endpoint, Project, Server};
+use mcpr_integrations::cloud_client::{CloudClient, DEFAULT_CLOUD_URL, Project, Server};
 
 const CREATE_NEW: &str = "+ Create new";
 
@@ -173,23 +173,7 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         println!("  {} port {p} is already in use", "✗".red());
     };
 
-    // ── 3. Public tunnel? (login on yes) ───────────────────────────────
-    println!();
-    println!(
-        "  {}",
-        "Test in ChatGPT / Claude / other AI clients, or share with teammates.".dimmed()
-    );
-    println!("  {}", "Docs: https://mcpr.app/tunnels/overview/".dimmed());
-    let enable_tunnel = Confirm::new("Expose this proxy on a public HTTPS URL?")
-        .with_default(false)
-        .prompt()
-        .map_err(|e| format!("prompt error: {e}"))?;
-
-    if enable_tunnel {
-        ensure_authenticated(&mut client, cloud_url, &mut authed).await?;
-    }
-
-    // ── 4. Cloud dashboard? (login on yes, reuse session) ──────────────
+    // ── 3. Cloud dashboard? (login on yes) ─────────────────────────────
     println!();
     println!(
         "  {}",
@@ -208,14 +192,14 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         ensure_authenticated(&mut client, cloud_url, &mut authed).await?;
     }
 
-    // ── 5. Local-only shortcut ─────────────────────────────────────────
-    if !enable_tunnel && !enable_cloud {
+    // ── 4. Local-only shortcut ─────────────────────────────────────────
+    if !enable_cloud {
         let name = default_local_name(&defaults, &mcp_url);
         let config_path = match output {
             Some(explicit) => explicit.to_string(),
             None => next_available_config_path(),
         };
-        let config = build_config(&name, &mcp_url, port, None, None);
+        let config = build_config(&name, &mcp_url, port, None);
         std::fs::write(&config_path, &config)
             .map_err(|e| format!("failed to write {config_path}: {e}"))?;
         println!("\n    {} Saved {}", "✓".green(), config_path);
@@ -225,18 +209,11 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         return Ok(());
     }
 
-    // ── 6. Project + server (needed for both tunnel and cloud) ─────────
+    // ── 5. Project + server (needed for cloud) ─────────────────────────
     let project = select_or_create_project(&client).await?;
     let server = select_or_create_server(&client, &project.id, &defaults).await?;
 
-    // ── 7. Endpoint (tunnel only) ──────────────────────────────────────
-    let endpoint = if enable_tunnel {
-        Some(select_or_create_endpoint(&client, &server).await?)
-    } else {
-        None
-    };
-
-    // ── 8. Create or reuse project token ───────────────────────────────
+    // ── 6. Create or reuse project token ───────────────────────────────
     println!("\n  Setting up...");
 
     let token_value = if let Some(ref existing_token) = defaults.cloud_token
@@ -268,25 +245,17 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
         token.token
     };
 
-    // ── 9. Write config ────────────────────────────────────────────────
+    // ── 7. Write config ────────────────────────────────────────────────
     let config_path = match output {
         Some(explicit) => explicit.to_string(),
         None => next_available_config_path(),
     };
-    let tunnel_cfg = endpoint.as_ref().map(|ep| TunnelCfg {
-        subdomain: &ep.name,
+    let cloud_cfg = Some(CloudCfg {
+        server_slug: &server.slug,
         token: &token_value,
+        cloud_url,
     });
-    let cloud_cfg = if enable_cloud {
-        Some(CloudCfg {
-            server_slug: &server.slug,
-            token: &token_value,
-            cloud_url,
-        })
-    } else {
-        None
-    };
-    let config = build_config(&server.slug, &mcp_url, port, tunnel_cfg, cloud_cfg);
+    let config = build_config(&server.slug, &mcp_url, port, cloud_cfg);
     std::fs::write(&config_path, &config)
         .map_err(|e| format!("failed to write {config_path}: {e}"))?;
     println!("    {} Saved {}", "✓".green(), config_path);
@@ -295,22 +264,12 @@ pub async fn run_setup(cloud_url: &str, output: Option<&str>) -> Result<(), Stri
     println!("\n  {}", "Run your proxy:".bold());
     println!("    mcpr proxy run {config_path}");
 
-    if let Some(ep) = &endpoint {
-        println!(
-            "\n  {} https://{}.tunnel.mcpr.app",
-            "Tunnel URL:".bold(),
-            ep.name
-        );
-    }
-
-    if enable_cloud {
-        println!(
-            "  {} https://cloud.mcpr.app/projects/{}/servers/{}",
-            "Dashboard: ".bold(),
-            project.slug,
-            server.slug
-        );
-    }
+    println!(
+        "  {} https://cloud.mcpr.app/projects/{}/servers/{}",
+        "Dashboard: ".bold(),
+        project.slug,
+        server.slug
+    );
     println!();
 
     Ok(())
@@ -510,69 +469,7 @@ async fn create_server(client: &CloudClient, project_id: &str) -> Result<Server,
         .map_err(|e| format!("failed to create server: {e}"))
 }
 
-// ── Endpoint ───────────────────────────────────────────────────────────
-
-async fn select_or_create_endpoint(
-    client: &CloudClient,
-    server: &Server,
-) -> Result<Endpoint, String> {
-    let endpoints = client
-        .list_endpoints_by_server(&server.id)
-        .await
-        .map_err(|e| format!("failed to list endpoints: {e}"))?;
-
-    if endpoints.is_empty() {
-        return create_endpoint(client, server).await;
-    }
-
-    let mut options: Vec<String> = endpoints
-        .iter()
-        .map(|e| format!("{} ({}.tunnel.mcpr.app)", e.name, e.name))
-        .collect();
-    options.push(CREATE_NEW.to_string());
-
-    let choice = Select::new("Choose endpoint:", options)
-        .prompt()
-        .map_err(|e| format!("prompt error: {e}"))?;
-
-    if choice == CREATE_NEW {
-        create_endpoint(client, server).await
-    } else {
-        // Extract the endpoint name from the display string "name (name.tunnel.mcpr.app)"
-        let ep_name = choice.split(' ').next().unwrap_or(&choice);
-        endpoints
-            .into_iter()
-            .find(|e| e.name == ep_name)
-            .ok_or_else(|| "endpoint not found".into())
-    }
-}
-
-async fn create_endpoint(client: &CloudClient, server: &Server) -> Result<Endpoint, String> {
-    let default_name = server.slug.clone();
-    let name = Text::new("Endpoint subdomain:")
-        .with_default(&default_name)
-        .prompt()
-        .map_err(|e| format!("prompt error: {e}"))?;
-
-    let ep = client
-        .create_endpoint_by_server(&server.id, &name)
-        .await
-        .map_err(|e| format!("failed to create endpoint: {e}"))?;
-
-    println!(
-        "    {} Created endpoint: {}.tunnel.mcpr.app",
-        "✓".green(),
-        ep.name
-    );
-    Ok(ep)
-}
-
 // ── Config generation ──────────────────────────────────────────────────
-
-struct TunnelCfg<'a> {
-    subdomain: &'a str,
-    token: &'a str,
-}
 
 struct CloudCfg<'a> {
     server_slug: &'a str,
@@ -580,26 +477,12 @@ struct CloudCfg<'a> {
     cloud_url: &'a str,
 }
 
-fn build_config(
-    name: &str,
-    mcp_url: &str,
-    port: Option<u16>,
-    tunnel: Option<TunnelCfg>,
-    cloud: Option<CloudCfg>,
-) -> String {
+fn build_config(name: &str, mcp_url: &str, port: Option<u16>, cloud: Option<CloudCfg>) -> String {
     let mut cfg = String::new();
     writeln!(cfg, "name = \"{}\"", name).unwrap();
     writeln!(cfg, "mcp = \"{}\"", mcp_url).unwrap();
     if let Some(p) = port {
         writeln!(cfg, "port = {}", p).unwrap();
-    }
-
-    if let Some(t) = tunnel {
-        writeln!(cfg).unwrap();
-        writeln!(cfg, "[tunnel]").unwrap();
-        writeln!(cfg, "enabled = true").unwrap();
-        writeln!(cfg, "token = \"{}\"", t.token).unwrap();
-        writeln!(cfg, "subdomain = \"{}\"", t.subdomain).unwrap();
     }
 
     if let Some(c) = cloud {
@@ -746,39 +629,10 @@ mod tests {
     // ── build_config ────────────────────────────────────────────────
 
     #[test]
-    fn build_config__tunnel_and_cloud() {
-        let config = build_config(
-            "prod",
-            "http://localhost:8080",
-            None,
-            Some(TunnelCfg {
-                subdomain: "my-app",
-                token: "mcpr_token123",
-            }),
-            Some(CloudCfg {
-                server_slug: "prod",
-                token: "mcpr_token123",
-                cloud_url: DEFAULT_CLOUD_URL,
-            }),
-        );
-        assert!(config.contains("name = \"prod\""));
-        assert!(config.contains("mcp = \"http://localhost:8080\""));
-        assert!(config.contains("[tunnel]"));
-        assert!(config.contains("enabled = true"));
-        assert!(config.contains("token = \"mcpr_token123\""));
-        assert!(config.contains("subdomain = \"my-app\""));
-        assert!(config.contains("[cloud]"));
-        assert!(config.contains("server = \"prod\""));
-        // Default cloud URL should NOT produce an endpoint line
-        assert!(!config.contains("endpoint ="));
-    }
-
-    #[test]
     fn build_config__cloud_only() {
         let config = build_config(
             "dev",
             "http://localhost:3000",
-            None,
             None,
             Some(CloudCfg {
                 server_slug: "dev",
@@ -788,35 +642,16 @@ mod tests {
         );
         assert!(config.contains("name = \"dev\""));
         assert!(config.contains("mcp = \"http://localhost:3000\""));
-        assert!(!config.contains("[tunnel]"));
         assert!(config.contains("[cloud]"));
         assert!(config.contains("token = \"mcpr_abc\""));
     }
 
     #[test]
-    fn build_config__tunnel_only() {
-        let config = build_config(
-            "dev",
-            "http://localhost:3000",
-            None,
-            Some(TunnelCfg {
-                subdomain: "dev",
-                token: "mcpr_abc",
-            }),
-            None,
-        );
-        assert!(config.contains("[tunnel]"));
-        assert!(config.contains("subdomain = \"dev\""));
-        assert!(!config.contains("[cloud]"));
-    }
-
-    #[test]
     fn build_config__local_only() {
-        let config = build_config("local", "http://localhost:3000", Some(4000), None, None);
+        let config = build_config("local", "http://localhost:3000", Some(4000), None);
         assert!(config.contains("name = \"local\""));
         assert!(config.contains("mcp = \"http://localhost:3000\""));
         assert!(config.contains("port = 4000"));
-        assert!(!config.contains("[tunnel]"));
         assert!(!config.contains("[cloud]"));
     }
 
@@ -826,7 +661,6 @@ mod tests {
             "dev",
             "http://localhost:3000",
             Some(8080),
-            None,
             Some(CloudCfg {
                 server_slug: "dev",
                 token: "mcpr_abc",
@@ -843,7 +677,6 @@ mod tests {
             "dev",
             "http://localhost:3000",
             Some(4000),
-            None,
             Some(CloudCfg {
                 server_slug: "dev",
                 token: "mcpr_abc",
@@ -858,7 +691,6 @@ mod tests {
         let config = build_config(
             "dev",
             "http://localhost:3000",
-            None,
             None,
             Some(CloudCfg {
                 server_slug: "dev",

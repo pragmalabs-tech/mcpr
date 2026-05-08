@@ -38,8 +38,7 @@ domain = "widgets.example.com"
 Resolution order:
 
 1. `csp.domain` if set.
-2. Else the tunnel URL (when `[tunnel].enabled = true`).
-3. Else — local-only dev — **no public origin is available**, so the proxy *skips* the CSP injection and leaves any upstream domain field untouched. `localhost` is never written into widget CSP or the domain fields; shipping it to a host would be invalid, and cluttering the local output with it helps no one.
+2. Else — local-only dev — **no public origin is available**, so the proxy *skips* the CSP injection and leaves any upstream domain field untouched. `localhost` is never written into widget CSP or the domain fields; shipping it to a host would be invalid, and cluttering the local output with it helps no one.
 
 Only `openai/widgetDomain` is written. `_meta.ui.domain` carries Claude-specific semantics — Claude derives the expected value (`{sha256(url)[:32]}.claudemcpcontent.com`) from the proxy URL itself and rejects any other value — so the proxy leaves it alone. ChatGPT, which has no equivalent check, still gets the operator-declared host through `openai/widgetDomain`.
 
@@ -166,7 +165,7 @@ Loads into `connectDomains` and `resourceDomains` with the given mode. `mode = "
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `csp.domain` | `string` | — | Bare public host (no scheme). Feeds `openai/widgetDomain` and CSP injection. `_meta.ui.domain` is left to Claude, which derives it from the proxy URL. Falls back to tunnel URL when unset; suppresses injection in local-only mode. |
+| `csp.domain` | `string` | — | Bare public host (no scheme). Feeds `openai/widgetDomain` and CSP injection. `_meta.ui.domain` is left to Claude, which derives it from the proxy URL. When unset (local-only dev), injection is suppressed. |
 | `[csp.connectDomains].domains` | `string[]` | `[]` | Domains allowed for `connect-src` |
 | `[csp.connectDomains].mode` | `"extend" \| "replace"` | `"extend"` | Merge mode with upstream |
 | `[csp.resourceDomains].domains` | `string[]` | `[]` | Domains allowed for scripts, styles, images, fonts, media |

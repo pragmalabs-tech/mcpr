@@ -149,17 +149,6 @@ pub struct RuntimeOptions {
 
 // ── TOML config file ────────────────────────────────────────────────────
 
-/// `[tunnel]` table in config file
-#[derive(serde::Deserialize, Default)]
-#[serde(default)]
-struct FileTunnelConfig {
-    /// Enable tunnel for a public URL. Default: false (proxy-only mode).
-    enabled: bool,
-    relay_url: Option<String>,
-    token: Option<String>,
-    subdomain: Option<String>,
-}
-
 /// `[cloud]` table in config file
 #[derive(serde::Deserialize, Default)]
 #[serde(default)]
@@ -187,9 +176,6 @@ struct FileConfig {
 
     // -- OAuth 2.1 protected resource (RFC 9728) --
     auth: Option<FileAuthConfig>,
-
-    // -- Tunnel client --
-    tunnel: FileTunnelConfig,
 
     // -- Cloud sync --
     cloud: FileCloudConfig,
@@ -273,11 +259,6 @@ pub struct GatewayConfig {
     pub mcp: Option<String>,
     pub port: Option<u16>,
     pub csp: CspConfig,
-    pub relay_url: Option<String>,
-    pub tunnel_token: Option<String>,
-    pub tunnel_subdomain: Option<String>,
-    /// Whether tunnel is enabled. Default: false (proxy-only mode).
-    pub tunnel: bool,
     pub max_request_body_size: Option<usize>,
     pub max_response_body_size: Option<usize>,
     pub max_concurrent_upstream: Option<usize>,
@@ -482,14 +463,6 @@ fn load_gateway(
         mcp: file.mcp,
         port: file.port,
         csp,
-        relay_url: Some(
-            file.tunnel
-                .relay_url
-                .unwrap_or_else(|| "https://tunnel.mcpr.app".to_string()),
-        ),
-        tunnel_token: file.tunnel.token,
-        tunnel_subdomain: file.tunnel.subdomain,
-        tunnel: file.tunnel.enabled,
         max_request_body_size: file.max_request_body_size,
         max_response_body_size: file.max_response_body_size,
         max_concurrent_upstream: file.max_concurrent_upstream,
@@ -617,18 +590,11 @@ mod tests {
             [cloud]
             token = "mcpr_tok"
             server = "prod-1"
-
-            [tunnel]
-            relay_url = "https://tunnel.mcpr.app"
         "#;
         let config: FileConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.cloud.token.as_deref(), Some("mcpr_tok"));
         assert_eq!(config.cloud.server.as_deref(), Some("prod-1"));
         assert_eq!(config.mcp.as_deref(), Some("http://localhost:9000"));
-        assert_eq!(
-            config.tunnel.relay_url.as_deref(),
-            Some("https://tunnel.mcpr.app")
-        );
     }
 
     #[test]

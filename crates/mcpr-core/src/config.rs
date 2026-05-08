@@ -1,6 +1,6 @@
 //! Configuration trait and validation types for mcpr modules.
 //!
-//! Each mcpr module (store, cloud, tunnel, logging, etc.) implements [`ModuleConfig`]
+//! Each mcpr module (store, cloud, logging, etc.) implements [`ModuleConfig`]
 //! on its TOML config section struct. This lets every module own its own defaults,
 //! validation logic, and documentation — while the CLI orchestrates validation by
 //! iterating over all registered modules.
@@ -45,7 +45,7 @@ pub struct ConfigIssue {
     /// Whether this issue prevents startup or is just a warning.
     pub severity: Severity,
 
-    /// Which module reported the issue (e.g., "store", "cloud", "tunnel").
+    /// Which module reported the issue (e.g., "store", "cloud").
     /// Matches the TOML section name so the user knows where to look.
     pub module: &'static str,
 
@@ -109,7 +109,7 @@ impl fmt::Display for ConfigIssue {
 /// let issues: Vec<ConfigIssue> = modules.iter().flat_map(|m| m.validate()).collect();
 /// ```
 pub trait ModuleConfig {
-    /// Module name — must match the TOML section key (e.g., "store", "cloud", "tunnel").
+    /// Module name — must match the TOML section key (e.g., "store", "cloud").
     ///
     /// Used in error messages and logging so the user knows which section
     /// of `mcpr.toml` to fix.

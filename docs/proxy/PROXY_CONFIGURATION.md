@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`mcpr.toml` is the single source of truth for **how the proxy behaves** - where to route traffic, how to handle CSP, resource limits, tunnel settings, and cloud sync. It declares proxy behavior; it does not manage the daemon process (that's the [CLI](CLI.md)).
+`mcpr.toml` declares **how the proxy behaves**: where to route traffic, how to handle CSP, resource limits, and cloud sync. It does not manage the daemon process (that's the [CLI](CLI.md)).
 
 mcpr searches the current directory, then parent directories, for `mcpr.toml`.
 
@@ -20,23 +20,8 @@ mcp = "http://localhost:9000"
 # Upstream MCP server (required)
 mcp = "http://localhost:9000/mcp"
 
-# Local proxy port (optional in tunnel mode -- picks random port if omitted)
+# Local proxy port (picks a random port if omitted)
 port = 3000
-
-# Disable tunnel -- local-only mode (set to true for production)
-
-[tunnel]
-# Enable tunnel for a public URL (default: false)
-# enabled = true
-
-# Relay server URL (default: https://tunnel.mcpr.app)
-relay_url = "https://tunnel.mcpr.app"
-
-# Tunnel authentication token (register at https://mcpr.app to get one)
-token = "90c74def-8fdc-4922-8702-44bc5cabf830"
-
-# Fixed subdomain (optional -- derived from token if omitted)
-subdomain = "myapp"
 
 # CSP — declare once, emitted to every widget meta in both shapes.
 # See docs/proxy/CSP.md for the full reference, including per-widget overrides.
@@ -44,10 +29,9 @@ subdomain = "myapp"
 # Bare public host (no scheme). Feeds the `openai/widgetDomain` meta
 # field and the proxy URL injected into widget CSP. `_meta.ui.domain`
 # is left untouched: Claude derives that field from the proxy URL and
-# rejects values supplied by anything in front of it. When unset, falls
-# back to the tunnel URL; in local-only mode (no tunnel, no override),
-# injection is suppressed rather than writing `localhost` into widget
-# config.
+# rejects values supplied by anything in front of it. When unset (e.g.
+# local-only dev), injection is suppressed rather than writing
+# `localhost` into widget config.
 domain = "widgets.example.com"
 
 [csp.connectDomains]
@@ -81,10 +65,6 @@ server = "my-server"
 |-------|-------------|
 | `mcp` | Upstream MCP server URL |
 | `port` | Local proxy port |
-| `[tunnel].enabled` | Enable tunnel for public URL (default: false) |
-| `[tunnel].relay_url` | Relay server URL |
-| `[tunnel].token` | Tunnel authentication token (from mcpr.app) |
-| `[tunnel].subdomain` | Fixed subdomain for tunnel |
 | `[csp].domain` | Bare public host for `openai/widgetDomain` and CSP injection. `_meta.ui.domain` is left to Claude, which derives it from the proxy URL — see [CSP](CSP.md) |
 | `[csp.*]` | Widget CSP declaration — see [CSP](CSP.md) |
 | `[cloud].token` | Cloud sync token from mcpr.app |

@@ -111,8 +111,7 @@ pub struct FileCspConfig {
     /// `openai/widgetDomain` meta field and the proxy-URL CSP injection.
     /// `_meta.ui.domain` is left untouched — Claude derives that field itself
     /// and rejects any value supplied by an MCP layer. When unset, the runtime
-    /// falls back to the tunnel URL or suppresses injection in local-only mode
-    /// rather than leaking `localhost` into widget config.
+    /// suppresses injection rather than leaking `localhost` into widget config.
     pub domain: Option<String>,
 
     #[serde(rename = "widget")]

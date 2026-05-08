@@ -17,7 +17,14 @@ mcpr proxy run mcpr.toml
 # → proxy "weather" running on :3000 → http://localhost:9001/mcp
 ```
 
-Paste the tunnel URL into ChatGPT or Claude as an MCP server. Ask it to "get the weather in Tokyo".
+To expose the proxy to ChatGPT or Claude, install [MCP Studio](https://pragmalabs.tech/studio):
+
+```bash
+curl -fsSL https://dl.pragmalabs.tech/mcp-studio/install.sh | sh
+mcp-studio open http://localhost:3000
+```
+
+Click **Publish** in the Studio header to get a public URL. Paste that into ChatGPT or Claude as an MCP server. Ask it to "get the weather in Tokyo".
 
 ## What's Inside
 

@@ -45,9 +45,8 @@ The setup flow:
 2. Authenticates with mcpr Cloud
 3. Lets you select or create a project
 4. Lets you select or create a server
-5. Optionally creates a tunnel endpoint
-6. Generates a project token
-7. Writes `mcpr.toml` with `[cloud]` config filled in
+5. Generates a project token
+6. Writes `mcpr.toml` with `[cloud]` config filled in
 
 If `mcpr.toml` already exists, setup reads existing values as defaults.
 
